@@ -1,0 +1,8 @@
+# build output
+/fold
+/fold[0-9]
+/t
+/v[0-9]
+/var[A-Z]
+*.o
+.roc-cache/
