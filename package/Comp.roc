@@ -353,12 +353,13 @@ Comp := [
         if c == Err(End) {
             Ok({ ast: Empty, i: st.i })
         } else if c == Ok(0x28) {
-            noncap = Comp.cp_at(st.toks, st.i + 1) == Ok(0x3F) and Comp.cp_at(st.toks, st.i + 2) == Ok(0x3A)
-            inner_i = if noncap { st.i + 3 } else { st.i + 1 }
-            match Comp.parse_alt({ src: st.src, toks: st.toks, i: inner_i }) {
+            # (?<flags>:...) non-capturing with flags, (?:...), or (...) capturing
+            grp = Comp.group_head(st.toks, st.i)
+            match Comp.parse_alt({ src: st.src, toks: st.toks, i: grp.inner }) {
                 Ok(inner) =>
                     if Comp.cp_at(st.toks, inner.i) == Ok(0x29) {
-                        node = if noncap { inner.ast } else { Group(inner.ast, 0) }
+                        folded = if grp.ci { Comp.fold_ast(inner.ast) } else { inner.ast }
+                        node = if grp.cap { Group(folded, 0) } else { folded }
                         Ok({ ast: node, i: inner.i + 1 })
                     } else {
                         Err(Comp.err_at(st.src, st.toks, st.i, GroupUnclosed))
@@ -382,6 +383,27 @@ Comp := [
             Ok({ ast: Chars({ neg: False, ranges: [{ lo: cp, hi: cp }] }), i: st.i + 1 })
         }
     }
+
+    # classify a group opener at `i` ('('): returns whether it captures, whether
+    # it is case-insensitive, and the index where the inner alternation starts.
+    group_head : List(Comp.Tok), U64 -> { cap : Bool, ci : Bool, inner : U64 }
+    group_head = |toks, i|
+        if Comp.cp_at(toks, i + 1) == Ok(0x3F) {
+            # (? ... : or )  — read flag letters until ':' or ')'
+            f = Comp.read_flags(toks, i + 2, { ci: False })
+            { cap: False, ci: f.ci, inner: f.i + 1 }
+        } else {
+            { cap: True, ci: False, inner: i + 1 }
+        }
+
+    read_flags : List(Comp.Tok), U64, { ci : Bool } -> { ci : Bool, i : U64 }
+    read_flags = |toks, i, acc|
+        match Comp.cp_at(toks, i) {
+            Ok(0x69) => Comp.read_flags(toks, i + 1, { ci: True })
+            Ok(0x3A) => { ci: acc.ci, i }
+            Ok(0x29) => { ci: acc.ci, i }
+            _ => Comp.read_flags(toks, i + 1, acc)
+        }
 
     parse_escape : Str, List(Comp.Tok), U64 -> Try(Comp.Out, Err.Error)
     parse_escape = |src, toks, i| {
@@ -552,13 +574,53 @@ Comp := [
         match Comp.cp_at(toks, i) {
             Err(_) => Err(Comp.err_at(src, toks, i, EscapeUnexpectedEof))
             Ok(0x64) => Ok({ ranges: Comp.ranges_d, i: i + 1 })
+            Ok(0x44) => Ok({ ranges: Comp.complement(Comp.ranges_d), i: i + 1 })
             Ok(0x77) => Ok({ ranges: Comp.ranges_w, i: i + 1 })
+            Ok(0x57) => Ok({ ranges: Comp.complement(Comp.ranges_w), i: i + 1 })
             Ok(0x73) => Ok({ ranges: Comp.ranges_s, i: i + 1 })
+            Ok(0x53) => Ok({ ranges: Comp.complement(Comp.ranges_s), i: i + 1 })
+            Ok(0x70) => Comp.class_prop(src, toks, i + 1, False)
+            Ok(0x50) => Comp.class_prop(src, toks, i + 1, True)
             Ok(0x6E) => one(10)
             Ok(0x74) => one(9)
             Ok(0x72) => one(13)
             Ok(v) => one(v)
         }
+    }
+
+    # \p{Name}/\P{Name} as a class item: property ranges (complemented for \P).
+    class_prop : Str, List(Comp.Tok), U64, Bool -> Try({ ranges : List(Comp.Rng), i : U64 }, Err.Error)
+    class_prop = |src, toks, i, neg|
+        if Comp.cp_at(toks, i) == Ok(0x7B) {
+            match Comp.find_brace(toks, i + 1) {
+                Err(_) => Err(Comp.err_at(src, toks, i, ClassUnclosed))
+                Ok(j) =>
+                    match Uni.lookup(Comp.slice_str(toks, i + 1, j)) {
+                        Ok(hex) => {
+                            rs = Uni.ranges(hex)
+                            Ok({ ranges: if neg { Comp.complement(rs) } else { rs }, i: j + 1 })
+                        }
+                        Err(_) => Err(Comp.err_at(src, toks, i, EscapeUnrecognized))
+                    }
+            }
+        } else {
+            Err(Comp.err_at(src, toks, i, EscapeUnrecognized))
+        }
+
+    # complement of a set of ranges over [0, 0x10FFFF] (ranges assumed the union
+    # from a property; sorted+merged first).
+    complement : List(Comp.Rng) -> List(Comp.Rng)
+    complement = |ranges| {
+        sorted = List.sort_with(ranges, |a, b| U32.compare(a.lo, b.lo))
+        r = List.fold(sorted, { out: [], next: 0 }, |st, rg|
+            if rg.lo > st.next {
+                { out: List.append(st.out, { lo: st.next, hi: rg.lo - 1 }), next: rg.hi + 1 }
+            } else if rg.hi + 1 > st.next {
+                { out: st.out, next: rg.hi + 1 }
+            } else {
+                st
+            })
+        if r.next <= 0x10_FFFF { List.append(r.out, { lo: r.next, hi: 0x10_FFFF }) } else { r.out }
     }
 
 
