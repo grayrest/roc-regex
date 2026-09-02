@@ -115,29 +115,36 @@ Rev := [].{
     # first Match. `stack` is processed front-to-back (DFS, higher priority
     # first). Returns Char/Match pcs in priority order, deduped keeping first.
     close_pri : List(U32), List(U32), List(U32), List(U32) -> List(U32)
-    close_pri = |prog, splits, stack, out|
+    close_pri = |prog, splits, stack, out| Rev.close_go(prog, splits, stack, [], out)
+
+    # `seen` tracks EVERY visited pc (split/jmp/save included), so an epsilon
+    # cycle through a nullable loop (e.g. `(a*)+`) terminates. `out` is the
+    # priority-ordered Char/Match result; truncated at the first Match.
+    close_go : List(U32), List(U32), List(U32), List(U32), List(U32) -> List(U32)
+    close_go = |prog, splits, stack, seen, out|
         match List.first(stack) {
             Err(_) => out
             Ok(pc) => {
                 rest = List.drop_first(stack, 1)
-                if List.contains(out, pc) {
-                    Rev.close_pri(prog, splits, rest, out)
+                if List.contains(seen, pc) {
+                    Rev.close_go(prog, splits, rest, seen, out)
                 } else {
+                    seen2 = List.append(seen, pc)
                     w = List.get(prog, pc.to_u64()) ?? 0
                     op = Comp.inst_op(w)
                     arg = Comp.inst_arg(w)
                     if op == Comp.op_split {
                         t1 = List.get(splits, arg.to_u64()) ?? 0
                         t2 = List.get(splits, (arg + 1).to_u64()) ?? 0
-                        Rev.close_pri(prog, splits, List.concat([t1, t2], rest), out)
+                        Rev.close_go(prog, splits, List.concat([t1, t2], rest), seen2, out)
                     } else if op == Comp.op_jmp {
-                        Rev.close_pri(prog, splits, List.prepend(rest, arg), out)
+                        Rev.close_go(prog, splits, List.prepend(rest, arg), seen2, out)
                     } else if op == Comp.op_save {
-                        Rev.close_pri(prog, splits, List.prepend(rest, pc + 1), out)
+                        Rev.close_go(prog, splits, List.prepend(rest, pc + 1), seen2, out)
                     } else if op == Comp.op_match {
                         List.append(out, pc)
                     } else {
-                        Rev.close_pri(prog, splits, rest, List.append(out, pc))
+                        Rev.close_go(prog, splits, rest, seen2, List.append(out, pc))
                     }
                 }
             }
