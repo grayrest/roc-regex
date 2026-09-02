@@ -370,8 +370,9 @@ Position : { offset : U64, line : U32, col : U32 }   # offset BYTES, col CODEPOI
 Error : { pattern : Str, at : [Whole, At(Span)], aux : [NoAux, Aux(Span)], kind : ErrorKind }
 ```
 
-`Position` carries **both units** because the formatter's cut is a byte cut and
-the caret is a column. `at` is optional because D13's budget errors have no
+`Position` carries `offset` in **bytes** (for slicing) and `col` in **display
+columns** (for the caret), because the compile-time formatter reflows on display
+width. `at` is optional because D13's budget errors have no
 offset. ~47 kinds, tracking `regex-syntax` names so the differential harness
 maps 1:1, plus two this design creates: `UnicodePropertyNotInTier` (so a Tier B
 property is distinguishable from a typo) and `ByteSyntaxUnsupported` (so D3's
@@ -383,11 +384,22 @@ size the raise without both.
 a message.** An opaque `Error` would make D13's budgets unusable, and is not
 implementable today anyway.
 
-**Renderer contract.** The compile-time crash formatter hard-wraps at 80 bytes,
-breaks mid-token, and splits UTF-8 — so the pattern excerpt budget is **72
-bytes** and the renderer emits a **window**, not the pattern: the span's line if
-it fits, else a byte-budgeted window snapped to codepoint boundaries with ASCII
-`...` elision and a recomputed caret column. Escape tabs and controls before
+**Renderer contract.** The compile-time crash formatter reflows at **80 display
+columns** (4-space indent + 76 of content), East-Asian-width aware, combining
+marks counted as zero, wrapping at word boundaries and never splitting a
+codepoint. With D7's `  | ` gutter and both `...` elisions that leaves a
+**66-display-column** excerpt budget. The renderer emits a **window**, not the
+pattern: the span's line if it fits, else a window measured in display columns,
+snapped to codepoint boundaries, with ASCII `...` elision and a caret column
+recomputed in display columns over the escaped text.
+
+> **Corrected 2026-09-02.** Rev-2 originally said the formatter "hard-wraps at 80
+> bytes, breaks mid-token, and splits UTF-8", giving a 72-**byte** budget. All
+> three premises are false — measured, it never split a codepoint and it breaks
+> at spaces — and 72 bytes rendered through a real compile-time crash produces
+> the mangled, caret-detached output the rule exists to prevent. The unit error
+> also mattered on its own: a codepoint column puts the caret **12 columns left
+> of target** on CJK. Escape tabs and controls before
 windowing. `render` is total and bounded. Ship `Regex.unwrap` and
 `Regex.unwrap_labeled` — with three top-level regexes all reporting at
 `file:1:1`, a caller-supplied label is worth more than the caret.
@@ -424,8 +436,22 @@ itself**, and D9 excludes invalid-UTF-8 haystacks from the crate comparison.
    value**. D3's original cost note ("a third look-behind value") is the wrong
    half: it alone makes the forward and reverse DFAs disagree 787 times. The
    determinizer flag has **four** valid combinations, not three.
-6. **A haystack beginning with a continuation byte** reports an empty match at
-   offset 0 where Rust does not. Deliberate; document it.
+6. **An empty match is reported at the start of every `Invalid` run.** Where
+   that run begins with a continuation byte, this is a position
+   `regex-automata`'s `util/utf8.rs:118-131` rejects as a boundary — and it
+   occurs at offset 0 **and immediately after any valid codepoint**, not only at
+   offset 0.
+7. **Outside rules 1–6, behaviour on invalid input is undefined and untested.**
+   Measured over a v1-scoped fuzz (12,000 patterns, 96,000 checks): rules 1–6
+   account for most divergence from `regex::bytes`, and **2,254 checks (2.3%)
+   are explained by no rule**, including non-empty span differences. Do not read
+   this spec as total.
+
+> **Corrected 2026-09-02.** Rule 6 previously read "a haystack beginning with a
+> continuation byte reports an empty match at offset 0 where Rust does not."
+> Both halves were wrong: `regex::bytes` *does* report it (the codepoint model
+> instead misses one at offset 1), and the phenomenon is not confined to offset
+> 0. Rule 7 is new, and is the honest statement of how far this spec reaches.
 
 ### D9 — Two-path corpus, differential harness early
 
@@ -539,9 +565,19 @@ and because literals fold, a build-time one as well.
 ### D14 — Empty-match semantics
 
 The iterator advance rule: keep `last_match_end`; if a match is empty and its end
-equals `last_match_end`, discard it and re-search from **`start + 1` byte** — one
-byte, not one codepoint. Someone "improving" that to a codepoint step passes the
-corpus and is wrong. An empty match at end of haystack is reported. Suppression
+equals `last_match_end`, discard it and re-search from **the next symbol
+boundary** — one symbol step. An empty match at end of haystack is reported.
+
+> **Corrected 2026-09-02.** Rev-2 originally said "`start + 1` byte — one byte,
+> not one codepoint" and warned that a codepoint step "passes the corpus and is
+> wrong". That is backwards. From a symbol start, `+1 byte` is either the next
+> symbol or a position *inside* one; `util/empty.rs:106-125` gives only two
+> reasons the per-codepoint step is unsafe — `(?-u:\B)` and a configurable line
+> terminator — and D3 defers the first while D9 puts the second out of v1. The
+> verified prototype steps one symbol (`inv/src/search.rs:150`), and it is the
+> implementation that passed the corpus. The byte reading was also the only
+> construction in this design capable of producing a mid-codepoint offset, i.e.
+> the only thing that could fire D15's `crash`. Suppression
 is **positional, not global** — `b|` on `"abc"` gives `[0,0],[1,2],[3,3]`.
 
 Two rules rev-1 omitted: a **half match** has no start, so its discard condition
@@ -646,8 +682,11 @@ measurement at M1.
    pattern across a package boundary — payload `U64`, `Str`, a record, or a tag
    union. Rev-1 recorded this as needing a record containing a `List`; it is
    wider.
-3. **Bug or feature request:** the compile-time crash formatter hard-wraps at 80
-   bytes, breaks mid-token, and splits UTF-8 mid-codepoint. If fixed, D7's
-   windowing could widen and its dual-unit rule could collapse.
+3. **Feature request (rewritten 2026-09-02):** the compile-time crash formatter
+   reflows the message on display width. It is well-behaved — word-wrapping,
+   width-aware, never splitting a codepoint — but a library that renders its own
+   caret diagram has to reverse-engineer the wrap to stay inside it. The ask is
+   an opt-out: emit a crash message verbatim. *The earlier version of this item
+   reported a byte-wrapping UTF-8-splitting bug that does not exist.*
 4. **Feature request:** `Iter` has no `any`, `find_first` or `take_while`, which
    costs an API decision in D15 and is a far smaller ask than (1).
