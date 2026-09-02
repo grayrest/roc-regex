@@ -53,12 +53,16 @@ paths (`find_all`, `is_match`, prefiltered `find`), including Unicode classes,
 | `Comp` | M1/M1.5/M2/M4 | parser, AST, NFA compiler, captures, `\p{}`/`(?i)`, prefix extraction |
 | `Trie` | M1 | S1 partition + S2 class trie |
 | `Pike` | M1/M1.5/M4 | PikeVM with slots; anchored `match_at` |
-| `Dfa` | M3 | forward determinizer, budget, downgrade |
+| `Rev` | M3 | leftmost determinizer, reverse DFA, three-pass `find` (D5) |
 | `Uni` | M2 | generated Unicode Tier A tables (packed) |
 | `Lit` | M4 | prefilter seam |
 | `Regex` / `Err` | all | public surface; D7 error + renderer |
 
-Honest gaps: full `\p{}` breadth, `(?i:...)` scoped flags, the reverse DFA and
-three-pass `find` (D5 — `find` is PikeVM), Unicode `\b` in the DFA, and the
-shared-vs-per-pattern trie decision (D3 fork). Each is noted in the milestone
+`find` is the D5 three-pass span finder (forward DFA end + reverse DFA start,
+both leftmost-first, folded into the artifact); captures/`replace`/`split` layer
+on the PikeVM. Validated 240/240 vs the PikeVM and 180/180 directly vs Rust.
+
+Honest gaps: full `\p{}` breadth, `(?i:...)` scoped flags, Unicode `\b` in the
+DFA (look patterns use the PikeVM), captures direct from the reverse pass, and
+the shared-vs-per-pattern trie decision (D3 fork). Each is in the milestone
 notes under `notes/`.
