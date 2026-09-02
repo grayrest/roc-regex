@@ -382,7 +382,15 @@ size the raise without both.
 
 **`kind` is public and matchable; `render` is the only supported way to produce
 a message.** An opaque `Error` would make D13's budgets unusable, and is not
-implementable today anyway.
+implementable today anyway (Owed upstream 2).
+
+**Every field of `Error` and of `Regex` is documented as unstable** (decided
+2026-09-02). Roc has no field privacy and the nominal type that would give it
+segfaults the compiler, so the layout is public whether or not that is intended.
+Documenting instability is the only lever available; it costs nothing now and
+keeps M3 free to add the forward and reverse tables without a breaking change.
+The cost is that it is a convention with no enforcement — a caller who reads the
+fields breaks later and nothing warns them.
 
 **Renderer contract.** The compile-time crash formatter reflows at **80 display
 columns** (4-space indent + 76 of content), East-Asian-width aware, combining
@@ -677,11 +685,17 @@ measurement at M1.
    constant arguments when other arguments are runtime. This is the missing
    partial-evaluation step behind D2's `compile_with` cliff, and every library
    that wants to exploit compile-time evaluation will hit the same wall.
-2. **Bug:** SIGSEGV in `postcheck/monotype/lower.zig:16175 instNodeContent` for
-   **any** data-carrying nominal type with a methods block unwrapped via a lambda
-   pattern across a package boundary — payload `U64`, `Str`, a record, or a tag
-   union. Rev-1 recorded this as needing a record containing a `List`; it is
-   wider.
+2. **Bug — WRITTEN UP 2026-09-02**, ready to file:
+   [`upstream/2026-09-02-nominal-methods-segfault.md`](../upstream/2026-09-02-nominal-methods-segfault.md).
+   SIGSEGV in `postcheck/monotype/lower.zig:16175 instNodeContent` for **any**
+   data-carrying nominal type with a methods block destructured by a lambda
+   argument pattern. Reproduces in a single file (no package needed), for payloads
+   `U64`, `Str`, a record and a tag union, and independently of folding. A `match`
+   unwrap avoids the segfault but yields a spurious type mismatch on the
+   constructor plus a compile-time crash attributed to the app header's platform
+   URL. Checked against the tracker: nothing matching is filed.
+
+   This is the bug behind D7's and D10's transparent records — see the note there.
 3. **Feature request (rewritten 2026-09-02):** the compile-time crash formatter
    reflows the message on display width. It is well-behaved — word-wrapping,
    width-aware, never splitting a codepoint — but a library that renders its own
