@@ -202,7 +202,7 @@ was run for the wrong reason (nothing downstream depended on it).
   HIR class expansion, class set operations, simple case folding. `range_trie.rs`
   and `utf8.rs` (~1,643 lines, the hardest code in the original) are **not
   needed** — D3 deletes UTF-8 automata.
-- **M3 — determinizer and dense DFA. DONE 2026-09-02** (`14fa8f0` forward DFA; `5f0fb03` reverse DFA + three-pass `find`, D5; [notes](../notes/2026-09-02-m3-threepass.md)). Look-`\b` in the DFA still deferred. Forward and reverse tables over M2's class
+- **M3 — determinizer and dense DFA. DONE 2026-09-02** (`14fa8f0` forward DFA; `5f0fb03` reverse DFA + three-pass `find`, D5; `186ef1c` epsilon-cycle fix, full 1431/1431; [notes](../notes/2026-09-02-m3-threepass.md)). Unicode `\b` in the DFA analyzed and deliberately deferred (3 coupled components; PikeVM handles look patterns correctly) — rationale in the note. Forward and reverse tables over M2's class
   pass, D5's three passes and its 8 start configurations, D11's forward-only
   pattern IDs, D13 budgets 4 and 5, D10's downgrade and its `engine` field's
   `Dfa` arm, D8's determinizer flag combinations. The differential fuzzing

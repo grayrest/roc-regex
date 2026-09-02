@@ -58,3 +58,38 @@ case at runtime via `List.map`, so it pays full determinization ×1431 and takes
 Still deferred: Unicode `\b` in the DFA (look patterns use the PikeVM), captures
 directly from the reverse pass (they layer on `match_at`), and stride/`U16`
 minimisation.
+
+## Unicode `\b` in the DFA — analyzed, deliberately not shipped
+
+Routing look-bearing patterns through the DFA (instead of the PikeVM) is the one
+M3 item I did **not** build, after working out what it actually requires. It is
+three coupled changes, not one, and the PikeVM already handles `\b`/`^`/`$`
+correctly — so a rushed version would only risk the validated engine. The
+codepoint study (`notes/2026-09-01-codepoint-alphabet.md`) proved it is
+*possible*; the components are:
+
+1. **A word-aware partition.** `\b` compiles to a `Look`, not a `Char`, so `\w`'s
+   range endpoints are not cut points. An atom like `['o'+1, 0x10FFFF]` then
+   mixes word and non-word codepoints, and `word(atom)` — which `\b` needs — is
+   undefined. The trie partition (S1) must inject `\w`'s cuts whenever the
+   pattern contains `\b`, so every atom is uniformly word or non-word.
+
+2. **A look-aware, two-phase closure.** A DFA state must carry a `prev_word` bit
+   (and an at-start bit) as part of its identity, because `\b` at a position
+   depends on both the previous symbol (in the state) and the next (the
+   transition symbol). Look edges cannot be closed at state-creation — only the
+   unconditional ε-edges can; the `Look` edges are resolved per transition, with
+   `\b` evaluated from `prev_word` and `word(class)`. `^`/`$` fold into the start
+   state and an EOI transition. This is `regex-automata`'s
+   `util/determinize/mod.rs` model, and its subtlety is exactly where the plan
+   warns determinization bugs live.
+
+3. **The same for the reverse DFA**, whose `\b` reads the symbol on the other
+   side.
+
+Each is testable against the crate, but together they are a multi-hundred-line
+determinizer with a high divergence risk, for a speed gain on patterns that are
+already correct. It stays on the PikeVM, deferred with this rationale rather than
+hand-waved. `is_match`/`find`/`captures`/`replace`/`split` are all correct for
+`\b` patterns today via that fallback (the full 1431 differential includes
+`\bcat\b`, `\Bcat`, `^abc`, `abc$`).
