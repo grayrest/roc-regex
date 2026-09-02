@@ -1,7 +1,6 @@
 # roc-regex rev-2 — Rust's regex crate over a codepoint alphabet, with the AOT step replaced by constant folding
 
-**Status: NOT REVIEWED as a document. Fourteen decisions, of which eleven rest
-on measurement and three do not. No implementation.**
+**Status: NOT REVIEWED as a document. Fifteen decisions. No implementation.**
 
 Rev-2 folds [rev-1](2026-09-01-roc-regex.md) and its fourteen in-place
 amendments into clean decisions. Rev-1 is the record: written from one design
@@ -88,7 +87,7 @@ Four things differ from the original, all forced:
 | folded lists are packed at element width | `U32` 1M elems → 4.00 B/elem of binary |
 | folding stops at the first runtime argument | `f("lit", runtime)`: build 0.29 s, **run 0.62 s** |
 | a fold crash is a build error | `✗ compile time crash`, quoting the message |
-| **byte→codepoint state collapse** | `\w{10,20}`: 19,959 → **59** states; 113 → **2** classes |
+| **byte→codepoint state collapse** | `\w{10,20}`: 38,505 → **79** states; 19,714,560 → **1,264** bytes (one rig, both directions) |
 | **Unicode `\b` over codepoints** | 4,810,141 differential checks vs the crate, **0 disagreements** |
 | **pattern IDs at N=1** | identical states, bytes, time, state-key bytes |
 | **fold cost, 276-char Unicode pattern** | byte 1.66 s / 745 MB → codepoint 0.31 s / 140 MB |
@@ -109,7 +108,7 @@ v1 is `compile`, `compile_with`, `is_match`, `find`, `find_iter`, `captures`,
    `\b{start}`/`\b{end}` cases became reachable when D3 reversed) — passing on
    **both** paths;
 2. a differential campaign of a stated size against the Rust crate with **zero**
-   divergences, with invalid-UTF-8 haystacks **excluded by construction** (D7
+   divergences, with invalid-UTF-8 haystacks **excluded by construction** (D8
    explains why there is no oracle there);
 3. SR4's pre-registered throughput floor, met;
 4. SR1's artifact budget and SR2's RSS budget, met for a named ten-pattern
@@ -153,8 +152,8 @@ Each names a threshold, a measurement and the moment it is evaluated.
 6. **The folded path's envelope is documented and enforced.** The compiler's
    parser stack aborts between **4,500 and 4,600 characters**, alphabet-
    independent, at ~376 MB, with no file, no line, and the last-named definition
-   being one that succeeded. D13's nest and size limits are set below it and
-   apply to **both** paths — nothing lets a function know it is being folded, so
+   being one that succeeded. D13's pattern-length budget is set below it and
+   applies to **both** paths — nothing lets a function know it is being folded, so
    a folded-only limit is not implementable.
 
 ## Build order
@@ -221,7 +220,8 @@ diagnostic.
 
 Transitions are over **codepoint equivalence classes**, measured at 2–9 per
 pattern. Rev-1's byte orientation is reversed: 99.1–99.7% of a `\w`-family byte
-DFA's states are UTF-8 bookkeeping (`\w{10,20}`: 19,959 → 59 states), and no
+DFA's states are UTF-8 bookkeeping (`\w{10,20}`: **38,505 → 79** states,
+forward+reverse, from the verified prototype), and no
 table encoding rescues it — sparse gets 3.8× at 2.8–6.4× search cost, row
 deduplication saves a median 2% and is sometimes negative, stride padding is a
 median 11.7%.
@@ -238,15 +238,25 @@ comparison understates the byte side, whose real cost with an exercised table is
 10.6 ns/symbol. The packed range list is the right storage format and the wrong
 lookup path.
 
+*Rev-1 published this pair as "19,959 → 59", assembled from two different rigs
+— a `regex-automata` `dense::DFA` sweep and the prototype — whose byte-state
+counts for this pattern differ by 1.93× under different builder configs, and
+whose codepoint figure came from hard-coded constants in a third. The pair above
+is self-consistent from one rig. The two rigs are still unreconciled; it does
+not move the conclusion, and it should not be quoted as if it did.*
+
 **The class trie is per-pattern and is the largest object in the artifact:**
 38,272 B for `\w{10,20}` against a 544 B transition table, 4,992 B floor for
 `[a-z]+`. Rev-1's size figures were transition-table bytes only and omitted it
-entirely; the honest byte→codepoint win is roughly **48×, not 324×**.
+entirely; the honest byte→codepoint win is roughly **48×, not 324×** — a
+measured byte median of 2,158,336 B against an estimated codepoint table plus a
+measured 38,272 B trie. That figure is part estimate and stays one until M1's
+gate measures a real artifact.
 
 **Undecodable bytes get an explicit `Invalid` symbol class**, chosen over
 dropping byte mode and over carrying two alphabets, so matching arbitrary
-`List(U8)` is defined rather than undefined. Its rules are D7's companion
-decision below. **What is given up:** patterns that address individual bytes —
+`List(U8)` is defined rather than undefined. Its rules are D8. **What is given
+up:** patterns that address individual bytes —
 `(?-u:.)`, `(?-u:[^a])`, `regex::bytes` semantics — about 40 corpus cases.
 ASCII-only `(?-u)` patterns keep their meaning, verified.
 
@@ -287,8 +297,8 @@ anchored PikeVM over that span fills capture slots.
 
 **Start-state configuration is not optional.** There is no single start state:
 **8 configurations** over codepoints — the crate's six, with `WordByte` split
-into ASCII-word and non-ASCII-word, plus `CustomLineTerminator` and `Invalid` —
-times anchored/unanchored, deduping in practice to about six distinct states.
+into ASCII-word and non-ASCII-word (7), plus `Invalid` (8) — times
+anchored/unanchored, deduping in practice to about six distinct states.
 Forward selects from the codepoint ending at `start`; **reverse selects from the
 codepoint beginning at `end`**. Verified load-bearing: merging the word split
 away produces 9,060 fuzz disagreements and thousands of forward/reverse
@@ -500,23 +510,28 @@ during a root's evaluation, and every rule follows from that.
 With flat construction, N regex constants cost N × artifact storage and nothing
 else (two patterns: 1.06×, not 1.91×), so there is no reason to serialize folds.
 
-### D13 — Four budgets, checked during construction
+### D13 — Five budgets, checked during construction
 
 D10's artifact cap is checked on the *result*; every explosion happens upstream
 of it. `((a{100}){100}){100}` — twenty characters — is 1,020,205 NFA states and
 61 s of determinization; Rust rejects it in 5 ms.
 
-1. **AST nest limit**, while parsing.
-2. **NFA size limit**, checked *during* expansion — expansion is where the
+1. **Pattern length and AST node count**, while parsing. SR6 delegates the
+   folded path's envelope to D13, and neither a nest limit nor an NFA size limit
+   can see it coming: the parser stack aborts on a **flat** 4,600-character
+   pattern whose nest depth is 1 and whose NFA is small. Without this budget SR6
+   has no mechanism.
+2. **AST nest limit**, while parsing.
+3. **NFA size limit**, checked *during* expansion — expansion is where the
    multiplier lives.
-3. **Determinizer state count**, checked *during* determinization. A finished-
+4. **Determinizer state count**, checked *during* determinization. A finished-
    artifact cap cannot see 2,740,293 states coming; multi-pattern shapes that
    share an unbounded-class suffix grow ×5–7 per added pattern.
-4. **Determinizer transient allocation**, bounding the build rather than the
+5. **Determinizer transient allocation**, bounding the build rather than the
    result.
 
-All four return `Err` through D7's `Try`, so a literal bomb fails the build with
-a message and a runtime bomb returns an error. All four apply to both paths at
+All five return `Err` through D7's `Try`, so a literal bomb fails the build with
+a message and a runtime bomb returns an error. All five apply to both paths at
 the folded path's ceiling (D1, SR6). D1 admits attacker-supplied patterns, so
 without these the library is a remote DoS in any program that greps user input —
 and because literals fold, a build-time one as well.
@@ -544,7 +559,7 @@ configurable line terminator return, the re-search loop returns with them.
 The advance rule must be an **internal loop inside `Iter.custom`'s step**, since
 that API cannot emit `Skip`. So `find_iter`'s step is not a single search.
 
-**D8's `replace` totality depends on this decision being right.** `""` split on
+**D15's `replace` totality depends on this decision being right.** `""` split on
 `"☃"` must give `["","☃",""]`; it is the one-line test that catches a breakage.
 
 ### D15 — `replace`, `split`, and the iteration primitive
@@ -607,8 +622,9 @@ measurement at M1.
    a real engine. M1 is the test, and the abandonment criterion hangs on it.
 2. **The `Invalid` class as specified in D8.** Rules 1–6 are a written spec with
    no oracle. Rule 3 and rule 5 were found by measurement; the rest are reasoned.
-3. **`CustomLineTerminator` as D5's 8th start configuration.** Reasoned only, and
-   D9 lists the 11 line-terminator cases as unreachable in v1.
+3. **`CustomLineTerminator` as a start configuration.** It is one of the crate's
+   six and D5 carries it, but the verified prototype dropped it — so it is
+   reasoned only, and D9 lists the 11 line-terminator cases as unreachable in v1.
 4. **The shared-versus-per-pattern class trie fork** (D3), and therefore
    SR1's threshold and D10's default.
 5. **The group-name table's size** (D15's fork).
