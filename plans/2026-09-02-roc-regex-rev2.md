@@ -490,9 +490,17 @@ and worse without unchecked indexing. `U32` state ids; at measured state counts
 of 16–79, width is no longer a size question.
 
 **The budget is `max_artifact_bytes`, measured as forward table + reverse table
-+ class trie.** Rev-1 denominated it on the transition tables alone, which
-omitted the largest object in the design. The default has **no source yet** and
-is set by M1's gate.
++ class trie + NFA program.** Rev-1 denominated it on the transition tables
+alone, omitting the largest object in the design; rev-2 then added the trie and
+omitted the NFA, which D5 makes resident in every three-pass search and D10 makes
+the downgrade target.
+
+**Provisional default: 256 KB** (decided 2026-09-02). Measured single-pattern
+artifacts are ~45 KB, dominated by the class trie, so this is ~5× headroom for an
+ordinary pattern while still firing on pathological ones — which it must, since
+this decision requires a corpus case that actually triggers the downgrade. M1's
+gate revises it; it is provisional precisely to break the circularity of a
+default that only its own gate could supply.
 
 **Exceeding it is a silent downgrade to the PikeVM with identical semantics —
 and D13's budgets are the ones that `Err`.** The split is: D10's budget is a
@@ -563,6 +571,21 @@ of it. `((a{100}){100}){100}` — twenty characters — is 1,020,205 NFA states 
    share an unbounded-class suffix grow ×5–7 per added pattern.
 5. **Determinizer transient allocation**, bounding the build rather than the
    result.
+
+**Defaults, decided 2026-09-02.** Pattern length **1,000** characters — real
+production patterns top out around 250–300, the measured parser-stack ceiling is
+4,500–4,600 on one rig, and frame shape moves that by 4× (49,859 frames small vs
+12,292 fat), so the real ceiling of the real parser is unknown and 1,000 is the
+number that does not bet on a measurement taken from a different program. Raise
+it once CI bisects the actual abort point of `compile` (SR6). Nest limit **250**
+and NFA size limit **10 MB**, both Rust's, the latter costing ~100 MB of fold at
+D12's ~10 bytes of compiler RSS per artifact byte — inside SR2. Budget 5 is
+deferred to M3: pure Roc cannot observe its own allocation, so it needs a proxy.
+
+**Budget 4 is derived, not chosen:** `max_artifact_bytes / (stride × 4)`, tracked
+incrementally during determinization, and **taking D10's downgrade terminates
+determinization**. That control-flow ordering — not two hopefully-disjoint
+constants — is what stops D10 and D13 from both firing on one pattern.
 
 All five return `Err` through D7's `Try`, so a literal bomb fails the build with
 a message and a runtime bomb returns an error. All five apply to both paths at
