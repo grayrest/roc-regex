@@ -35,6 +35,31 @@ Pike := [].{
         Pike.run(c, hay, len, ns, at, { ths: [], seen: [] }, Err(NoMatch))
     }
 
+    ## Anchored: does the pattern match starting exactly at `at`? Seeds one
+    ## thread at `at` and never re-seeds, so the match (if any) starts at `at`.
+    ## Used by the M4 prefilter, which supplies candidate start positions.
+    match_at : Comp.Compiled, List(U8), U64 -> Pike.M
+    match_at = |c, hay, at| {
+        len = List.len(hay)
+        ns = (c.n_groups.to_u64() + 1) * 2
+        cl = Pike.add(c, hay, at, len, { ths: [], seen: [] }, { pc: 0, slots: List.repeat(Pike.no_pos, ns) })
+        Pike.arun(c, hay, len, at, cl, Err(NoMatch))
+    }
+
+    # like run, but never seeds new starts (anchored)
+    arun : Comp.Compiled, List(U8), U64, U64, Pike.Cl, Pike.M -> Pike.M
+    arun = |c, hay, len, pos, cl, matched| {
+        step = Pike.exec(c, hay, pos, len, cl.ths, 0, { ths: [], seen: [] }, matched)
+        if pos >= len {
+            step.matched
+        } else if List.is_empty(step.cl.ths) {
+            step.matched
+        } else {
+            npos = pos + Comp.decode(hay, pos).len
+            Pike.arun(c, hay, len, npos, step.cl, step.matched)
+        }
+    }
+
     no_pos : U64
     no_pos = 0xFFFF_FFFF_FFFF_FFFF
 

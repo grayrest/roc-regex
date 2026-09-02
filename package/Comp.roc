@@ -42,6 +42,7 @@ Comp := [
         splits : List(U32),
         classes : Trie.T,
         n_groups : U32,
+        prefix : List(U8),
     }
 
     # --- instruction encoding -------------------------------------------------
@@ -99,12 +100,13 @@ Comp := [
                         ast1 = if ci { Comp.fold_ast(st.ast) } else { st.ast }
                         numbered = Comp.number(ast1, 1)
                         n_groups = numbered.next - 1
+                        prefix = Comp.prefix_of(numbered.ast)
                         # wrap in group 0: Save0 ; body ; Save1 ; Match
                         prog0 = { prog: [Comp.inst(Comp.op_save, 0)], sets: [], splits: [], n_sets: 0 }
                         p1 = Comp.emit(prog0, numbered.ast, 1)
                         p2 = Comp.push_inst(p1, Comp.inst(Comp.op_save, 1))
                         prog = List.append(p2.prog, Comp.inst(Comp.op_match, 0))
-                        Ok({ prog, splits: p2.splits, classes: Trie.build(p2.sets), n_groups })
+                        Ok({ prog, splits: p2.splits, classes: Trie.build(p2.sets), n_groups, prefix })
                     }
                 Err(e) => Err(e)
             }
@@ -585,6 +587,56 @@ Comp := [
             s = Comp.number(x, acc.next)
             { list: List.append(acc.list, s.ast), next: s.next }
         })
+
+    # --- M4: required-literal prefix extraction (D6) --------------------------
+    #
+    # The bytes every match must begin with. Only exact single-codepoint literals
+    # count; the walk stops at the first class, group, alternation or quantifier.
+    # A prefilter scans for this prefix and the engine runs anchored at each hit.
+
+    prefix_of : Comp -> List(U8)
+    prefix_of = |ast|
+        match ast {
+            Cat(xs) => Comp.prefix_cat(xs, [])
+            Group(x, _) => Comp.prefix_of(x)
+            Chars(cs) => Comp.lit_byte(cs)
+            _ => []
+        }
+
+    prefix_cat : List(Comp), List(U8) -> List(U8)
+    prefix_cat = |xs, acc|
+        match List.first(xs) {
+            Err(_) => acc
+            Ok(x) => {
+                b = Comp.lit_prefix_node(x)
+                if List.is_empty(b) {
+                    acc
+                } else {
+                    Comp.prefix_cat(List.drop_first(xs, 1), List.concat(acc, b))
+                }
+            }
+        }
+
+    # bytes contributed by a node if it is an exact literal, else []
+    lit_prefix_node : Comp -> List(U8)
+    lit_prefix_node = |ast|
+        match ast {
+            Chars(cs) => Comp.lit_byte(cs)
+            Group(x, _) => Comp.prefix_of(x)
+            _ => []
+        }
+
+    # a Chars node that is exactly one codepoint (not negated, single range lo==hi)
+    lit_byte : { neg : Bool, ranges : List(Comp.Rng) } -> List(U8)
+    lit_byte = |cs|
+        if cs.neg {
+            []
+        } else {
+            match cs.ranges {
+                [r] => if r.lo == r.hi { Comp.enc_cp(r.lo) } else { [] }
+                _ => []
+            }
+        }
 
     # --- NFA compiler (S3): forward-only, sizes precomputed --------------------
 

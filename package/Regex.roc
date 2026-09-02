@@ -9,6 +9,7 @@ import Comp
 import Pike
 import Trie
 import Dfa
+import Lit
 import Err
 
 Regex := [].{
@@ -16,7 +17,7 @@ Regex := [].{
     ## always the PikeVM; the `Dfa` arm and its tables are M3.
     ## The `engine` field records M3's outcome (D10): `Dfa` for a look-free
     ## pattern whose table fit the budget, else `Pike`. Documented-unstable.
-    T : { prog : List(U32), splits : List(U32), classes : Trie.T, n_groups : U32, engine : [Pike, Dfa(Dfa.T)] }
+    T : { prog : List(U32), splits : List(U32), classes : Trie.T, n_groups : U32, prefix : List(U8), engine : [Pike, Dfa(Dfa.T)] }
 
     ## A match, as half-open BYTE offsets into the haystack (D3, D15).
     Span : { start : U64, end : U64 }
@@ -34,7 +35,7 @@ Regex := [].{
                         Ok(d) => Dfa(d)
                         Err(_) => Pike
                     }
-                Ok({ prog: c.prog, splits: c.splits, classes: c.classes, n_groups: c.n_groups, engine })
+                Ok({ prog: c.prog, splits: c.splits, classes: c.classes, n_groups: c.n_groups, prefix: c.prefix, engine })
             }
         }
 
@@ -56,9 +57,27 @@ Regex := [].{
             Err(e) => crash "[${label}] ${Err.render(e)}"
         }
 
-    ## Leftmost-first search over a byte haystack.
+    ## Leftmost-first search over a byte haystack. When a required-literal prefix
+    ## was extracted (M4, D6), scan for it and run the engine anchored at each
+    ## candidate; otherwise the PikeVM's own unanchored search.
     find : Regex.T, List(U8) -> Try(Regex.Span, [NoMatch])
-    find = |re, hay| Pike.find(Regex.base(re), hay)
+    find = |re, hay|
+        if List.is_empty(re.prefix) {
+            Pike.find(Regex.base(re), hay)
+        } else {
+            Regex.find_pf(Regex.base(re), hay, re.prefix, 0)
+        }
+
+    find_pf : Comp.Compiled, List(U8), List(U8), U64 -> Try(Regex.Span, [NoMatch])
+    find_pf = |c, hay, prefix, at|
+        match Lit.find_candidate(hay, at, prefix) {
+            Err(_) => Err(NoMatch)
+            Ok(cand) =>
+                match Pike.match_at(c, hay, cand) {
+                    Ok(slots) => Ok({ start: List.get(slots, 0) ?? 0, end: List.get(slots, 1) ?? 0 })
+                    Err(_) => Regex.find_pf(c, hay, prefix, cand + 1)
+                }
+        }
 
     ## All capture spans: index 0 is the whole match, i is group i. An
     ## unset/non-participating group is `Err(NoGroup)`.
@@ -95,7 +114,7 @@ Regex := [].{
     # the Comp.Compiled view (drop the engine field) for Pike, which is
     # engine-agnostic.
     base : Regex.T -> Comp.Compiled
-    base = |re| { prog: re.prog, splits: re.splits, classes: re.classes, n_groups: re.n_groups }
+    base = |re| { prog: re.prog, splits: re.splits, classes: re.classes, n_groups: re.n_groups, prefix: re.prefix }
 
 
     ## --- iteration and rewriting (D15, D14) ---------------------------------
