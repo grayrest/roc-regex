@@ -265,12 +265,23 @@ large non-ASCII *literal set* produces one singleton class per distinct
 codepoint, and 1,000 CJK literals are 48,070,656 bytes over codepoints against
 4,620,800 over bytes. Out of v1 scope, but SR1 must be able to see it.
 
-**Open fork, not closed:** per-pattern trie (as measured) versus a shared
-codepoint→atom trie (~103,680 B, folded once) plus a per-pattern atom→class
-array (1,644 B) plus an exception list for the cuts the shared partition misses
-— `\p{Lu}+` needs 1,180, `(?i)Sherlock` needs 3. The second is better for
-multi-pattern programs and needs its exception lookup priced. **M1's gate must
-measure both.**
+**Resolved 2026-09-02: per-pattern at M1, shared expected to win, decided at
+M2.** The alternative is a shared codepoint→atom trie (~103,680 B, folded once)
+plus a per-pattern atom→class array (1,644 B) plus an exception list for cuts the
+shared partition misses — `\p{Lu}+` needs 1,180, `(?i)Sherlock` needs **31**
+(rev-2 previously quoted 3, its non-ASCII sub-count). The crossover is early:
+per-pattern is ~45 KB against shared's ~106 KB at one pattern, and ~450 KB
+against ~120 KB at ten. Most real programs hold several patterns, so shared is
+the expected end state.
+
+M1 builds per-pattern anyway, because it cannot build the alternative: the
+exceptions are Unicode-driven and need M2's Tier A tables and HIR case folding,
+and the exception *lookup* is unpriced — it cannot naively be a binary search,
+which this decision already rejects at 14.2 ns/codepoint. The trie sits behind
+`Regex`'s documented-unstable fields (D7), so switching is an internal change.
+
+The cost: SR1's threshold is set at M1 against a per-pattern artifact and moves
+if M2 switches. Its first number is provisional twice over.
 
 ### D4 — Unicode Tier A, tables as packed literals
 
