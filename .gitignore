@@ -6,3 +6,7 @@
 /var[A-Z]
 *.o
 .roc-cache/
+
+# built examples
+examples/smoke
+examples/*.wasm
