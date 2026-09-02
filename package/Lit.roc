@@ -26,6 +26,17 @@ Lit := [].{
             Lit.scan(hay, at + 1, pat, b0, plen)
         }
 
+    ## next offset at/after `at` whose byte is in `set` (the first-byte-set rung).
+    find_in_set : List(U8), U64, List(U8) -> Try(U64, [NoCandidate])
+    find_in_set = |hay, at, set|
+        if at >= List.len(hay) {
+            Err(NoCandidate)
+        } else if List.contains(set, List.get(hay, at) ?? 0) {
+            Ok(at)
+        } else {
+            Lit.find_in_set(hay, at + 1, set)
+        }
+
     matches : List(U8), U64, List(U8), U64 -> Bool
     matches = |hay, at, pat, plen| Lit.eq(hay, at, pat, 0, plen)
 

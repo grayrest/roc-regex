@@ -30,11 +30,25 @@ The differential harness now checks **three** paths against the Rust crate —
 literal-prefix pattern in the corpus (`abc`, `colou?r`, `cat`, …) and leftmost
 semantics are preserved. smoke 21/21.
 
-## Not built (deferred per D6)
+## Also built (2026-09-02): the first-byte-set rung + skip heuristic
 
-Rabin-Karp for multi-literal sets (the graceful-degradation second rung); the
-"don't prefilter when the lead byte is ubiquitous" decision (D6 notes it must be
-pattern-side, since the compiled `Regex` never sees the haystack — SR3); inner
-required literals (not just prefixes); Teddy (needs SIMD + re-adding the AC
-automaton). The seam is the point: these slot in at `find_candidate` without
-touching the engines.
+`Comp.first_bytes` extracts a **sound superset** of the bytes a match can begin
+with, as ASCII singletons — for an alternation or class start (`(cat|dog)\b` ->
+{c,d}, `[abc]x\b` -> {a,b,c}). It returns "wide" (skip) when the lead is a
+`.`/`\w`/negated/nullable construct or exceeds 4 distinct bytes — the
+pattern-side skip decision D6 requires (the compiled `Regex` never sees the
+haystack, SR3, so the choice is made from the pattern). `Lit.find_in_set` is the
+rung; `Regex.find_fb` runs the engine anchored at each candidate.
+
+Where it fires: look-bearing patterns with a literal or small-lead-set start
+(`foo\b` via the prefix rung, `(cat|dog)\b` via the byte-set rung) — the ones
+that route to the PikeVM. Look-free patterns take the three-pass DFA. Verified,
+and the full 1431-case differential still agrees with Rust (45 s).
+
+## Deferred per D6
+
+Rabin-Karp for multi-literal sets; inner required literals (not just prefixes,
+`hir/literal.rs` territory); Teddy (needs SIMD + re-adding the AC automaton);
+wiring the prefilter into the three-pass DFA path (it currently accelerates only
+the PikeVM path). The seam is the point: these slot in at `find_candidate` /
+`find_in_set` without touching the engines.

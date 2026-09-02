@@ -47,6 +47,7 @@ Comp := [
         rsplits : List(U32),
         uprog : List(U32),
         usplits : List(U32),
+        fbytes : List(U8),
     }
 
     # --- instruction encoding -------------------------------------------------
@@ -105,6 +106,7 @@ Comp := [
                         numbered = Comp.number(ast1, 1)
                         n_groups = numbered.next - 1
                         prefix = Comp.prefix_of(numbered.ast)
+                        fbytes = Comp.first_bytes(numbered.ast)
                         # wrap in group 0: Save0 ; body ; Save1 ; Match
                         prog0 = { prog: [Comp.inst(Comp.op_save, 0)], sets: [], splits: [], n_sets: 0 }
                         p1 = Comp.emit(prog0, numbered.ast, 1)
@@ -122,7 +124,7 @@ Comp := [
                         uast = Cat([dotstar, numbered.ast])
                         u1 = Comp.emit({ ..r1, prog: [], splits: [] }, uast, 0)
                         uprog = List.append(u1.prog, Comp.inst(Comp.op_match, 0))
-                        Ok({ prog, splits: p2.splits, classes: Trie.build(u1.sets), n_groups, prefix, rprog, rsplits: r1.splits, uprog, usplits: u1.splits })
+                        Ok({ prog, splits: p2.splits, classes: Trie.build(u1.sets), n_groups, prefix, rprog, rsplits: r1.splits, uprog, usplits: u1.splits, fbytes })
                     }
                 Err(e) => Err(e)
             }
@@ -734,6 +736,88 @@ Comp := [
             Quest(x, g) => Quest(Comp.reverse_ast(x), g)
             Group(x, _) => Comp.reverse_ast(x)
         }
+
+    # --- M4: first-byte set (D6 second rung) ----------------------------------
+    #
+    # A SOUND superset of the bytes a match can begin with, as ASCII singletons,
+    # or [] meaning "wide — do not prefilter" (the pattern-side skip heuristic:
+    # a leading `.`/`\w`/negated/nullable construct, or more than 4 distinct
+    # bytes). `Wide` is represented as [].
+
+    first_bytes : Comp -> List(U8)
+    first_bytes = |ast| {
+        fs = Comp.first_set(ast)
+        match fs {
+            Wide => []
+            Bytes(bs) => if List.len(bs) == 0 or List.len(bs) > 4 { [] } else { bs }
+        }
+    }
+
+    FS : [Wide, Bytes(List(U8))]
+
+    first_set : Comp -> Comp.FS
+    first_set = |ast|
+        match ast {
+            Empty => Wide
+            Look(_) => Wide
+            Chars(cs) => Comp.chars_first(cs)
+            Group(x, _) => Comp.first_set(x)
+            Plus(x, _) => Comp.first_set(x)
+            Cat(xs) => Comp.cat_first(xs)
+            Alt(xs) => Comp.alt_first(xs)
+            Star(_, _) => Wide
+            Quest(_, _) => Wide
+        }
+
+    chars_first : { neg : Bool, ranges : List(Comp.Rng) } -> Comp.FS
+    chars_first = |cs|
+        if cs.neg {
+            Wide
+        } else {
+            Comp.ranges_bytes(cs.ranges, [])
+        }
+
+    # enumerate ASCII singletons of small ranges; Wide if any range is non-ASCII
+    # or the total exceeds the cap
+    ranges_bytes : List(Comp.Rng), List(U8) -> Comp.FS
+    ranges_bytes = |ranges, acc|
+        match List.first(ranges) {
+            Err(_) => Bytes(acc)
+            Ok(r) =>
+                if r.hi >= 128 or (r.hi - r.lo) > 4 or List.len(acc) > 4 {
+                    Wide
+                } else {
+                    Comp.ranges_bytes(List.drop_first(ranges, 1), List.concat(acc, Comp.byte_span(r.lo, r.hi, [])))
+                }
+        }
+
+    byte_span : U32, U32, List(U8) -> List(U8)
+    byte_span = |lo, hi, acc|
+        if lo > hi { acc } else { Comp.byte_span(lo + 1, hi, List.append(acc, lo.to_u8_wrap())) }
+
+    cat_first : List(Comp) -> Comp.FS
+    cat_first = |xs|
+        match List.first(xs) {
+            Err(_) => Wide
+            Ok(x) =>
+                if Comp.nullable(x) {
+                    Wide
+                } else {
+                    Comp.first_set(x)
+                }
+        }
+
+    alt_first : List(Comp) -> Comp.FS
+    alt_first = |xs|
+        List.fold(xs, Bytes([]), |acc, x|
+            match acc {
+                Wide => Wide
+                Bytes(a) =>
+                    match Comp.first_set(x) {
+                        Wide => Wide
+                        Bytes(b) => Bytes(List.concat(a, b))
+                    }
+            })
 
     # --- NFA compiler (S3): forward-only, sizes precomputed --------------------
 
