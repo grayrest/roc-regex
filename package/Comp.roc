@@ -43,6 +43,10 @@ Comp := [
         classes : Trie.T,
         n_groups : U32,
         prefix : List(U8),
+        rprog : List(U32),
+        rsplits : List(U32),
+        uprog : List(U32),
+        usplits : List(U32),
     }
 
     # --- instruction encoding -------------------------------------------------
@@ -106,7 +110,19 @@ Comp := [
                         p1 = Comp.emit(prog0, numbered.ast, 1)
                         p2 = Comp.push_inst(p1, Comp.inst(Comp.op_save, 1))
                         prog = List.append(p2.prog, Comp.inst(Comp.op_match, 0))
-                        Ok({ prog, splits: p2.splits, classes: Trie.build(p2.sets), n_groups, prefix })
+                        # reverse NFA: compile the reversed AST into the SAME sets
+                        # table (so classes/trie are shared). No Save ops needed.
+                        rev = Comp.reverse_ast(numbered.ast)
+                        r1 = Comp.emit({ ..p2, prog: [], splits: [] }, rev, 0)
+                        rprog = List.append(r1.prog, Comp.inst(Comp.op_match, 0))
+                        # unanchored forward NFA for the DFA end-scan: a lazy dot-star
+                        # (persistent lowest-priority thread, truncated on match) then
+                        # the pattern (D5).
+                        dotstar = Star(Chars({ neg: False, ranges: [{ lo: 0, hi: 0x10_FFFF }] }), False)
+                        uast = Cat([dotstar, numbered.ast])
+                        u1 = Comp.emit({ ..r1, prog: [], splits: [] }, uast, 0)
+                        uprog = List.append(u1.prog, Comp.inst(Comp.op_match, 0))
+                        Ok({ prog, splits: p2.splits, classes: Trie.build(u1.sets), n_groups, prefix, rprog, rsplits: r1.splits, uprog, usplits: u1.splits })
                     }
                 Err(e) => Err(e)
             }
@@ -636,6 +652,25 @@ Comp := [
                 [r] => if r.lo == r.hi { Comp.enc_cp(r.lo) } else { [] }
                 _ => []
             }
+        }
+
+    # reverse the AST for the reverse NFA (D5 pass 2). Concatenation order flips;
+    # groups become plain (captures are recovered by the forward capture pass).
+    rev_list : List(Comp) -> List(Comp)
+    rev_list = |xs| List.fold(xs, [], |acc, x| List.prepend(acc, x))
+
+    reverse_ast : Comp -> Comp
+    reverse_ast = |ast|
+        match ast {
+            Empty => Empty
+            Chars(_) => ast
+            Look(_) => ast
+            Cat(xs) => Cat(Comp.rev_list(List.map(xs, Comp.reverse_ast)))
+            Alt(xs) => Alt(List.map(xs, Comp.reverse_ast))
+            Star(x, g) => Star(Comp.reverse_ast(x), g)
+            Plus(x, g) => Plus(Comp.reverse_ast(x), g)
+            Quest(x, g) => Quest(Comp.reverse_ast(x), g)
+            Group(x, _) => Comp.reverse_ast(x)
         }
 
     # --- NFA compiler (S3): forward-only, sizes precomputed --------------------

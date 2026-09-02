@@ -8,16 +8,17 @@
 import Comp
 import Pike
 import Trie
-import Dfa
 import Lit
+import Rev
 import Err
 
 Regex := [].{
     ## The compiled pattern. Fields are unstable (see above). M1's engine is
     ## always the PikeVM; the `Dfa` arm and its tables are M3.
-    ## The `engine` field records M3's outcome (D10): `Dfa` for a look-free
-    ## pattern whose table fit the budget, else `Pike`. Documented-unstable.
-    T : { prog : List(U32), splits : List(U32), classes : Trie.T, n_groups : U32, prefix : List(U8), engine : [Pike, Dfa(Dfa.T)] }
+    ## The `engine` field records M3's outcome (D10): `Three` carries the D5
+    ## forward+reverse DFAs for a look-free pattern within budget, else `Pike`.
+    ## Documented-unstable.
+    T : { prog : List(U32), splits : List(U32), classes : Trie.T, n_groups : U32, prefix : List(U8), rprog : List(U32), rsplits : List(U32), uprog : List(U32), usplits : List(U32), engine : [Pike, Three({ fwd : Rev.D, rev : Rev.D })] }
 
     ## A match, as half-open BYTE offsets into the haystack (D3, D15).
     Span : { start : U64, end : U64 }
@@ -31,11 +32,11 @@ Regex := [].{
                 nc = if c.classes.n_classes == 0 { 1 } else { c.classes.n_classes }
                 max_states = 262144 // (nc.to_u64() * 4)
                 engine =
-                    match Dfa.build(c, max_states) {
-                        Ok(d) => Dfa(d)
+                    match Rev.build(c, max_states) {
+                        Ok(d) => Three(d)
                         Err(_) => Pike
                     }
-                Ok({ prog: c.prog, splits: c.splits, classes: c.classes, n_groups: c.n_groups, prefix: c.prefix, engine })
+                Ok({ prog: c.prog, splits: c.splits, classes: c.classes, n_groups: c.n_groups, prefix: c.prefix, rprog: c.rprog, rsplits: c.rsplits, uprog: c.uprog, usplits: c.usplits, engine })
             }
         }
 
@@ -62,10 +63,15 @@ Regex := [].{
     ## candidate; otherwise the PikeVM's own unanchored search.
     find : Regex.T, List(U8) -> Try(Regex.Span, [NoMatch])
     find = |re, hay|
-        if List.is_empty(re.prefix) {
-            Pike.find(Regex.base(re), hay)
-        } else {
-            Regex.find_pf(Regex.base(re), hay, re.prefix, 0)
+        match re.engine {
+            # look-free, within budget: D5 three-pass over the prebuilt DFAs.
+            Three(d) => Rev.find(d, re.classes, hay)
+            Pike =>
+                if List.is_empty(re.prefix) {
+                    Pike.find(Regex.base(re), hay)
+                } else {
+                    Regex.find_pf(Regex.base(re), hay, re.prefix, 0)
+                }
         }
 
     find_pf : Comp.Compiled, List(U8), List(U8), U64 -> Try(Regex.Span, [NoMatch])
@@ -99,13 +105,18 @@ Regex := [].{
             Regex.pair_slots(slots, i + 2, List.append(acc, span))
         }
 
+    ## PikeVM find, bypassing the engine choice — for differential validation of
+    ## the three-pass against the reference simulator.
+    find_pike : Regex.T, List(U8) -> Try(Regex.Span, [NoMatch])
+    find_pike = |re, hay| Pike.find(Regex.base(re), hay)
+
     ## Whether the pattern matches anywhere in the haystack.
     is_match : Regex.T, List(U8) -> Bool
     is_match = |re, hay|
         match re.engine {
-            Dfa(d) => Dfa.is_match(d, re.classes, hay)
+            Three(d) => Rev.is_match(d.fwd, re.classes, hay)
             Pike =>
-                match Pike.find(Regex.base(re), hay) {
+                match Regex.find(re, hay) {
                     Ok(_) => True
                     Err(_) => False
                 }
@@ -114,7 +125,7 @@ Regex := [].{
     # the Comp.Compiled view (drop the engine field) for Pike, which is
     # engine-agnostic.
     base : Regex.T -> Comp.Compiled
-    base = |re| { prog: re.prog, splits: re.splits, classes: re.classes, n_groups: re.n_groups, prefix: re.prefix }
+    base = |re| { prog: re.prog, splits: re.splits, classes: re.classes, n_groups: re.n_groups, prefix: re.prefix, rprog: re.rprog, rsplits: re.rsplits, uprog: re.uprog, usplits: re.usplits }
 
 
     ## --- iteration and rewriting (D15, D14) ---------------------------------

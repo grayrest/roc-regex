@@ -1,1 +1,1 @@
-package [Regex, Err, Trie, Uni, Dfa, Lit] {}
+package [Regex, Err, Trie, Uni, Lit, Rev] {}
