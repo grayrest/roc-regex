@@ -116,10 +116,16 @@ v1 is `compile`, `compile_with`, `is_match`, `find`, `find_iter`, `captures`,
 5. `Regex.compile("(a")` failing the build with a message that names **which**
    pattern — the project's most distinctive feature, asserted in M1's gate.
 
-**Abandonment criterion**, attached to M1: if a realistic pattern's artifact,
-built through the real call chain and *including its class trie*, does not fold
-within SR2's budget, this is a runtime regex engine with compile-time
-validation, and should be pursued as `regex-lite` in Roc.
+**Abandonment criterion**, attached to M1 and denominated on **artifact size**
+(re-denominated 2026-09-02): if the **p90 artifact across M1's gate set exceeds
+1 MB per pattern**, the folded-DFA story does not hold and this is `regex-lite`
+in Roc — a runtime engine with compile-time validation — and should be pursued
+as one.
+
+It was previously denominated on SR2's 500 MB of compiler RSS, which **cannot
+fire**: every codepoint fold on record sits 2–5 MB above a 137 MB baseline, two
+orders of magnitude inside the line. A criterion that passes by construction is
+not a criterion, and unverified item 1 hung on it.
 
 ## Stop rules
 
@@ -143,9 +149,12 @@ Each names a threshold, a measurement and the moment it is evaluated.
 4. **Throughput floor**, pre-registered before M1: a named haystack, three
    pattern classes, MB/s, the PikeVM baseline, and the multiple the DFA path
    must clear. Without it, D2, D5, D10 and M4 are unfalsifiable and can never be
-   cut on evidence. Reference points from the Roc rigs: a codepoint DFA loop at
-   ~468 MiB/s on 8 MB, a byte-set prefilter at ~1,141 MiB/s. **Fill this in
-   before M1 starts.**
+   cut on evidence. Pre-registered from the Roc reference points — a codepoint
+   DFA loop at ~468 MiB/s on 8 MB, a byte-set prefilter at ~1,141 MiB/s — with
+   the DFA multiple stated as **a claim M3 must clear, not a number M1
+   discovers**. M1's gate does not set it (see M1). Fill in the haystack, the
+   three pattern classes and the multiple before M1 starts; the caveat on those
+   reference points is unverified item 7.
 5. **The folded path stays covered.** `expect` does not fold (D9), so folded
    coverage is a generated *program*. If it is dropped for build-time reasons,
    stop.
@@ -166,9 +175,22 @@ was run for the wrong reason (nothing downstream depended on it).
   NFA over codepoint classes with pattern IDs threaded, class trie, PikeVM,
   `find` and `is_match`, one path, ~15 hand-written cases. Construction rules
   (D12) and budgets (D13) from the first line — they are not retrofittable.
-  **Gate:** fold time, peak RSS, and artifact size *including the class trie*,
-  for a realistic pattern; plus a test that a bad literal pattern fails the build
-  naming which pattern. Sets SR1's threshold and SR4's floor.
+  **Gate** (specified 2026-09-02). *Pattern set:* the ~15 hand-written M1 cases
+  plus three named production-shaped patterns at 250–300 characters — an Apache
+  combined-log matcher, an email-shaped pattern, and a `key=value` extractor —
+  named in the repo so the measurement is reproducible by someone else. Three
+  Unicode-bearing patterns keep the gate off the ASCII floor, where the trie is
+  4,992 B against 38,272 B for `\w{10,20}`, a 7.7× spread.
+  *Measurements, per pattern:* fold wall time; peak compiler RSS via
+  `/usr/bin/time -l`, cold, `--no-cache`; and artifact bytes **broken out by
+  object** (trie / NFA / total) — the split, not the total, is what M2's trie
+  fork needs.
+  *Passing:* every pattern folds inside SR2's 500 MB; the artifact p90 across the
+  set is under the provisional 256 KB; and a deliberately bad literal fails the
+  build with a message naming which pattern.
+  *What it sets:* SR1's threshold, from the p90, marked provisional until the
+  corpus exists at M1.5. **It does not set SR4's floor** — a PikeVM-only
+  milestone has no DFA to measure a multiple against.
 - **M1.5 — the rest of the v1 surface.** `captures`, `find_iter`, `replace*`,
   `split`, empty-match handling (D14), the two-path corpus generator (D9) and the
   differential harness.
@@ -176,9 +198,16 @@ was run for the wrong reason (nothing downstream depended on it).
   HIR class expansion, class set operations, simple case folding. `range_trie.rs`
   and `utf8.rs` (~1,643 lines, the hardest code in the original) are **not
   needed** — D3 deletes UTF-8 automata.
-- **M3 — determinizer and dense DFA.** Codepoint equivalence classes, forward and
-  reverse tables, D13's budgets, D5's three passes, D11's forward-only pattern
-  IDs. The differential fuzzing campaign runs here.
+- **M3 — determinizer and dense DFA.** Forward and reverse tables over M2's class
+  pass, D5's three passes and its 8 start configurations, D11's forward-only
+  pattern IDs, D13 budgets 4 and 5, D10's downgrade and its `engine` field's
+  `Dfa` arm, D8's determinizer flag combinations. The differential fuzzing
+  campaign runs here.
+
+  **Read as M3, not as general:** D5 in its entirety (start-state configuration
+  is a DFA concept; a PikeVM evaluates `Look` assertions per position and needs
+  none of it), D11's body, D13 budgets 4–5, and D10's downgrade. M1 needs only
+  `Match{pid}` in the NFA and an `engine` field that is always `PikeVm`.
 - **M4 — prefilter seam.** `find_candidate` with the two scalar rungs D6 keeps.
 
 ## Decisions
