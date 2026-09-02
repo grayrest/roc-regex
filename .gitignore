@@ -10,3 +10,7 @@
 # built examples
 examples/smoke
 examples/*.wasm
+
+# rust harness build
+tools/diff/target/
+tools/diff/Cargo.lock

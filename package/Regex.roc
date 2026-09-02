@@ -13,7 +13,7 @@ import Err
 Regex := [].{
     ## The compiled pattern. Fields are unstable (see above). M1's engine is
     ## always the PikeVM; the `Dfa` arm and its tables are M3.
-    T : { prog : List(U32), splits : List(U32), classes : Trie.T }
+    T : { prog : List(U32), splits : List(U32), classes : Trie.T, n_groups : U32 }
 
     ## A match, as half-open BYTE offsets into the haystack (D3, D15).
     Span : { start : U64, end : U64 }
@@ -43,6 +43,26 @@ Regex := [].{
     find : Regex.T, List(U8) -> Try(Regex.Span, [NoMatch])
     find = |re, hay| Pike.find(re, hay)
 
+    ## All capture spans: index 0 is the whole match, i is group i. An
+    ## unset/non-participating group is `Err(NoGroup)`.
+    captures : Regex.T, List(U8) -> Try(List(Try(Regex.Span, [NoGroup])), [NoMatch])
+    captures = |re, hay|
+        match Pike.captures(re, hay) {
+            Err(_) => Err(NoMatch)
+            Ok(slots) => Ok(Regex.pair_slots(slots, 0, []))
+        }
+
+    pair_slots : List(U64), U64, List(Try(Regex.Span, [NoGroup])) -> List(Try(Regex.Span, [NoGroup]))
+    pair_slots = |slots, i, acc|
+        if i + 1 >= List.len(slots) {
+            acc
+        } else {
+            s = List.get(slots, i) ?? 0xFFFF_FFFF_FFFF_FFFF
+            e = List.get(slots, i + 1) ?? 0xFFFF_FFFF_FFFF_FFFF
+            span = if s == 0xFFFF_FFFF_FFFF_FFFF or e == 0xFFFF_FFFF_FFFF_FFFF { Err(NoGroup) } else { Ok({ start: s, end: e }) }
+            Regex.pair_slots(slots, i + 2, List.append(acc, span))
+        }
+
     ## Whether the pattern matches anywhere in the haystack.
     is_match : Regex.T, List(U8) -> Bool
     is_match = |re, hay|
@@ -50,6 +70,120 @@ Regex := [].{
             Ok(_) => True
             Err(_) => False
         }
+
+
+    ## --- iteration and rewriting (D15, D14) ---------------------------------
+
+    ## All non-overlapping matches as slot arrays, applying D14's empty-match
+    ## advance: an empty match abutting the previous match end is skipped, and
+    ## after any empty match the cursor steps one symbol so it cannot loop.
+    all_caps : Regex.T, List(U8) -> List(List(U64))
+    all_caps = |re, hay| Regex.all_loop(re, hay, 0, Regex.sentinel, [])
+
+    sentinel : U64
+    sentinel = 0xFFFF_FFFF_FFFF_FFFF
+
+    all_loop : Regex.T, List(U8), U64, U64, List(List(U64)) -> List(List(U64))
+    all_loop = |re, hay, at, last_end, acc|
+        if at > List.len(hay) {
+            acc
+        } else {
+            match Pike.captures_from(re, hay, at) {
+                Err(_) => acc
+                Ok(slots) => {
+                    s = List.get(slots, 0) ?? 0
+                    e = List.get(slots, 1) ?? 0
+                    if s == e and e == last_end {
+                        Regex.all_loop(re, hay, Regex.next_bound(hay, e), last_end, acc)
+                    } else {
+                        nat = if s == e { Regex.next_bound(hay, e) } else { e }
+                        Regex.all_loop(re, hay, nat, e, List.append(acc, slots))
+                    }
+                }
+            }
+        }
+
+    next_bound : List(U8), U64 -> U64
+    next_bound = |hay, p|
+        if p >= List.len(hay) { p + 1 } else { p + Comp.decode(hay, p).len }
+
+    ## All whole-match spans.
+    find_all : Regex.T, List(U8) -> List(Regex.Span)
+    find_all = |re, hay|
+        List.map(Regex.all_caps(re, hay), |sl| { start: List.get(sl, 0) ?? 0, end: List.get(sl, 1) ?? 0 })
+
+    ## Replace every match. `rep` carries `$N` group refs (longest-digit-run) and
+    ## `$$` -> `$`; an unknown ref expands to empty (D15). Byte API.
+    replace_all : Regex.T, List(U8), List(U8) -> List(U8)
+    replace_all = |re, hay, rep| {
+        caps = Regex.all_caps(re, hay)
+        r = List.fold(caps, { out: [], last: 0 }, |st, sl| {
+            s = List.get(sl, 0) ?? 0
+            e = List.get(sl, 1) ?? 0
+            before = List.sublist(hay, { start: st.last, len: s - st.last })
+            expanded = Regex.expand(rep, hay, sl)
+            { out: List.concat(List.concat(st.out, before), expanded), last: e }
+        })
+        List.concat(r.out, List.sublist(hay, { start: r.last, len: List.len(hay) - r.last }))
+    }
+
+    expand : List(U8), List(U8), List(U64) -> List(U8)
+    expand = |rep, hay, slots| Regex.expand_loop(rep, hay, slots, 0, [])
+
+    expand_loop : List(U8), List(U8), List(U64), U64, List(U8) -> List(U8)
+    expand_loop = |rep, hay, slots, i, out|
+        match List.get(rep, i) {
+            Err(_) => out
+            Ok(0x24) => {
+                nx = List.get(rep, i + 1) ?? 0
+                if nx == 0x24 {
+                    Regex.expand_loop(rep, hay, slots, i + 2, List.append(out, 0x24))
+                } else if nx >= 48 and nx <= 57 {
+                    d = Regex.read_num(rep, i + 1, 0)
+                    grp = Regex.group_bytes(hay, slots, d.n)
+                    Regex.expand_loop(rep, hay, slots, d.i, List.concat(out, grp))
+                } else {
+                    Regex.expand_loop(rep, hay, slots, i + 1, List.append(out, 0x24))
+                }
+            }
+            Ok(b) => Regex.expand_loop(rep, hay, slots, i + 1, List.append(out, b))
+        }
+
+    read_num : List(U8), U64, U64 -> { n : U64, i : U64 }
+    read_num = |rep, i, acc|
+        match List.get(rep, i) {
+            Ok(b) if b >= 48 and b <= 57 => Regex.read_num(rep, i + 1, acc * 10 + (b - 48).to_u64())
+            _ => { n: acc, i }
+        }
+
+    group_bytes : List(U8), List(U64), U64 -> List(U8)
+    group_bytes = |hay, slots, g| {
+        s = List.get(slots, g * 2) ?? Regex.sentinel
+        e = List.get(slots, g * 2 + 1) ?? Regex.sentinel
+        if s == Regex.sentinel or e == Regex.sentinel { [] } else { List.sublist(hay, { start: s, len: e - s }) }
+    }
+
+    ## Split around matches, with leading/trailing empty fields and one more
+    ## field than matches (D15).
+    split : Regex.T, List(U8) -> List(List(U8))
+    split = |re, hay| {
+        caps = Regex.all_caps(re, hay)
+        r = List.fold(caps, { fields: [], last: 0 }, |st, sl| {
+            s = List.get(sl, 0) ?? 0
+            e = List.get(sl, 1) ?? 0
+            field = List.sublist(hay, { start: st.last, len: s - st.last })
+            { fields: List.append(st.fields, field), last: e }
+        })
+        List.append(r.fields, List.sublist(hay, { start: r.last, len: List.len(hay) - r.last }))
+    }
+
+    replace_all_str : Regex.T, Str, Str -> Str
+    replace_all_str = |re, hay, rep|
+        Str.from_utf8(Regex.replace_all(re, Str.to_utf8(hay), Str.to_utf8(rep))) ?? ""
+
+    split_str : Regex.T, Str -> List(Str)
+    split_str = |re, hay|
+        List.map(Regex.split(re, Str.to_utf8(hay)), |f| Str.from_utf8(f) ?? "")
 
     ## Convenience: search a `Str`. Copies to `List(U8)` (D3 — the byte API is
     ## the real one; this pays a copy in).

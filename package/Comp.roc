@@ -20,6 +20,7 @@ Comp := [
     Plus(Comp, Bool),
     Quest(Comp, Bool),
     Look(U32),
+    Group(Comp, U32),
 ].{
     ## A regex class or literal, stored as codepoint ranges plus a negation flag.
     Rng : { lo : U32, hi : U32 }
@@ -39,6 +40,7 @@ Comp := [
         prog : List(U32),
         splits : List(U32),
         classes : Trie.T,
+        n_groups : U32,
     }
 
     # --- instruction encoding -------------------------------------------------
@@ -53,6 +55,8 @@ Comp := [
     op_match = 3
     op_look : U32
     op_look = 4
+    op_save : U32
+    op_save = 5
 
     look_start : U32
     look_start = 0
@@ -89,10 +93,14 @@ Comp := [
                         # a leftover `)` with no opener
                         Err(Comp.err_at(src, toks, st.i, GroupUnopened))
                     } else {
-                        prog0 = { prog: [], sets: [], splits: [], n_sets: 0 }
-                        p1 = Comp.emit(prog0, st.ast, 0)
-                        prog = List.append(p1.prog, Comp.inst(Comp.op_match, 0))
-                        Ok({ prog, splits: p1.splits, classes: Trie.build(p1.sets) })
+                        numbered = Comp.number(st.ast, 1)
+                        n_groups = numbered.next - 1
+                        # wrap in group 0: Save0 ; body ; Save1 ; Match
+                        prog0 = { prog: [Comp.inst(Comp.op_save, 0)], sets: [], splits: [], n_sets: 0 }
+                        p1 = Comp.emit(prog0, numbered.ast, 1)
+                        p2 = Comp.push_inst(p1, Comp.inst(Comp.op_save, 1))
+                        prog = List.append(p2.prog, Comp.inst(Comp.op_match, 0))
+                        Ok({ prog, splits: p2.splits, classes: Trie.build(p2.sets), n_groups })
                     }
                 Err(e) => Err(e)
             }
@@ -321,10 +329,13 @@ Comp := [
         if c == Err(End) {
             Ok({ ast: Empty, i: st.i })
         } else if c == Ok(0x28) {
-            match Comp.parse_alt({ src: st.src, toks: st.toks, i: st.i + 1 }) {
+            noncap = Comp.cp_at(st.toks, st.i + 1) == Ok(0x3F) and Comp.cp_at(st.toks, st.i + 2) == Ok(0x3A)
+            inner_i = if noncap { st.i + 3 } else { st.i + 1 }
+            match Comp.parse_alt({ src: st.src, toks: st.toks, i: inner_i }) {
                 Ok(inner) =>
                     if Comp.cp_at(st.toks, inner.i) == Ok(0x29) {
-                        Ok({ ast: inner.ast, i: inner.i + 1 })
+                        node = if noncap { inner.ast } else { Group(inner.ast, 0) }
+                        Ok({ ast: node, i: inner.i + 1 })
                     } else {
                         Err(Comp.err_at(st.src, st.toks, st.i, GroupUnclosed))
                     }
@@ -430,6 +441,49 @@ Comp := [
         }
     }
 
+
+    # assign source-order group indices (pre-order); returns numbered ast + count
+    NumSt : { ast : Comp, next : U32 }
+
+    number : Comp, U32 -> Comp.NumSt
+    number = |ast, g|
+        match ast {
+            Empty => { ast: Empty, next: g }
+            Chars(_) => { ast, next: g }
+            Look(_) => { ast, next: g }
+            Star(x, gr) => {
+                s = Comp.number(x, g)
+                { ast: Star(s.ast, gr), next: s.next }
+            }
+            Plus(x, gr) => {
+                s = Comp.number(x, g)
+                { ast: Plus(s.ast, gr), next: s.next }
+            }
+            Quest(x, gr) => {
+                s = Comp.number(x, g)
+                { ast: Quest(s.ast, gr), next: s.next }
+            }
+            Group(x, _) => {
+                s = Comp.number(x, g + 1)
+                { ast: Group(s.ast, g), next: s.next }
+            }
+            Cat(xs) => {
+                r = Comp.number_list(xs, g)
+                { ast: Cat(r.list), next: r.next }
+            }
+            Alt(xs) => {
+                r = Comp.number_list(xs, g)
+                { ast: Alt(r.list), next: r.next }
+            }
+        }
+
+    number_list : List(Comp), U32 -> { list : List(Comp), next : U32 }
+    number_list = |xs, g|
+        List.fold(xs, { list: [], next: g }, |acc, x| {
+            s = Comp.number(x, acc.next)
+            { list: List.append(acc.list, s.ast), next: s.next }
+        })
+
     # --- NFA compiler (S3): forward-only, sizes precomputed --------------------
 
     nullable : Comp -> Bool
@@ -443,6 +497,7 @@ Comp := [
             Star(_, _) => True
             Plus(x, _) => Comp.nullable(x)
             Quest(_, _) => True
+            Group(x, _) => Comp.nullable(x)
         }
 
     size : Comp -> U64
@@ -456,6 +511,7 @@ Comp := [
             Star(x, _) => Comp.size(x) + 2
             Plus(x, _) => Comp.size(x) + 1
             Quest(x, _) => Comp.size(x) + 1
+            Group(x, _) => Comp.size(x) + 2
         }
 
     push_set : Comp.Prog, Bool, List(Comp.Rng) -> { p : Comp.Prog, idx : U32 }
@@ -517,6 +573,11 @@ Comp := [
                 s = Comp.push_split(p, pair.a, pair.b)
                 p1 = Comp.push_inst(s.p, Comp.inst(Comp.op_split, s.idx))
                 Comp.emit(p1, x, enter)
+            }
+            Group(x, gi) => {
+                p1 = Comp.push_inst(p, Comp.inst(Comp.op_save, gi * 2))
+                p2 = Comp.emit(p1, x, pc + 1)
+                Comp.push_inst(p2, Comp.inst(Comp.op_save, gi * 2 + 1))
             }
         }
 

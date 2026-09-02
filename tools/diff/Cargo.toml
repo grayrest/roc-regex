@@ -1,0 +1,9 @@
+[package]
+name = "diff"
+version = "0.0.0"
+edition = "2021"
+[dependencies]
+regex = "1.13"
+[[bin]]
+name = "gen"
+path = "src/gen.rs"
