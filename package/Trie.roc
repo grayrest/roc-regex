@@ -91,7 +91,7 @@ Trie := [].{
     accepts_loop = |sets, cuts, set_words, i, acc|
         match List.get(sets, i) {
             Err(_) => acc
-            Ok(neg) => {
+            Ok(_neg) => {
                 count = (List.get(sets, i + 1) ?? 0).to_u64()
                 bits = Trie.set_bitset(sets, i, cuts, set_words)
                 Trie.accepts_loop(sets, cuts, set_words, i + 2 + count * 2, List.concat(acc, bits))
