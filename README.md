@@ -34,11 +34,15 @@ artifact size of a realistic pattern including its per-pattern class trie**,
 which sets both stop rule 1's threshold and D10's default budget. M1's gate
 takes it.
 
-## Status: M1 in progress
+## Status: M1 complete
 
-The M1 vertical slice runs end to end — parser (ASCII + `\w \d \s \b`), Thompson
-NFA over codepoint classes, PikeVM, `find` / `is_match`, and the D7 build-time
-error path. `examples/smoke.roc` is a 20-case runner; a bad literal pattern
-fails the build with a rendered caret message. Not yet: the class trie (S2), the
-codepoint partition (S1) — the PikeVM currently tests codepoint ranges directly —
-Unicode tables (M2), and the DFA (M3).
+The M1 vertical slice runs end to end — parser (literals, `.`, classes, `\w \d
+\s`, `\b`, anchors, `* + ? {n,m}` with lazy variants, `|`, groups), Thompson NFA
+over codepoint classes (S3), the S1 partition and S2 class trie, a PikeVM (S5),
+and the D7 build-time error path. `examples/smoke.roc` passes 21/21; a bad
+literal pattern fails the build with a rendered caret message. Gate numbers are
+in [`notes/2026-09-02-m1-gate.md`](notes/2026-09-02-m1-gate.md).
+
+Next (M1.5): captures, `find_iter`, `replace`/`split`, the two-path corpus and
+the differential harness against the Rust crate. Then Unicode tables (M2) and
+the DFA (M3).

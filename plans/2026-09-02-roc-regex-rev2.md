@@ -171,11 +171,15 @@ Each names a threshold, a measurement and the moment it is evaluated.
 time: it was hours of work that rewrote the project's central decision, and it
 was run for the wrong reason (nothing downstream depended on it).
 
-- **M1 — vertical slice.** Subset parser, error type and renderer (D7), Thompson
+- **M1 — vertical slice. DONE 2026-09-02** ([gate](../notes/2026-09-02-m1-gate.md); commits `5ff5640`, `aa91b7f`). Subset parser, error type and renderer (D7), Thompson
   NFA over codepoint classes with pattern IDs threaded, class trie, PikeVM,
   `find` and `is_match`, one path, ~15 hand-written cases. Construction rules
   (D12) and budgets (D13) from the first line — they are not retrofittable.
-  **Gate** (specified 2026-09-02). *Pattern set:* the ~15 hand-written M1 cases
+  **Gate — passed.** 21/21 smoke cases (incl. a non-ASCII range through the
+  trie); 3 named patterns fold in 1.65 s at ~43 MB above baseline RSS and
+  68 KB artifact (~23 KB/pattern), inside SR2 and the 256 KB budget; the bad
+  literal fails the build with the rendered caret. Owed: the per-object artifact
+  split before SR1's threshold is set. *Original spec:* *Pattern set:* the ~15 hand-written M1 cases
   plus three named production-shaped patterns at 250–300 characters — an Apache
   combined-log matcher, an email-shaped pattern, and a `key=value` extractor —
   named in the repo so the measurement is reproducible by someone else. Three
