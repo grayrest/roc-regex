@@ -8,18 +8,35 @@
 import Comp
 import Pike
 import Trie
+import Dfa
 import Err
 
 Regex := [].{
     ## The compiled pattern. Fields are unstable (see above). M1's engine is
     ## always the PikeVM; the `Dfa` arm and its tables are M3.
-    T : { prog : List(U32), splits : List(U32), classes : Trie.T, n_groups : U32 }
+    ## The `engine` field records M3's outcome (D10): `Dfa` for a look-free
+    ## pattern whose table fit the budget, else `Pike`. Documented-unstable.
+    T : { prog : List(U32), splits : List(U32), classes : Trie.T, n_groups : U32, engine : [Pike, Dfa(Dfa.T)] }
 
     ## A match, as half-open BYTE offsets into the haystack (D3, D15).
     Span : { start : U64, end : U64 }
 
     compile : Str -> Try(Regex.T, Err.Error)
-    compile = |src| Comp.compile(src)
+    compile = |src|
+        match Comp.compile(src) {
+            Err(e) => Err(e)
+            Ok(c) => {
+                # budget: max_artifact_bytes / (n_classes * 4); provisional 256 KB
+                nc = if c.classes.n_classes == 0 { 1 } else { c.classes.n_classes }
+                max_states = 262144 // (nc.to_u64() * 4)
+                engine =
+                    match Dfa.build(c, max_states) {
+                        Ok(d) => Dfa(d)
+                        Err(_) => Pike
+                    }
+                Ok({ prog: c.prog, splits: c.splits, classes: c.classes, n_groups: c.n_groups, engine })
+            }
+        }
 
     ## The documented literal-pattern idiom: fold, and crash-with-message on a
     ## bad literal so the build fails (D7).
@@ -41,13 +58,13 @@ Regex := [].{
 
     ## Leftmost-first search over a byte haystack.
     find : Regex.T, List(U8) -> Try(Regex.Span, [NoMatch])
-    find = |re, hay| Pike.find(re, hay)
+    find = |re, hay| Pike.find(Regex.base(re), hay)
 
     ## All capture spans: index 0 is the whole match, i is group i. An
     ## unset/non-participating group is `Err(NoGroup)`.
     captures : Regex.T, List(U8) -> Try(List(Try(Regex.Span, [NoGroup])), [NoMatch])
     captures = |re, hay|
-        match Pike.captures(re, hay) {
+        match Pike.captures(Regex.base(re), hay) {
             Err(_) => Err(NoMatch)
             Ok(slots) => Ok(Regex.pair_slots(slots, 0, []))
         }
@@ -66,10 +83,19 @@ Regex := [].{
     ## Whether the pattern matches anywhere in the haystack.
     is_match : Regex.T, List(U8) -> Bool
     is_match = |re, hay|
-        match Pike.find(re, hay) {
-            Ok(_) => True
-            Err(_) => False
+        match re.engine {
+            Dfa(d) => Dfa.is_match(d, re.classes, hay)
+            Pike =>
+                match Pike.find(Regex.base(re), hay) {
+                    Ok(_) => True
+                    Err(_) => False
+                }
         }
+
+    # the Comp.Compiled view (drop the engine field) for Pike, which is
+    # engine-agnostic.
+    base : Regex.T -> Comp.Compiled
+    base = |re| { prog: re.prog, splits: re.splits, classes: re.classes, n_groups: re.n_groups }
 
 
     ## --- iteration and rewriting (D15, D14) ---------------------------------
@@ -88,7 +114,7 @@ Regex := [].{
         if at > List.len(hay) {
             acc
         } else {
-            match Pike.captures_from(re, hay, at) {
+            match Pike.captures_from(Regex.base(re), hay, at) {
                 Err(_) => acc
                 Ok(slots) => {
                     s = List.get(slots, 0) ?? 0
@@ -188,7 +214,7 @@ Regex := [].{
     ## Convenience: search a `Str`. Copies to `List(U8)` (D3 — the byte API is
     ## the real one; this pays a copy in).
     find_str : Regex.T, Str -> Try(Regex.Span, [NoMatch])
-    find_str = |re, s| Pike.find(re, Str.to_utf8(s))
+    find_str = |re, s| Regex.find(re, Str.to_utf8(s))
 
     is_match_str : Regex.T, Str -> Bool
     is_match_str = |re, s| Regex.is_match(re, Str.to_utf8(s))
