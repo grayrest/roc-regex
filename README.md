@@ -55,7 +55,8 @@ paths (`find_all`, `is_match`, three-pass `find`), including Unicode classes,
 | `Pike` | M1/M1.5/M4 | PikeVM with slots; anchored `match_at` |
 | `Rev` | M3 | leftmost determinizer, reverse DFA, three-pass `find` (D5) |
 | `Uni` | M2 | generated Unicode Tier A tables (packed) |
-| `Lit` | M4 | prefilter seam |
+| `Lit` | M4 | scalar prefilter rungs |
+| `Teddy` | M4 | SIMD (`U8x16`) Teddy prefilter |
 | `Regex` / `Err` | all | public surface; D7 error + renderer |
 
 `find` is the D5 three-pass span finder (forward DFA end + reverse DFA start,

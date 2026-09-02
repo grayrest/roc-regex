@@ -1,0 +1,138 @@
+## Teddy — a SIMD multi-literal prefilter (D6, M4), on Roc's 128-bit intrinsics.
+##
+## Basic ("Slim") 128-bit Teddy: up to 8 literals, one per bucket bit, with an
+## M-byte fingerprint (M = min(3, shortest literal)). For each fingerprint
+## position it builds two 16-entry nibble→bucket-mask tables; the scan does two
+## `table_lookup`s (pshufb) per position, ANDs the shifted results
+## (`concat_shift_bytes` = palignr) to require consecutive fingerprint bytes, and
+## `to_bitmask` (pmovmskb) extracts candidate lanes. It yields a SUPERSET of the
+## positions where some literal could start; the caller verifies each. AVX2 "fat"
+## Teddy (256-bit) is out — Roc has only 128-bit vectors.
+Teddy := [].{
+    ## Built prefilter: the M nibble-table pairs (unused ones are splat 0), the
+    ## fingerprint length m, and the literals (for the caller's verification and
+    ## a scalar tail scan).
+    T : {
+        m : U64,
+        lo0 : U8x16, hi0 : U8x16,
+        lo1 : U8x16, hi1 : U8x16,
+        lo2 : U8x16, hi2 : U8x16,
+        lits : List(List(U8)),
+    }
+
+    ## Build from ≤8 non-empty literals, or `Err` (too many, or an empty literal —
+    ## either makes Teddy inapplicable and the caller keeps its scalar rung).
+    build : List(List(U8)) -> Try(Teddy.T, [Unsuitable])
+    build = |lits|
+        if List.len(lits) == 0 or List.len(lits) > 8 or List.any(lits, List.is_empty) {
+            Err(Unsuitable)
+        } else {
+            m = List.fold(lits, 3, |acc, l| if List.len(l) < acc { List.len(l) } else { acc })
+            t0 = Teddy.tables(lits, 0)
+            t1 = if m >= 2 { Teddy.tables(lits, 1) } else { { lo: U8x16.splat(0), hi: U8x16.splat(0) } }
+            t2 = if m >= 3 { Teddy.tables(lits, 2) } else { { lo: U8x16.splat(0), hi: U8x16.splat(0) } }
+            Ok({ m, lo0: t0.lo, hi0: t0.hi, lo1: t1.lo, hi1: t1.hi, lo2: t2.lo, hi2: t2.hi, lits })
+        }
+
+    # nibble→bucket-mask tables for fingerprint position `p`: bit (1<<i) is set in
+    # lo[byte&0xF] and hi[byte>>4] for literal i's p-th byte.
+    tables : List(List(U8)), U64 -> { lo : U8x16, hi : U8x16 }
+    tables = |lits, p| {
+        pair = List.map_with_index(lits, |l, i| { b: List.get(l, p) ?? 0, bit: 1.U8.shl_wrap(i.to_u8_wrap()) })
+        lo = List.fold(pair, List.repeat(0.U8, 16), |acc, e| Teddy.setbit(acc, (e.b.bitwise_and(0x0F)).to_u64(), e.bit))
+        hi = List.fold(pair, List.repeat(0.U8, 16), |acc, e| Teddy.setbit(acc, (e.b.shr_zf_wrap(4)).to_u64(), e.bit))
+        { lo: U8x16.from_list(lo) ?? U8x16.splat(0), hi: U8x16.from_list(hi) ?? U8x16.splat(0) }
+    }
+
+    setbit : List(U8), U64, U8 -> List(U8)
+    setbit = |t, idx, bit| List.set(t, idx, (List.get(t, idx) ?? 0).bitwise_or(bit)) ?? t
+
+    ## Ascending candidate start offsets (a superset of true literal starts).
+    candidates : Teddy.T, List(U8) -> List(U64)
+    candidates = |t, hay| {
+        len = List.len(hay)
+        if len < 16 {
+            Teddy.scalar_tail(t, hay, 0, len, [])
+        } else {
+            main = Teddy.scan(t, hay, len, t.m - 1, U8x16.splat(0xFF), U8x16.splat(0xFF), [])
+            # overlap window covering the tail, plus any positions the last full
+            # window's fingerprint could not reach
+            Teddy.scan(t, hay, len, len - 16, U8x16.splat(0xFF), U8x16.splat(0xFF), main)
+            |> Teddy.dedup_sorted
+        }
+    }
+
+    # scan 16-byte windows from `w`, carrying prev fingerprint results
+    scan : Teddy.T, List(U8), U64, U64, U8x16, U8x16, List(U64) -> List(U64)
+    scan = |t, hay, len, w, prev0, prev1, acc|
+        if w + 16 > len {
+            acc
+        } else {
+            chunk = U8x16.load(hay, w) ?? U8x16.splat(0)
+            lomask = U8x16.splat(0x0F)
+            hlo = chunk.bitwise_and(lomask)
+            hhi = chunk.shr_zf_wrap(4).bitwise_and(lomask)
+            res0 = t.lo0.table_lookup(hlo).bitwise_and(t.hi0.table_lookup(hhi))
+            cand =
+                if t.m == 1 {
+                    res0
+                } else if t.m == 2 {
+                    res1 = t.lo1.table_lookup(hlo).bitwise_and(t.hi1.table_lookup(hhi))
+                    # res0 shifted left 1 (lane0 <- prev0[15]) AND res1
+                    prev0.concat_shift_bytes(res0, 15).bitwise_and(res1)
+                } else {
+                    res1 = t.lo1.table_lookup(hlo).bitwise_and(t.hi1.table_lookup(hhi))
+                    res2 = t.lo2.table_lookup(hlo).bitwise_and(t.hi2.table_lookup(hhi))
+                    a0 = prev0.concat_shift_bytes(res0, 14)
+                    a1 = prev1.concat_shift_bytes(res1, 15)
+                    a0.bitwise_and(a1).bitwise_and(res2)
+                }
+            bm = cand.eq_lanes(U8x16.splat(0)).bitwise_not().to_bitmask()
+            acc2 = Teddy.bits(bm, w, t.m - 1, 0, acc)
+            Teddy.scan(t, hay, len, w + 16, res0, if t.m >= 2 { t.lo1.table_lookup(hlo).bitwise_and(t.hi1.table_lookup(hhi)) } else { U8x16.splat(0) }, acc2)
+        }
+
+    # for each set bit `j` in `bm`, append candidate start (w + j - back), clamped
+    bits : U16, U64, U64, U64, List(U64) -> List(U64)
+    bits = |bm, w, back, j, acc|
+        if j >= 16 {
+            acc
+        } else {
+            set = bm.bitwise_and(1.U16.shl_wrap(j.to_u8_wrap())) != 0
+            acc2 =
+                if set and w + j >= back {
+                    List.append(acc, w + j - back)
+                } else {
+                    acc
+                }
+            Teddy.bits(bm, w, back, j + 1, acc2)
+        }
+
+    # scalar first-M-bytes scan for haystacks shorter than a vector
+    scalar_tail : Teddy.T, List(U8), U64, U64, List(U64) -> List(U64)
+    scalar_tail = |t, hay, at, len, acc|
+        if at >= len {
+            acc
+        } else {
+            hit = List.any(t.lits, |l| Teddy.starts(hay, at, l, t.m))
+            Teddy.scalar_tail(t, hay, at + 1, len, if hit { List.append(acc, at) } else { acc })
+        }
+
+    starts : List(U8), U64, List(U8), U64 -> Bool
+    starts = |hay, at, lit, m| Teddy.eqm(hay, at, lit, 0, m)
+    eqm : List(U8), U64, List(U8), U64, U64 -> Bool
+    eqm = |hay, at, lit, i, m|
+        if i >= m {
+            True
+        } else if (List.get(hay, at + i) ?? 1) == (List.get(lit, i) ?? 2) {
+            Teddy.eqm(hay, at, lit, i + 1, m)
+        } else {
+            False
+        }
+
+    dedup_sorted : List(U64) -> List(U64)
+    dedup_sorted = |xs| {
+        sorted = List.sort_with(xs, |a, b| U64.compare(a, b))
+        List.fold(sorted, [], |acc, x| if (List.last(acc) ?? 0) == x and !List.is_empty(acc) { acc } else { List.append(acc, x) })
+    }
+}

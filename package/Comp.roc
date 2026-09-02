@@ -48,6 +48,7 @@ Comp := [
         uprog : List(U32),
         usplits : List(U32),
         fbytes : List(U8),
+        tlits : List(List(U8)),
     }
 
     # --- instruction encoding -------------------------------------------------
@@ -107,6 +108,7 @@ Comp := [
                         n_groups = numbered.next - 1
                         prefix = Comp.prefix_of(numbered.ast)
                         fbytes = Comp.first_bytes(numbered.ast)
+                        tlits = Comp.lead_literals(numbered.ast)
                         # wrap in group 0: Save0 ; body ; Save1 ; Match
                         prog0 = { prog: [Comp.inst(Comp.op_save, 0)], sets: [], splits: [], n_sets: 0 }
                         p1 = Comp.emit(prog0, numbered.ast, 1)
@@ -124,7 +126,7 @@ Comp := [
                         uast = Cat([dotstar, numbered.ast])
                         u1 = Comp.emit({ ..r1, prog: [], splits: [] }, uast, 0)
                         uprog = List.append(u1.prog, Comp.inst(Comp.op_match, 0))
-                        Ok({ prog, splits: p2.splits, classes: Trie.build(u1.sets), n_groups, prefix, rprog, rsplits: r1.splits, uprog, usplits: u1.splits, fbytes })
+                        Ok({ prog, splits: p2.splits, classes: Trie.build(u1.sets), n_groups, prefix, rprog, rsplits: r1.splits, uprog, usplits: u1.splits, fbytes, tlits })
                     }
                 Err(e) => Err(e)
             }
@@ -735,6 +737,26 @@ Comp := [
             Plus(x, g) => Plus(Comp.reverse_ast(x), g)
             Quest(x, g) => Quest(Comp.reverse_ast(x), g)
             Group(x, _) => Comp.reverse_ast(x)
+        }
+
+    # --- M4: leading literals for a Teddy prefilter (D6) ----------------------
+    #
+    # For an alternation whose every arm begins with an exact literal, the set of
+    # those literals — every match must start with one of them. [] when the shape
+    # is not a clean literal alternation of 2..8 arms.
+
+    lead_literals : Comp -> List(List(U8))
+    lead_literals = |ast|
+        match ast {
+            Group(x, _) => Comp.lead_literals(x)
+            Alt(xs) =>
+                if List.len(xs) >= 2 and List.len(xs) <= 8 {
+                    lits = List.map(xs, Comp.prefix_of)
+                    if List.any(lits, List.is_empty) { [] } else { lits }
+                } else {
+                    []
+                }
+            _ => []
         }
 
     # --- M4: first-byte set (D6 second rung) ----------------------------------

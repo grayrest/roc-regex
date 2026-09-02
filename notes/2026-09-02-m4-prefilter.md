@@ -48,7 +48,7 @@ and the full 1431-case differential still agrees with Rust (45 s).
 ## Deferred per D6
 
 Rabin-Karp for multi-literal sets; inner required literals (not just prefixes,
-`hir/literal.rs` territory); Teddy (needs SIMD + re-adding the AC automaton);
+`hir/literal.rs` territory);
 wiring the prefilter into the three-pass DFA path (it currently accelerates only
 the PikeVM path). The seam is the point: these slot in at `find_candidate` /
 `find_in_set` without touching the engines.

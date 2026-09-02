@@ -71,8 +71,12 @@ Four things differ from the original, all forced:
    the search; a pure function cannot. Replaced by eager determinization under
    budgets — affordable because the folded case pays at build time, which is why
    laziness existed at all.
-3. **No SIMD.** `src/builtins/simd.zig` is internal to the compiler's builtins;
-   there is no user-facing vector type. Every prefilter is a scalar loop.
+3. **SIMD is available** (corrected 2026-09-02 — earlier revisions wrongly said
+   it was not). Roc exposes portable 128-bit vector types (`U8x16` … `U64x2`)
+   lowering to x86-64 / AArch64 NEON / wasm, including `table_lookup` (`pshufb`/
+   `tbl`), `to_bitmask` (`pmovmskb`) and `concat_shift_bytes` (`palignr`) — the
+   exact primitives Teddy needs. Verified to build and run. Only 256-bit vectors
+   are absent, so AVX2 "fat Teddy" is out but basic 128-bit Teddy is in.
 4. **No unchecked indexing.** `list_get_unsafe` exists as a low-level but is not
    reachable from Roc. The inner loop is `List.get` returning a `Try`. **This
    port will not approach Rust's throughput and should not be sold as if it
@@ -867,8 +871,9 @@ regex: unclosed group
 
 ## Deferred, with the reason
 
-- **Teddy / `packed/`** — needs user-facing vector types, and re-adding AC's
-  automaton (D6).
+- **~~Teddy~~ — BUILT 2026-09-02** (`package/Teddy.roc`). Basic 128-bit Teddy on
+  Roc's `U8x16` intrinsics; it verifies candidates by scalar `memcmp` and needs
+  no AC automaton. AVX2 fat Teddy stays deferred (no 256-bit vectors).
 - **`RegexSet` public API** — needs D13's state-count budget and D11's
   forward-only rule; not "only the surface waits".
 - **Unicode Tier B/C** — ~25k lines of table source for rarely-written

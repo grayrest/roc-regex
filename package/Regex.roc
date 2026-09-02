@@ -10,6 +10,7 @@ import Pike
 import Trie
 import Lit
 import Rev
+import Teddy
 import Err
 
 Regex := [].{
@@ -18,7 +19,7 @@ Regex := [].{
     ## The `engine` field records M3's outcome (D10): `Three` carries the D5
     ## forward+reverse DFAs for a look-free pattern within budget, else `Pike`.
     ## Documented-unstable.
-    T : { prog : List(U32), splits : List(U32), classes : Trie.T, n_groups : U32, prefix : List(U8), rprog : List(U32), rsplits : List(U32), uprog : List(U32), usplits : List(U32), fbytes : List(U8), engine : [Pike, Three({ fwd : Rev.D, rev : Rev.D })] }
+    T : { prog : List(U32), splits : List(U32), classes : Trie.T, n_groups : U32, prefix : List(U8), rprog : List(U32), rsplits : List(U32), uprog : List(U32), usplits : List(U32), fbytes : List(U8), tlits : List(List(U8)), engine : [Pike, Three({ fwd : Rev.D, rev : Rev.D })] }
 
     ## A match, as half-open BYTE offsets into the haystack (D3, D15).
     Span : { start : U64, end : U64 }
@@ -36,7 +37,7 @@ Regex := [].{
                         Ok(d) => Three(d)
                         Err(_) => Pike
                     }
-                Ok({ prog: c.prog, splits: c.splits, classes: c.classes, n_groups: c.n_groups, prefix: c.prefix, rprog: c.rprog, rsplits: c.rsplits, uprog: c.uprog, usplits: c.usplits, fbytes: c.fbytes, engine })
+                Ok({ prog: c.prog, splits: c.splits, classes: c.classes, n_groups: c.n_groups, prefix: c.prefix, rprog: c.rprog, rsplits: c.rsplits, uprog: c.uprog, usplits: c.usplits, fbytes: c.fbytes, tlits: c.tlits, engine })
             }
         }
 
@@ -63,8 +64,19 @@ Regex := [].{
     ## candidate; otherwise the PikeVM's own unanchored search.
     find : Regex.T, List(U8) -> Try(Regex.Span, [NoMatch])
     find = |re, hay|
+        if !List.is_empty(re.tlits) {
+            # SIMD Teddy over the leading-literal set (M4, D6)
+            match Teddy.build(re.tlits) {
+                Ok(t) => Regex.find_teddy(Regex.base(re), hay, Teddy.candidates(t, hay), 0)
+                Err(_) => Regex.find_engine(re, hay)
+            }
+        } else {
+            Regex.find_engine(re, hay)
+        }
+
+    find_engine : Regex.T, List(U8) -> Try(Regex.Span, [NoMatch])
+    find_engine = |re, hay|
         match re.engine {
-            # look-free, within budget: D5 three-pass over the prebuilt DFAs.
             Three(d) => Rev.find(d, re.classes, hay)
             Pike =>
                 if !List.is_empty(re.prefix) {
@@ -73,6 +85,19 @@ Regex := [].{
                     Regex.find_fb(Regex.base(re), hay, re.fbytes, 0)
                 } else {
                     Pike.find(Regex.base(re), hay)
+                }
+        }
+
+    # run the engine anchored at each Teddy candidate, in order; first match wins
+    # (leftmost-first, since every match starts with a leading literal)
+    find_teddy : Comp.Compiled, List(U8), List(U64), U64 -> Try(Regex.Span, [NoMatch])
+    find_teddy = |c, hay, cands, i|
+        match List.get(cands, i) {
+            Err(_) => Err(NoMatch)
+            Ok(at) =>
+                match Pike.match_at(c, hay, at) {
+                    Ok(slots) => Ok({ start: List.get(slots, 0) ?? 0, end: List.get(slots, 1) ?? 0 })
+                    Err(_) => Regex.find_teddy(c, hay, cands, i + 1)
                 }
         }
 
@@ -140,7 +165,7 @@ Regex := [].{
     # the Comp.Compiled view (drop the engine field) for Pike, which is
     # engine-agnostic.
     base : Regex.T -> Comp.Compiled
-    base = |re| { prog: re.prog, splits: re.splits, classes: re.classes, n_groups: re.n_groups, prefix: re.prefix, rprog: re.rprog, rsplits: re.rsplits, uprog: re.uprog, usplits: re.usplits, fbytes: re.fbytes }
+    base = |re| { prog: re.prog, splits: re.splits, classes: re.classes, n_groups: re.n_groups, prefix: re.prefix, rprog: re.rprog, rsplits: re.rsplits, uprog: re.uprog, usplits: re.usplits, fbytes: re.fbytes, tlits: re.tlits }
 
 
     ## --- iteration and rewriting (D15, D14) ---------------------------------
