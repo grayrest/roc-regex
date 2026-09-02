@@ -25,25 +25,35 @@ spans from the DFAs; captures/`replace`/`split` still layer on the PikeVM.
   leftmost-first end); reverse runs backward from that end, smallest reached
   match-state position is the start.
 
-## Validation
+## Validation — and the bug it found
 
-- **240/240** — the three-pass `find` agrees with the PikeVM reference on ASCII
-  look-free patterns, including `ab|a`, `a|ab`, `(a|b)*abb`, lazy `a.*?c`, `.*`,
-  empty matches, `{n,m}`.
-- **180/180** — three-pass `find` agrees **directly with the Rust crate** on
-  15 patterns × 12 haystacks (leftmost-first cases included).
-- smoke 21/21; `find_all`/`replace`/`split` (unchanged PikeVM paths) remain at
-  the M1.5/M2 differential result.
+The bounded checks first: 240/240 vs the PikeVM reference and 180/180 directly
+vs Rust on ASCII look-free patterns (`ab|a`, `a|ab`, `(a|b)*abb`, lazy `a.*?c`,
+`.*`, empty matches, `{n,m}`).
+
+Those were **not enough**, and I reported the three-pass validated before it was.
+Neither bounded corpus contained an empty-loopable quantifier, and `Rev.close_pri`
+had a non-termination bug: it deduped only the Char/Match pcs it output, never the
+split/jmp/save nodes it walked, so a nullable body under `+`/`*` — `(a*)+`,
+`(a*)*` — is a pure epsilon cycle and the closure looped forever. The PikeVM was
+never affected (its closure tracks every pc in `seen`), which is exactly why the
+original 1431 passed and this hid. Fixed in `186ef1c` (`close_go` tracks all
+visited pcs).
+
+**With the fix the full 1431-case differential harness completes: 1431/1431 agree
+with the Rust crate** across `find_all` (PikeVM), `is_match` (DFA) and the
+prefiltered three-pass `find`, in ~50 s. smoke 21/21. The lesson is the plan's
+own: a bounded corpus is not a differential campaign, and the bug that survives
+is the one your sample happens to miss (here, `(a*)+`).
 
 ## Cost and a caveat
 
 For a **folded** (constant) pattern the DFAs are built at compile time: literal
 `[a-z]+[0-9]+` builds in ~1 s and embeds forward+reverse DFAs at a 33 KB
 artifact delta, engine `three-pass`. For a **runtime** pattern the determinization
-runs at runtime (D2 — runtime patterns pay), which is why the 1431-case
-differential harness (which compiles every case at runtime via `List.map`) no
-longer completes quickly with the DFA paths; the DFA is validated on the bounded
-corpora above, and the PikeVM core on the full 1431.
+runs at runtime (D2 — runtime patterns pay); the 1431-case harness compiles every
+case at runtime via `List.map`, so it pays full determinization ×1431 and takes
+~50 s (~35 ms/case) — the runtime cost, not a folded-use cost.
 
 Still deferred: Unicode `\b` in the DFA (look patterns use the PikeVM), captures
 directly from the reverse pass (they layer on `match_at`), and stride/`U16`

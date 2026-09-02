@@ -45,7 +45,7 @@ in [`notes/2026-09-02-m1-gate.md`](notes/2026-09-02-m1-gate.md).
 
 All five milestones (M1–M4) are implemented and committed. The engine agrees
 with the Rust `regex` crate on **1431/1431** differential cases across three
-paths (`find_all`, `is_match`, prefiltered `find`), including Unicode classes,
+paths (`find_all`, `is_match`, three-pass `find`), including Unicode classes,
 `\p{}`, `(?i)`, empty-match iteration, and pathological patterns.
 
 | module | milestone | what |
@@ -60,7 +60,10 @@ paths (`find_all`, `is_match`, prefiltered `find`), including Unicode classes,
 
 `find` is the D5 three-pass span finder (forward DFA end + reverse DFA start,
 both leftmost-first, folded into the artifact); captures/`replace`/`split` layer
-on the PikeVM. Validated 240/240 vs the PikeVM and 180/180 directly vs Rust.
+on the PikeVM. The full 1431-case differential harness (`tools/diff`) completes
+at **1431/1431 agreeing with the Rust crate** across `find_all`, `is_match` and
+the three-pass `find` — after it exposed and forced the fix of an epsilon-cycle
+non-termination bug (`(a*)+`) in the three-pass closure.
 
 Honest gaps: full `\p{}` breadth, `(?i:...)` scoped flags, Unicode `\b` in the
 DFA (look patterns use the PikeVM), captures direct from the reverse pass, and
