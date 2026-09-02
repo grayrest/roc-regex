@@ -5,7 +5,6 @@ app [main!] {
 import pf.Stdout
 import re.Regex
 
-# each case: pattern, haystack, expected find result as "start-end" or "none"
 Case : { pat : Str, hay : Str, want : Str }
 
 cases : List(Case)
@@ -30,6 +29,7 @@ cases = [
 	{ pat: "(ab)+", hay: "xababab", want: "1-7" },
 	{ pat: "a{3}", hay: "aaaa", want: "0-3" },
 	{ pat: "a.*?b", hay: "axbxb", want: "0-3" },
+	{ pat: "[α-ω]+", hay: "abγδεxy", want: "2-8" },
 ]
 
 run_one : Case -> { ok : Bool, got : Str }
@@ -49,7 +49,7 @@ main! = |_a| {
 	total = List.len(results)
 	lines = List.map2(cases, results, |c, r| {
 		mark = if r.ok { "ok  " } else { "FAIL" }
-		"${mark} /${c.pat}/ on \"${c.hay}\"  want ${c.want} got ${r.got}"
+		"${mark} /${c.pat}/ want ${c.want} got ${r.got}"
 	})
 	Stdout.line!(Str.join_with(lines, "\n"))?
 	Stdout.line!("\n${passed.to_str()}/${total.to_str()} passed")

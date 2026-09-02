@@ -6,6 +6,7 @@
 ## nested pattern cannot overflow the stack. Preference order is positional:
 ## threads earlier in the list win, which gives leftmost-first (S5, S4).
 import Comp
+import Trie
 
 Pike := [].{
     Th : { pc : U32, start : U64 }
@@ -13,13 +14,13 @@ Pike := [].{
 
     ## Leftmost-first search. Returns the byte span of the leftmost match, or
     ## `NoMatch`. `find` and `is_match` (Regex) are thin wrappers.
-    find : Comp.Prog, List(U8) -> Try({ start : U64, end : U64 }, [NoMatch])
+    find : Comp.Compiled, List(U8) -> Try({ start : U64, end : U64 }, [NoMatch])
     find = |prog, hay| {
         len = List.len(hay)
         Pike.run(prog, hay, len, 0, { ths: [], seen: [] }, Err(NoMatch))
     }
 
-    run : Comp.Prog, List(U8), U64, U64, Pike.Cl, Try({ start : U64, end : U64 }, [NoMatch]) -> Try({ start : U64, end : U64 }, [NoMatch])
+    run : Comp.Compiled, List(U8), U64, U64, Pike.Cl, Try({ start : U64, end : U64 }, [NoMatch]) -> Try({ start : U64, end : U64 }, [NoMatch])
     run = |prog, hay, len, pos, cl0, matched| {
         # seed a new start thread at this position while no match yet
         cl =
@@ -53,7 +54,7 @@ Pike := [].{
     # run the current thread list against the symbol at `pos`, building the next
     Step : { cl : Pike.Cl, matched : Try({ start : U64, end : U64 }, [NoMatch]) }
 
-    exec : Comp.Prog, List(U8), U64, U64, List(Pike.Th), U64, Pike.Cl, Try({ start : U64, end : U64 }, [NoMatch]) -> Pike.Step
+    exec : Comp.Compiled, List(U8), U64, U64, List(Pike.Th), U64, Pike.Cl, Try({ start : U64, end : U64 }, [NoMatch]) -> Pike.Step
     exec = |prog, hay, pos, len, ths, ti, nl, matched|
         match List.get(ths, ti) {
             Err(_) => { cl: nl, matched }
@@ -62,7 +63,7 @@ Pike := [].{
                 op = Comp.inst_op(w)
                 arg = Comp.inst_arg(w)
                 if op == Comp.op_char {
-                    if pos < len and Pike.in_set(prog, arg, Comp.decode(hay, pos).cp) {
+                    if pos < len and Pike.in_set(prog.classes, arg, Comp.decode(hay, pos).cp) {
                         npos = pos + Comp.decode(hay, pos).len
                         nl2 = Pike.add(prog, hay, npos, len, nl, { pc: th.pc + 1, start: th.start })
                         Pike.exec(prog, hay, pos, len, ths, ti + 1, nl2, matched)
@@ -79,10 +80,10 @@ Pike := [].{
         }
 
     # epsilon closure: add a thread and everything reachable by split/jmp/look
-    add : Comp.Prog, List(U8), U64, U64, Pike.Cl, Pike.Th -> Pike.Cl
+    add : Comp.Compiled, List(U8), U64, U64, Pike.Cl, Pike.Th -> Pike.Cl
     add = |prog, hay, pos, len, cl, th| Pike.close(prog, hay, pos, len, cl, [th.pc], th.start)
 
-    close : Comp.Prog, List(U8), U64, U64, Pike.Cl, List(U32), U64 -> Pike.Cl
+    close : Comp.Compiled, List(U8), U64, U64, Pike.Cl, List(U32), U64 -> Pike.Cl
     close = |prog, hay, pos, len, cl, stack, start|
         match List.last(stack) {
             Err(_) => cl
@@ -117,28 +118,11 @@ Pike := [].{
             }
         }
 
-    in_set : Comp.Prog, U32, U32 -> Bool
-    in_set = |prog, idx, cp| {
-        i = idx.to_u64()
-        negw = List.get(prog.sets, i) ?? 0
-        count = (List.get(prog.sets, i + 1) ?? 0).to_u64()
-        hit = Pike.scan_ranges(prog.sets, i + 2, count, cp)
-        if negw == 1 { !hit } else { hit }
-    }
-
-    scan_ranges : List(U32), U64, U64, U32 -> Bool
-    scan_ranges = |sets, at, count, cp|
-        if count == 0 {
-            False
-        } else {
-            lo = List.get(sets, at) ?? 0
-            hi = List.get(sets, at + 1) ?? 0
-            if cp >= lo and cp <= hi {
-                True
-            } else {
-                Pike.scan_ranges(sets, at + 2, count - 1, cp)
-            }
-        }
+    ## Char match: map the codepoint to its class via the trie, then test the
+    ## set's accept bitset (negation is already baked in). S2 replaces the range
+    ## scan the M1 slice used.
+    in_set : Trie.T, U32, U32 -> Bool
+    in_set = |t, set_ord, cp| Trie.accepts_atom(t, set_ord, Trie.class_of(t, cp))
 
     # look assertions (M1): ^ $ \b \B
     look_ok : List(U8), U64, U64, U32 -> Bool

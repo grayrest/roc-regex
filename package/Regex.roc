@@ -7,12 +7,13 @@
 ## ordinary `Err`. One function, one code path (D1).
 import Comp
 import Pike
+import Trie
 import Err
 
 Regex := [].{
     ## The compiled pattern. Fields are unstable (see above). M1's engine is
     ## always the PikeVM; the `Dfa` arm and its tables are M3.
-    T : { prog : List(U32), sets : List(U32), splits : List(U32) }
+    T : { prog : List(U32), splits : List(U32), classes : Trie.T }
 
     ## A match, as half-open BYTE offsets into the haystack (D3, D15).
     Span : { start : U64, end : U64 }

@@ -5,6 +5,7 @@
 ## never leaves this module. Emission is forward-only with precomputed subtree
 ## sizes (S3): no `List.set`, so the compiler folds without back-patching (D12).
 import Err
+import Trie
 
 ## The AST is the module's nominal type, so its `Cat(List(Comp))` recursion goes
 ## through the nominal (as roc-markdown's `Inl` does). Destructured only with
@@ -29,6 +30,15 @@ Comp := [
         prog : List(U32),
         sets : List(U32),
         splits : List(U32),
+        n_sets : U64,
+    }
+
+    ## The finished program: instructions, split targets, and the class trie.
+    ## `sets` does not survive — it is compile scaffolding for the partition.
+    Compiled : {
+        prog : List(U32),
+        splits : List(U32),
+        classes : Trie.T,
     }
 
     # --- instruction encoding -------------------------------------------------
@@ -66,7 +76,7 @@ Comp := [
 
     ## Parse then compile. A parse error is returned as `Err`; a caller-side
     ## `unwrap` on a literal pattern turns it into a build failure (D7).
-    compile : Str -> Try(Comp.Prog, Err.Error)
+    compile : Str -> Try(Comp.Compiled, Err.Error)
     compile = |src| {
         toks = Comp.lex(Str.to_utf8(src), 0, [])
         given = List.len(toks)
@@ -79,9 +89,10 @@ Comp := [
                         # a leftover `)` with no opener
                         Err(Comp.err_at(src, toks, st.i, GroupUnopened))
                     } else {
-                        prog0 = { prog: [], sets: [], splits: [] }
+                        prog0 = { prog: [], sets: [], splits: [], n_sets: 0 }
                         p1 = Comp.emit(prog0, st.ast, 0)
-                        Ok({ ..p1, prog: List.append(p1.prog, Comp.inst(Comp.op_match, 0)) })
+                        prog = List.append(p1.prog, Comp.inst(Comp.op_match, 0))
+                        Ok({ prog, splits: p1.splits, classes: Trie.build(p1.sets) })
                     }
                 Err(e) => Err(e)
             }
@@ -449,11 +460,11 @@ Comp := [
 
     push_set : Comp.Prog, Bool, List(Comp.Rng) -> { p : Comp.Prog, idx : U32 }
     push_set = |p, neg, ranges| {
-        idx = (List.len(p.sets)).to_u32_wrap()
+        idx = p.n_sets.to_u32_wrap()
         negw = if neg { 1 } else { 0 }
         head = [negw, (List.len(ranges)).to_u32_wrap()]
         body = List.fold(ranges, head, |a, r| List.concat(a, [r.lo, r.hi]))
-        { p: { ..p, sets: List.concat(p.sets, body) }, idx }
+        { p: { ..p, sets: List.concat(p.sets, body), n_sets: p.n_sets + 1 }, idx }
     }
 
     push_split : Comp.Prog, U32, U32 -> { p : Comp.Prog, idx : U32 }
