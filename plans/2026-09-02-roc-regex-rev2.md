@@ -704,6 +704,163 @@ reference. A pre-compiled `Replacement` folds the parse and drops the name table
 — this project's own thesis applied to `replace`. Needs a name-table size
 measurement at M1.
 
+## M1 specification
+
+Written 2026-09-02 after a sufficiency review found M1 unbuildable as specified.
+These are consequences of the decisions above plus the Rust source, not new
+decisions. Where behaviour is taken from `regex-automata`, the file and line are
+given so the port has a target rather than a description.
+
+### S1 — Codepoint equivalence classes
+
+Determined by D3, unwritten until now, and previously scheduled in M3 although
+M1's NFA and trie both consume it.
+
+Collect every range endpoint appearing anywhere in the pattern's HIR: for each
+class range `[lo, hi]`, emit cut points `lo` and `hi + 1`; for each literal `c`,
+emit `c` and `c + 1`. Add `0` and `0x110000`. Sort, dedup. Consecutive cut points
+delimit the partition's atoms, and each atom is one equivalence class — every
+codepoint inside it is indistinguishable to this pattern. Assign class ids in
+atom order; `Invalid` (D8) takes the next id after the last atom, and EOI (D5)
+the one after that.
+
+The partition is **per-pattern**, which is what makes the class trie per-pattern
+(D3). Rust's byte analogue is `util/alphabet.rs`'s `ByteClassSet`, driven from
+`nfa/thompson/compiler.rs`; the algorithm is the same over a 0x110000-wide
+alphabet instead of 256.
+
+Measured class counts for real patterns are 2–9. Nothing bounds this in general:
+a large non-ASCII literal set produces one atom per distinct codepoint (D3's
+caveat), which is why D13's budgets are checked during construction rather than
+after.
+
+### S2 — Class trie layout
+
+Three flat arrays, per D12 rule 3 (no nested lists, no records in the artifact):
+
+| array | length | element | meaning |
+|---|---|---|---|
+| `ascii` | 128 | `U8` | class id, direct-indexed by codepoint. The fast path. |
+| `l1` | 4,352 | `U8` | leaf-block index for `cp >> 8` over the whole 0x110000 space |
+| `leaves` | `n × 256` | `U8` | class id by `cp & 0xFF` |
+
+Total = `128 + 4,352 + n × 256` bytes. This reconciles exactly with the measured
+figures: `\w{10,20}` at 38,272 B is n = 132, `[a-z]+` at 4,992 B is n = 2, and
+D12 rule 4's adjacent-only dedup gives n = 185 → **51,840 B**, which is the
+number to build against — the 38,272 figure uses full hash dedup, which rule 4
+forbids.
+
+**Constraint the layout implies and nobody has stated:** `l1` entries are one
+byte, so a pattern is limited to **256 distinct leaf blocks**. `\w` already uses
+185 under rule 4. A pattern exceeding it must widen `l1` to `U16` (+4,352 bytes)
+— detect and switch rather than truncate.
+
+Lookup: `if cp < 128 then ascii[cp] else leaves[l1[cp >> 8] * 256 + (cp & 0xFF)]`.
+Three `List.get`s worst case, one on the ASCII path. This is the structure
+measured at 1.96 ns/codepoint; a binary search over a packed range list instead
+costs 14.2 (D3).
+
+### S3 — NFA program encoding
+
+D12 rule 3 forbids `List(Inst)`, so the program is a flat `List(U32)`, one word
+per instruction:
+
+    bits 31..28  opcode
+    bits 27..0   operand
+
+| opcode | operand | meaning |
+|---|---|---|
+| `0` Class | class id | consume one symbol if it is in this class |
+| `1` Split | index into `splits` | two-way branch; preference order is arm 0 first |
+| `2` Jmp | target pc | unconditional |
+| `3` Match | pattern id | accept (D11 — `Match{pid}` is all M1 needs of D11) |
+| `4` Look | `Look` variant id | zero-width assertion, evaluated against position |
+| `5` Save | slot index | capture slot (M1.5; reserve the opcode) |
+
+`Split` needs two targets and a word holds one operand, so split targets live in
+a parallel `List(U32)` of pairs indexed by the operand. Emission is
+**forward-only with precomputed subtree sizes** (D12 rule 2): compute each HIR
+node's instruction count in a first pass, then emit in a second with all targets
+known. Never `List.set` — back-patching retains 3.8 MB per call at compile time.
+
+### S4 — `x*` compiles as `(x+)?` when `x` can match empty
+
+The one measured correctness bug from the prototype: naive `x*` produced 394
+fuzz disagreements before it was fixed. It lived only in a note's prose.
+
+`nfa/thompson/compiler.rs:1275-1279`, verbatim: *"when implementing
+leftmost-first (Perl-like) match semantics, `x*` results in an incorrect
+preference order when computing the transitive closure of states if and only if
+`x` can match the empty string. So instead, we compile `x*` as `(x+)?`, which
+preserves the correct preference order."* (rust-lang/regex#779.)
+
+So: if `x`'s minimum length is > 0, emit the simple self-looping union. Otherwise
+emit `x`, then a union looping back to `x`'s start (the `+`), then an outer union
+choosing between `x`'s start and empty (the `?`). Greedy uses `add_union`,
+non-greedy `add_union_reverse` — the arms are the same, the preference order
+flips.
+
+This is not an optimisation. Getting it wrong passes most tests and produces
+wrong capture positions and wrong leftmost-first alternation.
+
+### S5 — The PikeVM without mutation
+
+Rust's thread list is a `SparseSet` — a dense list plus a sparse index, both
+mutated in place (`nfa/thompson/pikevm.rs:1996`, `ActiveStates`). Roc has no
+mutation, and D12's rules govern compile-time construction, not the search loop;
+the search loop's constraint is simply that it runs at runtime and must not
+allocate per symbol more than it has to.
+
+The pure form: carry the current thread list as a **sorted `List(U32)` of pcs**,
+built once per input position by a fold over the previous list. Sorted order is
+what replaces the sparse index — membership is a scan of a list whose length is
+bounded by the NFA size and typically tiny, and preference order is positional,
+so keeping it sorted by pc is wrong; **keep it in insertion order and dedup
+against the list being built**. For M1's sizes a linear membership check is
+correct and fast enough; if it shows up in SR4's numbers, replace the dedup
+check with a generation-stamped `List(U32)` of size `n_states` rebuilt per
+position.
+
+Epsilon closure is an explicit worklist — a `List(U32)` stack folded until empty
+— not recursion, because the compile path forbids deep non-tail recursion (D13
+budget 1) and the search path would otherwise be unbounded in pattern nesting.
+
+`Look` assertions are evaluated at the position, against the previous and next
+symbol classes. M1 needs no start-state configuration; that is D5, and D5 is M3.
+
+### S6 — Specimen error message
+
+"A bad literal pattern fails the build naming which pattern" is M1's gate
+criterion and the project's headline feature, so here is the target output.
+Source: `Regex.unwrap(Regex.compile("(\\d{4}-\\d{2}"))` at a package boundary,
+where the compile-time crash reports at `app.roc:1:1` with no source snippet
+(D7), so the message is the entire diagnostic:
+
+```
+regex: unclosed group
+  | (\d{4}-\d{2}
+  | ^
+  = expected ')' before end of pattern
+```
+
+With `unwrap_labeled("date", …)`, the first line becomes
+`regex[date]: unclosed group` — which is why D7 ships it: with three top-level
+regexes all reporting at `file:1:1`, the label identifies the pattern where the
+file position cannot.
+
+Rules, from D7: every rendered line ≤ **66 display columns**; the excerpt is a
+window, not the pattern, snapped to codepoint boundaries with ASCII `...`
+elision when cut; the caret column is computed in **display columns over the
+escaped text**; tabs and controls are escaped before windowing. A long pattern
+renders as:
+
+```
+regex: unclosed group
+  | ...aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa(bbbbbbbbbbbbbbbbbbbbbbb...
+  |                                    ^
+  = expected ')' before end of pattern
+```
+
 ## Deferred, with the reason
 
 - **Teddy / `packed/`** — needs user-facing vector types, and re-adding AC's
