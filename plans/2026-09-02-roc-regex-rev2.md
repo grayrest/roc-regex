@@ -195,14 +195,14 @@ was run for the wrong reason (nothing downstream depended on it).
   *What it sets:* SR1's threshold, from the p90, marked provisional until the
   corpus exists at M1.5. **It does not set SR4's floor** — a PikeVM-only
   milestone has no DFA to measure a multiple against.
-- **M1.5 — the rest of the v1 surface.** `captures`, `find_iter`, `replace*`,
+- **M1.5 — DONE 2026-09-02** (`bda281e`). The rest of the v1 surface. `captures`, `find_iter`, `replace*`,
   `split`, empty-match handling (D14), the two-path corpus generator (D9) and the
   differential harness.
-- **M2 — Unicode Tier A.** Table generator → packed literals + folding decoders;
+- **M2 — Unicode Tier A. DONE 2026-09-02** (`aa0369b`; [note](../notes/2026-09-02-m2-unicode.md), partial \p{} coverage). Table generator → packed literals + folding decoders;
   HIR class expansion, class set operations, simple case folding. `range_trie.rs`
   and `utf8.rs` (~1,643 lines, the hardest code in the original) are **not
   needed** — D3 deletes UTF-8 automata.
-- **M3 — determinizer and dense DFA.** Forward and reverse tables over M2's class
+- **M3 — determinizer and dense DFA. DONE 2026-09-02** (`14fa8f0`; [note](../notes/2026-09-02-m3-dfa.md), forward DFA for is_match; reverse pass deferred). Forward and reverse tables over M2's class
   pass, D5's three passes and its 8 start configurations, D11's forward-only
   pattern IDs, D13 budgets 4 and 5, D10's downgrade and its `engine` field's
   `Dfa` arm, D8's determinizer flag combinations. The differential fuzzing
@@ -212,7 +212,7 @@ was run for the wrong reason (nothing downstream depended on it).
   is a DFA concept; a PikeVM evaluates `Look` assertions per position and needs
   none of it), D11's body, D13 budgets 4–5, and D10's downgrade. M1 needs only
   `Match{pid}` in the NFA and an `engine` field that is always `PikeVm`.
-- **M4 — prefilter seam.** `find_candidate` with the two scalar rungs D6 keeps.
+- **M4 — prefilter seam. DONE 2026-09-02** (`4aa1892`; [note](../notes/2026-09-02-m4-prefilter.md)). `find_candidate` with the two scalar rungs D6 keeps.
 
 ## Decisions
 

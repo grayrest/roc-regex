@@ -43,6 +43,22 @@ and the D7 build-time error path. `examples/smoke.roc` passes 21/21; a bad
 literal pattern fails the build with a rendered caret message. Gate numbers are
 in [`notes/2026-09-02-m1-gate.md`](notes/2026-09-02-m1-gate.md).
 
-Next (M1.5): captures, `find_iter`, `replace`/`split`, the two-path corpus and
-the differential harness against the Rust crate. Then Unicode tables (M2) and
-the DFA (M3).
+All five milestones (M1–M4) are implemented and committed. The engine agrees
+with the Rust `regex` crate on **1431/1431** differential cases across three
+paths (`find_all`, `is_match`, prefiltered `find`), including Unicode classes,
+`\p{}`, `(?i)`, empty-match iteration, and pathological patterns.
+
+| module | milestone | what |
+|---|---|---|
+| `Comp` | M1/M1.5/M2/M4 | parser, AST, NFA compiler, captures, `\p{}`/`(?i)`, prefix extraction |
+| `Trie` | M1 | S1 partition + S2 class trie |
+| `Pike` | M1/M1.5/M4 | PikeVM with slots; anchored `match_at` |
+| `Dfa` | M3 | forward determinizer, budget, downgrade |
+| `Uni` | M2 | generated Unicode Tier A tables (packed) |
+| `Lit` | M4 | prefilter seam |
+| `Regex` / `Err` | all | public surface; D7 error + renderer |
+
+Honest gaps: full `\p{}` breadth, `(?i:...)` scoped flags, the reverse DFA and
+three-pass `find` (D5 — `find` is PikeVM), Unicode `\b` in the DFA, and the
+shared-vs-per-pattern trie decision (D3 fork). Each is noted in the milestone
+notes under `notes/`.
