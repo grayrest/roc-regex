@@ -6,6 +6,7 @@
 ## sizes (S3): no `List.set`, so the compiler folds without back-patching (D12).
 import Err
 import Trie
+import Uni
 
 ## The AST is the module's nominal type, so its `Cat(List(Comp))` recursion goes
 ## through the nominal (as roc-markdown's `Inl` does). Destructured only with
@@ -82,7 +83,9 @@ Comp := [
     ## `unwrap` on a literal pattern turns it into a build failure (D7).
     compile : Str -> Try(Comp.Compiled, Err.Error)
     compile = |src| {
-        toks = Comp.lex(Str.to_utf8(src), 0, [])
+        toks0 = Comp.lex(Str.to_utf8(src), 0, [])
+        ci = Comp.starts_ci(toks0)
+        toks = if ci { List.drop_first(toks0, 4) } else { toks0 }
         given = List.len(toks)
         if given > 1000 {
             Err(Err.whole(src, PatternTooLong({ limit: 1000, given })))
@@ -93,7 +96,8 @@ Comp := [
                         # a leftover `)` with no opener
                         Err(Comp.err_at(src, toks, st.i, GroupUnopened))
                     } else {
-                        numbered = Comp.number(st.ast, 1)
+                        ast1 = if ci { Comp.fold_ast(st.ast) } else { st.ast }
+                        numbered = Comp.number(ast1, 1)
                         n_groups = numbered.next - 1
                         # wrap in group 0: Save0 ; body ; Save1 ; Match
                         prog0 = { prog: [Comp.inst(Comp.op_save, 0)], sets: [], splits: [], n_sets: 0 }
@@ -171,16 +175,18 @@ Comp := [
     # --- character-class range sets (M1: \w \d \s are ASCII; Unicode is M2) ----
 
     ranges_d : List(Comp.Rng)
-    ranges_d = [{ lo: 48, hi: 57 }]
+    ranges_d = Uni.ranges(Uni.d_hex)
 
     ranges_w : List(Comp.Rng)
-    ranges_w = [{ lo: 48, hi: 57 }, { lo: 65, hi: 90 }, { lo: 95, hi: 95 }, { lo: 97, hi: 122 }]
+    ranges_w = Uni.ranges(Uni.w_hex)
 
     ranges_s : List(Comp.Rng)
-    ranges_s = [{ lo: 9, hi: 13 }, { lo: 32, hi: 32 }]
+    ranges_s = Uni.ranges(Uni.s_hex)
 
+    ## word-ness for \b: the Unicode \w set. A scan per boundary — correct;
+    ## M3's DFA does it via classes. (Uni.Rng and Comp.Rng share a shape.)
     is_word_cp : U32 -> Bool
-    is_word_cp = |c| (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or c == 95 or (c >= 97 and c <= 122)
+    is_word_cp = |c| List.any(Comp.ranges_w, |r| c >= r.lo and c <= r.hi)
 
     # --- parser: alt -> cat -> repeat -> atom (S: M1 subset) -------------------
 
@@ -374,6 +380,8 @@ Comp := [
             Ok(0x53) => cls(True, Comp.ranges_s)
             Ok(0x62) => Ok({ ast: Look(Comp.look_wordb), i: i + 1 })
             Ok(0x42) => Ok({ ast: Look(Comp.look_nwordb), i: i + 1 })
+            Ok(0x70) => Comp.parse_prop(src, toks, i + 1, False)
+            Ok(0x50) => Comp.parse_prop(src, toks, i + 1, True)
             Ok(0x6E) => lit(10)
             Ok(0x74) => lit(9)
             Ok(0x72) => lit(13)
@@ -384,6 +392,100 @@ Comp := [
             Ok(v) => lit(v)
         }
     }
+
+    # \p{Name} / \P{Name}: look the property up in the Tier A table (D4).
+    parse_prop : Str, List(Comp.Tok), U64, Bool -> Try(Comp.Out, Err.Error)
+    parse_prop = |src, toks, i, neg|
+        if Comp.cp_at(toks, i) == Ok(0x7B) {
+            close = Comp.find_brace(toks, i + 1)
+            match close {
+                Err(_) => Err(Comp.err_at(src, toks, i, ClassUnclosed))
+                Ok(j) => {
+                    name = Comp.slice_str(toks, i + 1, j)
+                    match Uni.lookup(name) {
+                        Ok(hex) => Ok({ ast: Chars({ neg, ranges: Uni.ranges(hex) }), i: j + 1 })
+                        Err(_) => Err(Comp.err_at(src, toks, i, EscapeUnrecognized))
+                    }
+                }
+            }
+        } else {
+            Err(Comp.err_at(src, toks, i, EscapeUnrecognized))
+        }
+
+    find_brace : List(Comp.Tok), U64 -> Try(U64, [End])
+    find_brace = |toks, i|
+        match Comp.cp_at(toks, i) {
+            Err(_) => Err(End)
+            Ok(0x7D) => Ok(i)
+            Ok(_) => Comp.find_brace(toks, i + 1)
+        }
+
+    slice_str : List(Comp.Tok), U64, U64 -> Str
+    slice_str = |toks, lo, hi|
+        List.sublist(toks, { start: lo, len: hi - lo })
+        |> List.map(|t| t.cp)
+        |> Comp.cps_to_str
+
+    cps_to_str : List(U32) -> Str
+    cps_to_str = |cps|
+        List.fold(cps, [], |acc, cp| List.concat(acc, Comp.enc_cp(cp)))
+        |> Str.from_utf8
+        |> Comp.or_empty
+
+    or_empty : Try(Str, [BadUtf8({ index : U64, problem : _ })]) -> Str
+    or_empty = |r| match r { Ok(s) => s, Err(_) => "" }
+
+    enc_cp : U32 -> List(U8)
+    enc_cp = |cp|
+        if cp < 0x80 {
+            [cp.to_u8_wrap()]
+        } else if cp < 0x800 {
+            [(0xC0 + cp.shr_zf_wrap(6)).to_u8_wrap(), (0x80 + cp.bitwise_and(0x3F)).to_u8_wrap()]
+        } else if cp < 0x10000 {
+            [(0xE0 + cp.shr_zf_wrap(12)).to_u8_wrap(), (0x80 + cp.shr_zf_wrap(6).bitwise_and(0x3F)).to_u8_wrap(), (0x80 + cp.bitwise_and(0x3F)).to_u8_wrap()]
+        } else {
+            [(0xF0 + cp.shr_zf_wrap(18)).to_u8_wrap(), (0x80 + cp.shr_zf_wrap(12).bitwise_and(0x3F)).to_u8_wrap(), (0x80 + cp.shr_zf_wrap(6).bitwise_and(0x3F)).to_u8_wrap(), (0x80 + cp.bitwise_and(0x3F)).to_u8_wrap()]
+        }
+
+    # leading (?i) flag: tokens '(', '?', 'i', ')'
+    starts_ci : List(Comp.Tok) -> Bool
+    starts_ci = |toks|
+        Comp.cp_at(toks, 0) == Ok(0x28) and Comp.cp_at(toks, 1) == Ok(0x3F) and Comp.cp_at(toks, 2) == Ok(0x69) and Comp.cp_at(toks, 3) == Ok(0x29)
+
+    # (?i): expand every Chars node with simple case-fold partners (M2). Ranges
+    # wider than the cap are left unfolded (properties are effectively
+    # case-symmetric for M2's purposes); documented partial coverage.
+    fold_ast : Comp -> Comp
+    fold_ast = |ast|
+        match ast {
+            Empty => Empty
+            Look(_) => ast
+            Chars(cs) => Chars({ neg: cs.neg, ranges: Comp.fold_ranges(cs.ranges) })
+            Cat(xs) => Cat(List.map(xs, Comp.fold_ast))
+            Alt(xs) => Alt(List.map(xs, Comp.fold_ast))
+            Star(x, g) => Star(Comp.fold_ast(x), g)
+            Plus(x, g) => Plus(Comp.fold_ast(x), g)
+            Quest(x, g) => Quest(Comp.fold_ast(x), g)
+            Group(x, gi) => Group(Comp.fold_ast(x), gi)
+        }
+
+    fold_ranges : List(Comp.Rng) -> List(Comp.Rng)
+    fold_ranges = |ranges|
+        List.fold(ranges, ranges, |acc, r|
+            if r.hi - r.lo < 1024 {
+                List.concat(acc, Comp.fold_range_members(r.lo, r.hi, []))
+            } else {
+                acc
+            })
+
+    fold_range_members : U32, U32, List(Comp.Rng) -> List(Comp.Rng)
+    fold_range_members = |cp, hi, acc|
+        if cp > hi {
+            acc
+        } else {
+            partners = Uni.fold_of(cp) |> List.map(|fp| { lo: fp, hi: fp })
+            Comp.fold_range_members(cp + 1, hi, List.concat(acc, partners))
+        }
 
     parse_class : Str, List(Comp.Tok), U64 -> Try(Comp.Out, Err.Error)
     parse_class = |src, toks, i0| {
