@@ -22,37 +22,67 @@ Harness: `tools/bench/` (`gen` + `bench` bins, `run.sh` driver) and
 
 ## Results (256 KiB haystack)
 
+Current engine, after the 2026-09-03 allocation work (see below). ns per
+`find_all` over the whole haystack; Roc is the min of three runs (the box was
+lightly loaded, which only inflates a run, never deflates it).
+
 ```
 pattern            roc_ns     rust_ns  roc_MBps  rust_MBps  slowdown  cnt
-literal         105205400       28372      2.49     9239.6     ~3700x   ok
-teddy_alt       478038100      410671      0.55      638.3     ~1200x   ok
-class_plus      164809300     2011179      1.59      130.3       ~82x   ok
-bounded_num     104517500      106920      2.51     2451.8      ~980x   ok
-word_bound      419027950      199895      0.63     1311.4     ~2100x   ok
-two_words       202952400     1874982      1.29      139.8      ~110x   ok
-caps_email      241123150       72118      1.09     3635.0     ~3300x   ok
-uni_letters     167274850     2245861      1.57      116.7       ~74x   ok
-dotstar_lit     221695200      647088      1.18      405.1      ~340x   ok
+literal          40259100       42974      6.51     6100.1      937x   ok
+teddy_alt       100045650      430740      2.62      608.6      232x   ok
+class_plus       87104950     2102483      3.01      124.7       41x   ok
+bounded_num      39855000      109841      6.58     2386.6      363x   ok
+word_bound      353435950      192911      0.74     1358.9     1832x   ok
+two_words        95086950     1534538      2.76      170.8       62x   ok
+caps_email       82937250       71120      3.16     3686.0     1166x   ok
+uni_letters      89184250     2050669      2.94      127.8       43x   ok
+dotstar_lit      97443200      646867      2.69      405.3      151x   ok
 ```
 
-`_ns` = nanoseconds per `find_all` over the whole haystack. literal /
-word_bound / caps_email slowdowns swing a bit run to run (the Rust side is only
-tens of µs); the Roc side is stable.
+literal / bounded_num / caps_email slowdowns swing a bit run to run (the Rust
+side is only tens of µs); the Roc side is stable.
 
 ### Reading it
 
-- **Roc runs at ~0.5–2.5 MB/s, essentially flat across patterns.** Per-byte
-  interpreter + persistent-`List(U8)` overhead dominates, so the pattern barely
-  matters. There is no Teddy/memchr fast path in `find_all` (Teddy is only
-  wired into single `find`), so `teddy_alt` is actually the *slowest* Roc row —
-  it's just the general engine over 8 alternatives.
-- **Rust spans 117 MB/s to 9 GB/s** because it dispatches specialised paths
+- **Roc runs at ~0.7–6.6 MB/s** — the many-match scans that give Rust real work
+  (`class_plus`, `uni_letters`, `two_words`) sit at ~3 MB/s; the outlier is
+  `word_bound` (0.7 MB/s), whose per-position word-boundary look-around the
+  allocation work barely touched.
+- **Rust spans 125 MB/s to 6 GB/s** because it dispatches specialised paths
   (memchr for the literal, SIMD Teddy for the alternation, a lazy DFA for the
   big scans).
-- **Slowdown is ~75–110× on the heavy many-match scans** (`class_plus`,
-  `uni_letters`, `two_words` — where Rust also has real work to do) and
-  **~1000–3700× on the patterns Rust answers almost for free**. So the gap is
-  really "Rust has fast paths we don't", not a uniform constant.
+- **Slowdown is ~41–62× on the heavy many-match scans** and ~150–1800× on the
+  patterns Rust answers almost for free. So the gap is really "Rust has fast
+  paths we don't", not a uniform constant.
+
+### Engine optimizations (2026-09-03)
+
+The numbers above are ~2× better than the first measurement across the board
+(≈5× on `teddy_alt`), from four commits that attacked the `find_all` allocation
+traffic — profiling had shown ~78% of its time in malloc/refcount/memcpy, not
+matching:
+
+| commit | change | effect |
+|---|---|---|
+| `4dd4e01` | generation-stamped `visited` set (was a linear `List` scanned with `List.contains` + grown with `List.append` every position) | O(1) dedup, no per-step alloc |
+| `be93982` | index-based reused closure stack (was `List.concat`/`drop_last` per ε-step) | one reused buffer |
+| `3f32b64` | start-only whole-match engine for find/find_all/is_match — a thread carries just `start : U64`, no per-thread slot list | drops all slot allocation on the span path |
+| `a367671` | delete the now-dead slots `find`/`match_at`/`arun` | — |
+
+Cumulative speedup (64 KiB, back-to-back): teddy_alt 4.6×, caps_email 2.7×,
+literal 2.6×, bounded_num 2.5×, dotstar_lit 2.1×, two_words 1.9×, class_plus
+1.8×, uni_letters 1.7×, word_bound 1.1×. Each was verified under `--opt=speed`
+for both correctness (differential 860/860) and non-regression (a slower result
+would mean a buffer had refcount > 1 and was being cloned).
+
+It is **still ~80% allocation-bound.** The remaining allocators — the per-match
+`visited`/`stack` setup and the per-position thread list — can only be reused by
+carrying buffers *across* the per-match call boundary, which is where a loop
+`var` held during the call forces refcount > 1 and Roc clones the whole buffer
+(a ~2× regression, measured and reverted). Removing that needs either inlining
+the scan into one large function (which trips the optimizer blowup noted in
+`notes/2026-09-02-pikemut.md`) or a move idiom Roc doesn't expose here — the same
+"it's the Roc compiler, not LLVM" theme as the tail-call issue.
 
 ### Compile latency
 
@@ -66,12 +96,14 @@ noise; for compile-per-call it is the whole game.
 The first version of this benchmark crashed with **SIGBUS (exit 138)** on
 haystacks larger than ~16 KiB. Root cause: `Regex.all_caps`'s match loop was a
 tail-recursive helper (`all_loop`) that iterated once per match. It is written
-in tail position, and the `--opt=dev` backend loops it correctly, but the
-`--opt=speed` (LLVM) backend does *not* eliminate the tail call once the loop
-body is large (it inlines the whole PikeVM matcher). Stack then grew one ~2 KB
-frame per match and overflowed after a few thousand — so the crash tracked
-match count *for complex patterns only* (a literal at 300k matches was fine; a
-class or alternation died at a few thousand).
+in tail position, and the `--opt=dev` backend loops it correctly, but at
+`--opt=speed` it is not looped: Roc's tail-call pass runs *after* inlining, and
+inlining the matcher merges the loop's branch tails, so the pass's shared-tail
+guard rejects both self-calls. The stack then grew one ~2 KB frame per match and
+overflowed after a few thousand — so the crash tracked match count *for complex
+patterns only* (a literal at 300k matches was fine; a class or alternation died
+at a few thousand). This is a Roc-compiler pass, not LLVM; full root cause in
+`upstream/2026-09-02-llvm-tco-match-loop/`.
 
 Fixed by rewriting `all_caps` as an explicit `while` loop with `var` state, so
 stack use is O(1) regardless of match count and it no longer depends on
@@ -82,8 +114,9 @@ tail-call miss is written up for upstream in
 
 ## Caveats
 
-- `find_all` re-runs `Pike.captures_from` from each match end; part of the flat
-  Roc cost is that per-match restart, not just raw scan speed.
+- `find_all` re-runs the whole-match scan (`Pike.wfind_from`) from each match
+  end, re-allocating its `visited`/`stack` buffers per match; part of the Roc
+  cost is that per-match restart, not just raw scan speed.
 - Single-`find` (with the Teddy/prefilter rungs) is not measured here; it would
   show the SIMD path and a smaller gap on literal-alternation patterns.
 - Absolute MB/s shifts a little with haystack size; the ratios are what matter
