@@ -84,7 +84,7 @@ Regex := [].{
                 } else if !List.is_empty(re.fbytes) {
                     Regex.find_fb(Regex.base(re), hay, re.fbytes, 0)
                 } else {
-                    Pike.find(Regex.base(re), hay)
+                    Pike.wfind(Regex.base(re), hay)
                 }
         }
 
@@ -95,8 +95,8 @@ Regex := [].{
         match List.get(cands, i) {
             Err(_) => Err(NoMatch)
             Ok(at) =>
-                match Pike.match_at(c, hay, at) {
-                    Ok(slots) => Ok({ start: List.get(slots, 0) ?? 0, end: List.get(slots, 1) ?? 0 })
+                match Pike.wmatch_at(c, hay, at) {
+                    Ok(span) => Ok(span)
                     Err(_) => Regex.find_teddy(c, hay, cands, i + 1)
                 }
         }
@@ -108,8 +108,8 @@ Regex := [].{
         match Lit.find_in_set(hay, at, set) {
             Err(_) => Err(NoMatch)
             Ok(cand) =>
-                match Pike.match_at(c, hay, cand) {
-                    Ok(slots) => Ok({ start: List.get(slots, 0) ?? 0, end: List.get(slots, 1) ?? 0 })
+                match Pike.wmatch_at(c, hay, cand) {
+                    Ok(span) => Ok(span)
                     Err(_) => Regex.find_fb(c, hay, set, cand + 1)
                 }
         }
@@ -119,8 +119,8 @@ Regex := [].{
         match Lit.find_candidate(hay, at, prefix) {
             Err(_) => Err(NoMatch)
             Ok(cand) =>
-                match Pike.match_at(c, hay, cand) {
-                    Ok(slots) => Ok({ start: List.get(slots, 0) ?? 0, end: List.get(slots, 1) ?? 0 })
+                match Pike.wmatch_at(c, hay, cand) {
+                    Ok(span) => Ok(span)
                     Err(_) => Regex.find_pf(c, hay, prefix, cand + 1)
                 }
         }
@@ -148,7 +148,7 @@ Regex := [].{
     ## PikeVM find, bypassing the engine choice — for differential validation of
     ## the three-pass against the reference simulator.
     find_pike : Regex.T, List(U8) -> Try(Regex.Span, [NoMatch])
-    find_pike = |re, hay| Pike.find(Regex.base(re), hay)
+    find_pike = |re, hay| Pike.wfind(Regex.base(re), hay)
 
     ## Whether the pattern matches anywhere in the haystack.
     is_match : Regex.T, List(U8) -> Bool
@@ -220,10 +220,41 @@ Regex := [].{
     next_bound = |hay, p|
         if p >= List.len(hay) { p + 1 } else { p + Comp.decode(hay, p).len }
 
-    ## All whole-match spans.
+    ## All whole-match spans. Uses the start-only whole-match engine (no
+    ## per-thread slot allocation), with the same D14 empty-match advance as
+    ## `all_caps`. `all_caps` (full slots) is kept for `captures`/`replace`/`split`.
     find_all : Regex.T, List(U8) -> List(Regex.Span)
-    find_all = |re, hay|
-        List.map(Regex.all_caps(re, hay), |sl| { start: List.get(sl, 0) ?? 0, end: List.get(sl, 1) ?? 0 })
+    find_all = |re, hay| {
+        comp = Regex.base(re)
+        len = List.len(hay)
+        var at = 0
+        var last_end = Regex.sentinel
+        var acc = []
+        var running = True
+        while running {
+            if at > len {
+                running = False
+            } else {
+                match Pike.wfind_from(comp, hay, at) {
+                    Err(_) => {
+                        running = False
+                    }
+                    Ok(span) => {
+                        s = span.start
+                        e = span.end
+                        if s == e and e == last_end {
+                            at = Regex.next_bound(hay, e)
+                        } else {
+                            acc = List.append(acc, span)
+                            last_end = e
+                            at = if s == e { Regex.next_bound(hay, e) } else { e }
+                        }
+                    }
+                }
+            }
+        }
+        acc
+    }
 
     ## Replace every match. `rep` carries `$N` group refs (longest-digit-run) and
     ## `$$` -> `$`; an unknown ref expands to empty (D15). Byte API.
