@@ -2,14 +2,18 @@
 ##
 ## A thread is `{ pc, slots }`; the slot array holds 2·(n_groups+1) byte offsets,
 ## slot 0/1 being the whole match. `Save` copies the slot array and writes one
-## entry (O(slots) per save, small). Membership is `seen`-by-pc; the first thread
-## at a pc wins, keeping its slots — which is leftmost-first (S5, S4).
+## entry (O(slots) per save, small). Membership dedup is a generation-stamped
+## `visited` array (`visited[pc] == gen` means "already in this thread set"):
+## O(1) test, and a new thread set is a `gen += 1` with no reallocation. The
+## array is threaded linearly so `List.set` can reuse it in place. The first
+## thread at a pc wins, keeping its slots — leftmost-first (S5, S4).
 import Comp
 import Trie
 
 Pike := [].{
     Th : { pc : U32, slots : List(U64) }
-    Cl : { ths : List(Pike.Th), seen : List(U32) }
+    Cl : { ths : List(Pike.Th), gen : U32 }
+    Clv : { cl : Pike.Cl, visited : List(U32) }
     M : Try(List(U64), [NoMatch])
 
     ## Whole-match span, or NoMatch.
@@ -25,14 +29,16 @@ Pike := [].{
     captures = |c, hay| {
         len = List.len(hay)
         ns = (c.n_groups.to_u64() + 1) * 2
-        Pike.run(c, hay, len, ns, 0, { ths: [], seen: [] }, Err(NoMatch))
+        visited = List.repeat(0, List.len(c.prog))
+        Pike.run(c, hay, len, ns, 0, { ths: [], gen: 1 }, Err(NoMatch), visited)
     }
 
     captures_from : Comp.Compiled, List(U8), U64 -> Pike.M
     captures_from = |c, hay, at| {
         len = List.len(hay)
         ns = (c.n_groups.to_u64() + 1) * 2
-        Pike.run(c, hay, len, ns, at, { ths: [], seen: [] }, Err(NoMatch))
+        visited = List.repeat(0, List.len(c.prog))
+        Pike.run(c, hay, len, ns, at, { ths: [], gen: 1 }, Err(NoMatch), visited)
     }
 
     ## Anchored: does the pattern match starting exactly at `at`? Seeds one
@@ -42,42 +48,45 @@ Pike := [].{
     match_at = |c, hay, at| {
         len = List.len(hay)
         ns = (c.n_groups.to_u64() + 1) * 2
-        cl = Pike.add(c, hay, at, len, { ths: [], seen: [] }, { pc: 0, slots: List.repeat(Pike.no_pos, ns) })
-        Pike.arun(c, hay, len, at, cl, Err(NoMatch))
+        visited = List.repeat(0, List.len(c.prog))
+        r = Pike.add(c, hay, at, len, { ths: [], gen: 1 }, { pc: 0, slots: List.repeat(Pike.no_pos, ns) }, visited)
+        Pike.arun(c, hay, len, at, r.cl, Err(NoMatch), r.visited)
     }
 
     # like run, but never seeds new starts (anchored)
-    arun : Comp.Compiled, List(U8), U64, U64, Pike.Cl, Pike.M -> Pike.M
-    arun = |c, hay, len, pos, cl, matched| {
-        step = Pike.exec(c, hay, pos, len, cl.ths, 0, { ths: [], seen: [] }, matched)
+    arun : Comp.Compiled, List(U8), U64, U64, Pike.Cl, Pike.M, List(U32) -> Pike.M
+    arun = |c, hay, len, pos, cl, matched, visited| {
+        nl0 = { ths: [], gen: cl.gen + 1 }
+        step = Pike.exec(c, hay, pos, len, cl.ths, 0, nl0, matched, visited)
         if pos >= len {
             step.matched
         } else if List.is_empty(step.cl.ths) {
             step.matched
         } else {
             npos = pos + Comp.decode(hay, pos).len
-            Pike.arun(c, hay, len, npos, step.cl, step.matched)
+            Pike.arun(c, hay, len, npos, step.cl, step.matched, step.visited)
         }
     }
 
     no_pos : U64
     no_pos = 0xFFFF_FFFF_FFFF_FFFF
 
-    run : Comp.Compiled, List(U8), U64, U64, U64, Pike.Cl, Pike.M -> Pike.M
-    run = |c, hay, len, ns, pos, cl0, matched| {
-        cl =
+    run : Comp.Compiled, List(U8), U64, U64, U64, Pike.Cl, Pike.M, List(U32) -> Pike.M
+    run = |c, hay, len, ns, pos, cl0, matched, visited| {
+        seeded =
             match matched {
-                Err(_) => Pike.add(c, hay, pos, len, cl0, { pc: 0, slots: List.repeat(Pike.no_pos, ns) })
-                Ok(_) => cl0
+                Err(_) => Pike.add(c, hay, pos, len, cl0, { pc: 0, slots: List.repeat(Pike.no_pos, ns) }, visited)
+                Ok(_) => { cl: cl0, visited }
             }
-        step = Pike.exec(c, hay, pos, len, cl.ths, 0, { ths: [], seen: [] }, matched)
+        nl0 = { ths: [], gen: seeded.cl.gen + 1 }
+        step = Pike.exec(c, hay, pos, len, seeded.cl.ths, 0, nl0, matched, seeded.visited)
         if pos >= len {
             step.matched
         } else if List.is_empty(step.cl.ths) and Pike.settled(step.matched) {
             step.matched
         } else {
             npos = pos + Comp.decode(hay, pos).len
-            Pike.run(c, hay, len, ns, npos, step.cl, step.matched)
+            Pike.run(c, hay, len, ns, npos, step.cl, step.matched, step.visited)
         }
     }
 
@@ -88,12 +97,12 @@ Pike := [].{
             Err(_) => False
         }
 
-    Step : { cl : Pike.Cl, matched : Pike.M }
+    Step : { cl : Pike.Cl, matched : Pike.M, visited : List(U32) }
 
-    exec : Comp.Compiled, List(U8), U64, U64, List(Pike.Th), U64, Pike.Cl, Pike.M -> Pike.Step
-    exec = |c, hay, pos, len, ths, ti, nl, matched|
+    exec : Comp.Compiled, List(U8), U64, U64, List(Pike.Th), U64, Pike.Cl, Pike.M, List(U32) -> Pike.Step
+    exec = |c, hay, pos, len, ths, ti, nl, matched, visited|
         match List.get(ths, ti) {
-            Err(_) => { cl: nl, matched }
+            Err(_) => { cl: nl, matched, visited }
             Ok(th) => {
                 w = List.get(c.prog, th.pc.to_u64()) ?? 0
                 op = Comp.inst_op(w)
@@ -101,53 +110,53 @@ Pike := [].{
                 if op == Comp.op_char {
                     if pos < len and Pike.in_set(c.classes, arg, Comp.decode(hay, pos).cp) {
                         npos = pos + Comp.decode(hay, pos).len
-                        nl2 = Pike.add(c, hay, npos, len, nl, { pc: th.pc + 1, slots: th.slots })
-                        Pike.exec(c, hay, pos, len, ths, ti + 1, nl2, matched)
+                        r = Pike.add(c, hay, npos, len, nl, { pc: th.pc + 1, slots: th.slots }, visited)
+                        Pike.exec(c, hay, pos, len, ths, ti + 1, r.cl, matched, r.visited)
                     } else {
-                        Pike.exec(c, hay, pos, len, ths, ti + 1, nl, matched)
+                        Pike.exec(c, hay, pos, len, ths, ti + 1, nl, matched, visited)
                     }
                 } else if op == Comp.op_match {
-                    { cl: nl, matched: Ok(th.slots) }
+                    { cl: nl, matched: Ok(th.slots), visited }
                 } else {
-                    Pike.exec(c, hay, pos, len, ths, ti + 1, nl, matched)
+                    Pike.exec(c, hay, pos, len, ths, ti + 1, nl, matched, visited)
                 }
             }
         }
 
-    add : Comp.Compiled, List(U8), U64, U64, Pike.Cl, Pike.Th -> Pike.Cl
-    add = |c, hay, pos, len, cl, th| Pike.close(c, hay, pos, len, cl, [th.pc], th.slots)
+    add : Comp.Compiled, List(U8), U64, U64, Pike.Cl, Pike.Th, List(U32) -> Pike.Clv
+    add = |c, hay, pos, len, cl, th, visited| Pike.close(c, hay, pos, len, cl, visited, [th.pc], th.slots)
 
-    close : Comp.Compiled, List(U8), U64, U64, Pike.Cl, List(U32), List(U64) -> Pike.Cl
-    close = |c, hay, pos, len, cl, stack, slots|
+    close : Comp.Compiled, List(U8), U64, U64, Pike.Cl, List(U32), List(U32), List(U64) -> Pike.Clv
+    close = |c, hay, pos, len, cl, visited, stack, slots|
         match List.last(stack) {
-            Err(_) => cl
+            Err(_) => { cl, visited }
             Ok(pc) => {
                 rest = List.drop_last(stack, 1)
-                if List.contains(cl.seen, pc) {
-                    Pike.close(c, hay, pos, len, cl, rest, slots)
+                if (List.get(visited, pc.to_u64()) ?? 0) == cl.gen {
+                    Pike.close(c, hay, pos, len, cl, visited, rest, slots)
                 } else {
-                    cl2 = { ths: cl.ths, seen: List.append(cl.seen, pc) }
+                    visited2 = List.set(visited, pc.to_u64(), cl.gen) ?? visited
                     w = List.get(c.prog, pc.to_u64()) ?? 0
                     op = Comp.inst_op(w)
                     arg = Comp.inst_arg(w)
                     if op == Comp.op_split {
                         t1 = List.get(c.splits, arg.to_u64()) ?? 0
                         t2 = List.get(c.splits, (arg + 1).to_u64()) ?? 0
-                        Pike.close(c, hay, pos, len, cl2, List.concat(rest, [t2, t1]), slots)
+                        Pike.close(c, hay, pos, len, cl, visited2, List.concat(rest, [t2, t1]), slots)
                     } else if op == Comp.op_jmp {
-                        Pike.close(c, hay, pos, len, cl2, List.append(rest, arg), slots)
+                        Pike.close(c, hay, pos, len, cl, visited2, List.append(rest, arg), slots)
                     } else if op == Comp.op_look {
                         if Pike.look_ok(hay, pos, len, arg) {
-                            Pike.close(c, hay, pos, len, cl2, List.append(rest, pc + 1), slots)
+                            Pike.close(c, hay, pos, len, cl, visited2, List.append(rest, pc + 1), slots)
                         } else {
-                            Pike.close(c, hay, pos, len, cl2, rest, slots)
+                            Pike.close(c, hay, pos, len, cl, visited2, rest, slots)
                         }
                     } else if op == Comp.op_save {
                         slots2 = List.set(slots, arg.to_u64(), pos) ?? slots
-                        Pike.close(c, hay, pos, len, cl2, List.append(rest, pc + 1), slots2)
+                        Pike.close(c, hay, pos, len, cl, visited2, List.append(rest, pc + 1), slots2)
                     } else {
-                        cl3 = { ths: List.append(cl.ths, { pc, slots }), seen: cl2.seen }
-                        Pike.close(c, hay, pos, len, cl3, rest, slots)
+                        cl3 = { ths: List.append(cl.ths, { pc, slots }), gen: cl.gen }
+                        Pike.close(c, hay, pos, len, cl3, visited2, rest, slots)
                     }
                 }
             }
