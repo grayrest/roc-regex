@@ -1,9 +1,11 @@
 ## DORMANT EXPERIMENT — not imported by the library; `Regex.all_caps` uses the
-## functional `Pike`. This mutable-buffer engine is CORRECT and successfully
-## removes the allocation (rc≈0%, ~24% alloc / ~68% matching): under `--opt=dev`
-## it is ~20% FASTER than `Pike`. But under `--opt=speed` (LLVM) it is ~2× slower
-## AND compiles pathologically slowly (dev ~1 s vs speed minutes) — an LLVM
-## backend limitation, not the approach. Full analysis + backend comparison in
+## functional `Pike`. This mutable-buffer engine is CORRECT but, under the
+## shipped `--opt=speed` backend, ~2.4× slower than `Pike` (24 vs 10 ms/find_all
+## @16 KiB); why is not established (its speed build is too slow to profile).
+## Its `--opt=speed` build blows up in Roc's optimization passes (not LLVM;
+## dev builds in ~1 s) — a single giant mutable function is atypical Roc code.
+## Do NOT trust dev-backend numbers for this: the dev and speed pipelines differ
+## by Roc's fold/inline/in-place/specialization passes. See
 ## notes/2026-09-02-pikemut.md. Wire into `all_caps` to reproduce.
 ##
 ## Mutable-buffer PikeVM prototype (allocation-reduction experiment).
