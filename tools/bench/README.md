@@ -4,7 +4,7 @@ Throughput comparison of the Roc engine against the vendored Rust `regex` 1.13
 crate. See `notes/2026-09-02-benchmark.md` for results and method.
 
 ```
-tools/bench/run.sh [haystack_bytes]     # default 16384
+tools/bench/run.sh [haystack_bytes]     # default 262144
 ```
 
 - `src/gen.rs` — writes a deterministic haystack both engines read.
@@ -15,6 +15,3 @@ tools/bench/run.sh [haystack_bytes]     # default 16384
 The pattern list is duplicated between `src/bench.rs` and `examples/bench.roc`
 (the regexes must be string literals in the Roc source so `compile` folds at
 build time). **Keep the two lists in sync** — same ids, same regexes.
-
-The default haystack is 16 KiB because `find_all` stack-overflows past ~3–4k
-matches (see the note); larger sizes crash before they can be timed.

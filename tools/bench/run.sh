@@ -8,18 +8,13 @@
 # Timing is in-process (per-pattern), so process startup and file I/O are
 # excluded and only match throughput is measured. The regex is compiled once,
 # before the loop, in both languages.
-#
-# NOTE the 16 KiB default haystack: the Roc `find_all` match loop recurses once
-# per match and is not tail-call-optimised by the current compiler, so it
-# stack-overflows (SIGBUS) somewhere past ~3-4k matches. 16 KiB keeps every
-# pattern below that. See notes/2026-09-02-benchmark.md.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-BYTES="${1:-16384}"
+BYTES="${1:-262144}"
 HAY="testdata/bench_haystack.txt"
 ROC_ITERS=20      # baked into examples/bench.roc; here only for the log line
-RUST_ITERS=5000
+RUST_ITERS=500
 
 echo "building rust bench..."
 ( cd tools/bench && cargo build --release --quiet --bins )

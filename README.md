@@ -76,10 +76,12 @@ notes under `notes/`.
 `tools/bench/run.sh` times this engine against the vendored Rust `regex` crate
 on an identical haystack (match counts are compared to enforce identical work).
 Match throughput only — the regex is compiled once, before the timing loop, on
-both sides. Roughly: Roc runs at **~0.5–2.2 MB/s, roughly flat across
+both sides. Roughly: Roc runs at **~0.5–2.5 MB/s, roughly flat across
 patterns** (per-byte overhead dominates; no fast paths in `find_all`), Rust at
-130 MB/s–11 GB/s, so the slowdown is **~110× on heavy many-match scans up to
+117 MB/s–9 GB/s, so the slowdown is **~75–110× on heavy many-match scans up to
 ~thousands× on patterns Rust answers via memchr/DFA for free**. Compile cost is
 the one axis Roc wins: 0 at runtime (folded at build) vs ~30–700 µs/pattern for
-`Regex::new`. Full numbers, method, and a `find_all` stack-overflow finding
-(~3–4k matches, SIGBUS) are in `notes/2026-09-02-benchmark.md`.
+`Regex::new`. Full numbers and method are in `notes/2026-09-02-benchmark.md`.
+Benchmarking also flushed out a `find_all` stack overflow on large inputs — a
+tail call the LLVM backend wouldn't loopify — now fixed with an explicit `while`
+loop and written up for upstream in `upstream/2026-09-02-llvm-tco-match-loop/`.
