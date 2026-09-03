@@ -76,14 +76,17 @@ notes under `notes/`.
 `tools/bench/run.sh` times this engine against the vendored Rust `regex` crate
 on an identical haystack (match counts are compared to enforce identical work).
 Match throughput only — the regex is compiled once, before the timing loop, on
-both sides. Roughly: Roc runs at **~0.75–7.2 MB/s** (the many-match scans that
-give Rust real work sit at ~3 MB/s), Rust at 125 MB/s–6 GB/s, so the slowdown is
-**~38–56× on heavy many-match scans up to ~thousands× on patterns Rust answers
-via memchr/DFA for free**. Compile cost is the one axis Roc wins: 0 at runtime
-(folded at build) vs ~30–700 µs/pattern for `Regex::new`. Full numbers, method,
-and the 2026-09-03 allocation work that cut the gap ~2–2.5× (generation-set
-dedup, reused closure stack, start-only whole-match engine, double-buffered
-thread queues) are in `notes/2026-09-02-benchmark.md`. Benchmarking also flushed out a `find_all`
+both sides. The comparison also includes an **engine-matched** column (Rust's
+`regex-automata` PikeVM — the same O(n·states) algorithm), separate from Rust's
+meta engine (a lazy DFA + memchr/SIMD). Roc's PikeVM is **~6–15× (mostly ~10×)
+slower than Rust's PikeVM**; the larger 37–1300× against the meta engine is
+mostly the DFA-vs-PikeVM *algorithm* gap, not implementation. Roc runs at ~3–8
+MB/s, Rust's PikeVM at ~30–90 MB/s, its DFA at 125 MB/s–6 GB/s. Compile cost is
+the one axis Roc wins: 0 at runtime (folded at build) vs ~30–700 µs/pattern for
+`Regex::new`. Full numbers, method, and the 2026-09-03 work that cut the gap
+~2–2.5× (generation-set dedup, reused closure stack, start-only whole-match
+engine, double-buffered thread queues, ASCII word-boundary fast path) are in
+`notes/2026-09-02-benchmark.md`. Benchmarking also flushed out a `find_all`
 stack overflow on large inputs — a tail call Roc's optimizer wouldn't loopify —
 now fixed with an explicit `while` loop and written up for upstream in
 `upstream/2026-09-02-llvm-tco-match-loop/`.

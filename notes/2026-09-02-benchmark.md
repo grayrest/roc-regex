@@ -32,7 +32,7 @@ literal          36298200       42974      7.22     6100.1      845x   ok
 teddy_alt        77417050      430740      3.39      608.6      180x   ok
 class_plus       80519400     2102483      3.26      124.7       38x   ok
 bounded_num      36244450      109841      7.23     2386.6      330x   ok
-word_bound      351234000      192911      0.75     1358.9     1821x   ok
+word_bound       32806800      205765      7.99     1274.1      159x   ok
 two_words        85171900     1534538      3.08      170.8       56x   ok
 caps_email       71822850       71120      3.65     3686.0     1010x   ok
 uni_letters      82022300     2050669      3.20      127.8       40x   ok
@@ -44,10 +44,9 @@ side is only tens of µs); the Roc side is stable.
 
 ### Reading it
 
-- **Roc runs at ~0.75–7.2 MB/s** — the many-match scans that give Rust real work
-  (`class_plus`, `uni_letters`, `two_words`) sit at ~3 MB/s; the outlier is
-  `word_bound` (0.75 MB/s), whose per-position word-boundary look-around the
-  allocation work barely touched.
+- **Roc runs at ~3–8 MB/s** — the many-match scans that give Rust real work
+  (`class_plus`, `uni_letters`, `two_words`) sit at ~3 MB/s; the low-match
+  patterns (`literal`, `bounded_num`, `word_bound`) reach ~7–8 MB/s.
 - **Rust spans 125 MB/s to 6 GB/s** because it dispatches specialised paths
   (memchr for the literal, SIMD Teddy for the alternation, a lazy DFA for the
   big scans).
@@ -66,33 +65,33 @@ algorithm), added as a column to `tools/bench` (`rustPV`):
 
 ```
 pattern         roc_ns  rustPV_ns  vsPV   rustMeta_ns  vsMeta
-literal       36610550    3481229  10.5x       69791    525x
-teddy_alt     77824550    5276869  14.7x      411945    189x
-class_plus    81252350    7935828  10.2x     2193313     37x
-bounded_num   36385700    3482498  10.4x      106181    343x
-word_bound   353712750    5466075  64.7x      208540   1696x
-two_words     85825650    8548217  10.0x     1529254     56x
-caps_email    72808450    8239148   8.8x       70468   1033x
-uni_letters   82727050    8109591  10.2x     2024092     41x
-dotstar_lit   83708650    6829018  12.3x      636093    132x
+literal       36480750    3479387  10.5x       28343   1287x
+teddy_alt     79522750    5332380  14.9x      420315    189x
+class_plus    81638900    8036353  10.2x     2221722     37x
+bounded_num   36508150    3526138  10.4x      109075    335x
+word_bound    32806800    5525314   5.9x      205765    159x
+two_words     87166650    8615994  10.1x     1539016     57x
+caps_email    72459500    8318266   8.7x       72009   1006x
+uni_letters   83399100    8159685  10.2x     2051270     41x
+dotstar_lit   84987100    6870349  12.4x      644798    132x
 ```
 
-So the honest implementation gap is **~10× vs the same algorithm** (8.8–14.7×),
-not the 37–1696× the meta-engine column suggests. Rust's own PikeVM is 3.6–4×
-slower than its DFA on the scan-heavy patterns and 50–120× slower on the ones
-memchr/DFA answer trivially — that difference is *algorithm*, and it's not Roc's
-to close with a PikeVM. The one real outlier is `word_bound` at ~65×: Roc's
-word-boundary look-around (`word_before`/`word_after`, each decoding a
-codepoint) is a specific hotspot worth its own pass. The ~10× elsewhere is the
-immutable-`List` + refcount overhead the profile shows (73% memory-bound). Match
-counts agree across all three (Roc, Rust meta, Rust PikeVM).
+So the honest implementation gap is **~6–15× vs the same algorithm**, clustered
+around ~10×, not the 37–1287× the meta-engine column suggests. Rust's own PikeVM
+is 3.6–4× slower than its DFA on the scan-heavy patterns and 50–120× slower on
+the ones memchr/DFA answer trivially — that difference is *algorithm*, and it's
+not Roc's to close with a PikeVM. `word_bound` used to be a ~65× outlier; the
+`is_word_cp` ASCII fast path (below) brought it to ~6×, now the *best* of the
+set. The ~10× elsewhere is the immutable-`List` + refcount overhead the profile
+shows (73% memory-bound on the scan patterns). Match counts agree across all
+three (Roc, Rust meta, Rust PikeVM).
 
 ### Engine optimizations (2026-09-03)
 
 The numbers above are ~2–2.5× better than the first measurement across the board
-(≈6.5× on `teddy_alt`, 1164→180×), from five commits that attacked the
-`find_all` allocation traffic — profiling had shown ~78% of its time in
-malloc/refcount/memcpy, not matching:
+(≈6.5× on `teddy_alt`, 1164→180×; ≈13× on `word_bound`), from six commits — five
+attacking `find_all` allocation traffic (profiling had shown ~78% of its time in
+malloc/refcount/memcpy, not matching) plus one on the word-boundary look-around:
 
 | commit | change | effect |
 |---|---|---|
@@ -101,10 +100,11 @@ malloc/refcount/memcpy, not matching:
 | `3f32b64` | start-only whole-match engine for find/find_all/is_match — a thread carries just `start : U64`, no per-thread slot list | drops all slot allocation on the span path |
 | `a367671` | delete the now-dead slots `find`/`match_at`/`arun` | — |
 | `3fa8c0c` | double-buffer the whole-match thread queues (`WCl` carries a count `n`; two `ths` buffers ping-pong across positions instead of `{ths:[]}` + append every position) | no per-position thread-list alloc |
+| `0702d24` | ASCII fast path in `is_word_cp` (was `List.any` over the full Unicode `\w` range table, twice per position, for a `\b` look-around) | word_bound 10.8× faster |
 
-Cumulative speedup (64 KiB, back-to-back): teddy_alt 6.1×, caps_email 3.4×,
-dotstar_lit 2.7×, bounded_num 2.9×, class_plus 2.0×, two_words 2.4×, literal
-2.6×, uni_letters 2.1×, word_bound 1.2×. Each was verified under `--opt=speed`
+Cumulative speedup (64 KiB, back-to-back): word_bound 12.8×, teddy_alt 6.1×,
+caps_email 3.4×, bounded_num 2.9×, dotstar_lit 2.7×, literal 2.6×, two_words
+2.4×, class_plus 2.0×, uni_letters 2.1×. Each was verified under `--opt=speed`
 for both correctness (differential 860/860) and non-regression — a slower result
 would mean a buffer had refcount > 1 and was being cloned, and the discipline
 throughout was that a reused buffer must be threaded *linearly* (moved into each
