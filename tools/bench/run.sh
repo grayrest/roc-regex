@@ -34,13 +34,15 @@ echo "running rust (${RUST_ITERS} iters)..."
 
 echo
 echo "haystack: ${HAYLEN} bytes   |   ns = nanoseconds per find_all over the whole haystack"
-awk -F, -v hay="$HAYLEN" '
-BEGIN{ printf "%-13s %11s %11s %9s %10s %9s %6s\n","pattern","roc_ns","rust_ns","roc_MBps","rust_MBps","slowdown","cnt" }
+echo "roc = Roc PikeVM; rustPV = Rust regex-automata PikeVM (same algorithm);"
+echo "rustMeta = Rust meta engine (lazy DFA + prefilters). vsPV is the engine-matched ratio."
+awk -F, '
+BEGIN{ printf "%-13s %11s %11s %11s %8s %8s %5s\n","pattern","roc_ns","rustPV_ns","rustMeta_ns","vsPV","vsMeta","cnt" }
 FNR==NR { if($1!="id"){roc[$1]=$3; rcnt[$1]=$4} next }
-{ id=$1; rn=roc[id]+0; xn=$3+0;
-  rmb=hay*1000.0/rn; xmb=hay*1000.0/xn; slow=rn/xn;
-  par=(rcnt[id]==$4)?"ok":"DIFF";
-  printf "%-13s %11d %11d %9.2f %10.1f %8.0fx %6s\n", id, rn, xn, rmb, xmb, slow, par }
+# rust.csv: id,compile,meta_ns,pikevm_ns,count,checksum
+{ id=$1; rn=roc[id]+0; meta=$3+0; pv=$4+0;
+  par=(rcnt[id]==$5)?"ok":"DIFF";
+  printf "%-13s %11d %11d %11d %6.1fx %6.0fx %5s\n", id, rn, pv, meta, rn/pv, rn/meta, par }
 ' "$TMP/roc.csv" "$TMP/rust.csv"
 
 echo

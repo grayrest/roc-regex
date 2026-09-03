@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 regex = "1.13"
+regex-automata = "0.4"
 
 [[bin]]
 name = "gen"

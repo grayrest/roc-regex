@@ -55,6 +55,38 @@ side is only tens of µs); the Roc side is stable.
   patterns Rust answers almost for free. So the gap is really "Rust has fast
   paths we don't", not a uniform constant.
 
+### Engine-matched: vs Rust's *PikeVM*, not its DFA
+
+The `rust_ns` column above is Rust's **meta engine** — a lazy DFA plus
+memchr/SIMD prefilters. Roc's `find_all` runs a **PikeVM** (O(n·states) thread
+simulation), a different and slower algorithm than a DFA, so that comparison
+conflates "Rust has a DFA" with "Roc's implementation is slower". The
+engine-matched number is Roc's PikeVM against `regex-automata`'s PikeVM (same
+algorithm), added as a column to `tools/bench` (`rustPV`):
+
+```
+pattern         roc_ns  rustPV_ns  vsPV   rustMeta_ns  vsMeta
+literal       36610550    3481229  10.5x       69791    525x
+teddy_alt     77824550    5276869  14.7x      411945    189x
+class_plus    81252350    7935828  10.2x     2193313     37x
+bounded_num   36385700    3482498  10.4x      106181    343x
+word_bound   353712750    5466075  64.7x      208540   1696x
+two_words     85825650    8548217  10.0x     1529254     56x
+caps_email    72808450    8239148   8.8x       70468   1033x
+uni_letters   82727050    8109591  10.2x     2024092     41x
+dotstar_lit   83708650    6829018  12.3x      636093    132x
+```
+
+So the honest implementation gap is **~10× vs the same algorithm** (8.8–14.7×),
+not the 37–1696× the meta-engine column suggests. Rust's own PikeVM is 3.6–4×
+slower than its DFA on the scan-heavy patterns and 50–120× slower on the ones
+memchr/DFA answer trivially — that difference is *algorithm*, and it's not Roc's
+to close with a PikeVM. The one real outlier is `word_bound` at ~65×: Roc's
+word-boundary look-around (`word_before`/`word_after`, each decoding a
+codepoint) is a specific hotspot worth its own pass. The ~10× elsewhere is the
+immutable-`List` + refcount overhead the profile shows (73% memory-bound). Match
+counts agree across all three (Roc, Rust meta, Rust PikeVM).
+
 ### Engine optimizations (2026-09-03)
 
 The numbers above are ~2–2.5× better than the first measurement across the board

@@ -14,6 +14,7 @@
 //
 // KEEP PATTERNS IN SYNC with examples/bench.roc (same ids, same regexes).
 
+use regex_automata::{nfa::thompson::pikevm::PikeVM, Input};
 use std::env;
 use std::fs;
 use std::time::Instant;
@@ -57,7 +58,25 @@ fn main() {
         let match_ns = t1.elapsed().as_nanos();
         let per_iter = match_ns / (iters as u128);
 
+        // --- engine-matched: regex-automata's PikeVM (same algorithm as the
+        //     Roc engine: O(n*states) thread-set simulation, not a DFA) ---
+        let vm = PikeVM::new(src).expect("pikevm build");
+        let mut cache = vm.create_cache();
+        let mut pchecksum: u64 = 0;
+        let t2 = Instant::now();
+        for _ in 0..iters {
+            for m in vm.find_iter(&mut cache, Input::new(&hay[..])) {
+                pchecksum = pchecksum
+                    .wrapping_add(m.start() as u64)
+                    .wrapping_add(m.end() as u64);
+            }
+        }
+        let pike_ns = t2.elapsed().as_nanos();
+        let pike_per = pike_ns / (iters as u128);
+
         let count = re.find_iter(&hay).count();
-        println!("{},{},{},{},{}", id, compile_ns, per_iter, count, checksum);
+        let _ = pchecksum;
+        // id,compile_ns,meta_ns_per_iter,pikevm_ns_per_iter,match_count,checksum
+        println!("{},{},{},{},{},{}", id, compile_ns, per_iter, pike_per, count, checksum);
     }
 }
