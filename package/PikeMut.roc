@@ -1,7 +1,10 @@
-## DORMANT EXPERIMENT — not imported by the library. Negative result: this
-## mutable-buffer engine is CORRECT but 1.5–2.8× SLOWER than the functional
-## `Pike`, so `Regex.all_caps` still uses `Pike`. Kept as the artifact behind
-## notes/2026-09-02-pikemut.md; wire it in via `all_caps` to reproduce.
+## DORMANT EXPERIMENT — not imported by the library; `Regex.all_caps` uses the
+## functional `Pike`. This mutable-buffer engine is CORRECT and successfully
+## removes the allocation (rc≈0%, ~24% alloc / ~68% matching): under `--opt=dev`
+## it is ~20% FASTER than `Pike`. But under `--opt=speed` (LLVM) it is ~2× slower
+## AND compiles pathologically slowly (dev ~1 s vs speed minutes) — an LLVM
+## backend limitation, not the approach. Full analysis + backend comparison in
+## notes/2026-09-02-pikemut.md. Wire into `all_caps` to reproduce.
 ##
 ## Mutable-buffer PikeVM prototype (allocation-reduction experiment).
 ##
