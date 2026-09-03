@@ -28,15 +28,15 @@ lightly loaded, which only inflates a run, never deflates it).
 
 ```
 pattern            roc_ns     rust_ns  roc_MBps  rust_MBps  slowdown  cnt
-literal          40259100       42974      6.51     6100.1      937x   ok
-teddy_alt       100045650      430740      2.62      608.6      232x   ok
-class_plus       87104950     2102483      3.01      124.7       41x   ok
-bounded_num      39855000      109841      6.58     2386.6      363x   ok
-word_bound      353435950      192911      0.74     1358.9     1832x   ok
-two_words        95086950     1534538      2.76      170.8       62x   ok
-caps_email       82937250       71120      3.16     3686.0     1166x   ok
-uni_letters      89184250     2050669      2.94      127.8       43x   ok
-dotstar_lit      97443200      646867      2.69      405.3      151x   ok
+literal          36298200       42974      7.22     6100.1      845x   ok
+teddy_alt        77417050      430740      3.39      608.6      180x   ok
+class_plus       80519400     2102483      3.26      124.7       38x   ok
+bounded_num      36244450      109841      7.23     2386.6      330x   ok
+word_bound      351234000      192911      0.75     1358.9     1821x   ok
+two_words        85171900     1534538      3.08      170.8       56x   ok
+caps_email       71822850       71120      3.65     3686.0     1010x   ok
+uni_letters      82022300     2050669      3.20      127.8       40x   ok
+dotstar_lit      82923650      646867      3.16      405.3      128x   ok
 ```
 
 literal / bounded_num / caps_email slowdowns swing a bit run to run (the Rust
@@ -44,23 +44,23 @@ side is only tens of µs); the Roc side is stable.
 
 ### Reading it
 
-- **Roc runs at ~0.7–6.6 MB/s** — the many-match scans that give Rust real work
+- **Roc runs at ~0.75–7.2 MB/s** — the many-match scans that give Rust real work
   (`class_plus`, `uni_letters`, `two_words`) sit at ~3 MB/s; the outlier is
-  `word_bound` (0.7 MB/s), whose per-position word-boundary look-around the
+  `word_bound` (0.75 MB/s), whose per-position word-boundary look-around the
   allocation work barely touched.
 - **Rust spans 125 MB/s to 6 GB/s** because it dispatches specialised paths
   (memchr for the literal, SIMD Teddy for the alternation, a lazy DFA for the
   big scans).
-- **Slowdown is ~41–62× on the heavy many-match scans** and ~150–1800× on the
+- **Slowdown is ~38–56× on the heavy many-match scans** and ~130–1800× on the
   patterns Rust answers almost for free. So the gap is really "Rust has fast
   paths we don't", not a uniform constant.
 
 ### Engine optimizations (2026-09-03)
 
-The numbers above are ~2× better than the first measurement across the board
-(≈5× on `teddy_alt`), from four commits that attacked the `find_all` allocation
-traffic — profiling had shown ~78% of its time in malloc/refcount/memcpy, not
-matching:
+The numbers above are ~2–2.5× better than the first measurement across the board
+(≈6.5× on `teddy_alt`, 1164→180×), from five commits that attacked the
+`find_all` allocation traffic — profiling had shown ~78% of its time in
+malloc/refcount/memcpy, not matching:
 
 | commit | change | effect |
 |---|---|---|
@@ -68,21 +68,28 @@ matching:
 | `be93982` | index-based reused closure stack (was `List.concat`/`drop_last` per ε-step) | one reused buffer |
 | `3f32b64` | start-only whole-match engine for find/find_all/is_match — a thread carries just `start : U64`, no per-thread slot list | drops all slot allocation on the span path |
 | `a367671` | delete the now-dead slots `find`/`match_at`/`arun` | — |
+| `3fa8c0c` | double-buffer the whole-match thread queues (`WCl` carries a count `n`; two `ths` buffers ping-pong across positions instead of `{ths:[]}` + append every position) | no per-position thread-list alloc |
 
-Cumulative speedup (64 KiB, back-to-back): teddy_alt 4.6×, caps_email 2.7×,
-literal 2.6×, bounded_num 2.5×, dotstar_lit 2.1×, two_words 1.9×, class_plus
-1.8×, uni_letters 1.7×, word_bound 1.1×. Each was verified under `--opt=speed`
-for both correctness (differential 860/860) and non-regression (a slower result
-would mean a buffer had refcount > 1 and was being cloned).
+Cumulative speedup (64 KiB, back-to-back): teddy_alt 6.1×, caps_email 3.4×,
+dotstar_lit 2.7×, bounded_num 2.9×, class_plus 2.0×, two_words 2.4×, literal
+2.6×, uni_letters 2.1×, word_bound 1.2×. Each was verified under `--opt=speed`
+for both correctness (differential 860/860) and non-regression — a slower result
+would mean a buffer had refcount > 1 and was being cloned, and the discipline
+throughout was that a reused buffer must be threaded *linearly* (moved into each
+call, never held by a `var`/pool slot during the call) so `List.set` mutates in
+place.
 
-It is **still ~80% allocation-bound.** The remaining allocators — the per-match
-`visited`/`stack` setup and the per-position thread list — can only be reused by
-carrying buffers *across* the per-match call boundary, which is where a loop
-`var` held during the call forces refcount > 1 and Roc clones the whole buffer
-(a ~2× regression, measured and reverted). Removing that needs either inlining
-the scan into one large function (which trips the optimizer blowup noted in
-`notes/2026-09-02-pikemut.md`) or a move idiom Roc doesn't expose here — the same
-"it's the Roc compiler, not LLVM" theme as the tail-call issue.
+It is now **~73% allocation-bound** (down from 78%; `malloc` specifically fell
+to ~33% while `rc` refcount traffic rose to the top at ~30%). The remaining
+allocators are the per-*match* setup (`visited`/`stack` and the two thread
+buffers grow from `[]` once per match) plus the accumulator. Pooling those
+*across* matches was tried and **did not pay** — the buffers are small (a dozen
+`U32`) and the pool wrapper allocates a one-element list per match, a wash — and
+the naïve cross-match reuse via a loop `var` held during the call forces
+refcount > 1 and clones (a measured ~2× regression, reverted). Cutting the `rc`
+30% or the per-match residue further would need fewer threaded values or a move
+idiom Roc doesn't expose here — the same "it's the Roc compiler, not LLVM" theme
+as the tail-call issue.
 
 ### Compile latency
 
