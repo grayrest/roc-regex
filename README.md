@@ -70,3 +70,16 @@ Honest gaps: full `\p{}` breadth, `(?i:...)` scoped flags, Unicode `\b` in the
 DFA (look patterns use the PikeVM), captures direct from the reverse pass, and
 the shared-vs-per-pattern trie decision (D3 fork). Each is in the milestone
 notes under `notes/`.
+
+## Benchmark
+
+`tools/bench/run.sh` times this engine against the vendored Rust `regex` crate
+on an identical haystack (match counts are compared to enforce identical work).
+Match throughput only — the regex is compiled once, before the timing loop, on
+both sides. Roughly: Roc runs at **~0.5–2.2 MB/s, roughly flat across
+patterns** (per-byte overhead dominates; no fast paths in `find_all`), Rust at
+130 MB/s–11 GB/s, so the slowdown is **~110× on heavy many-match scans up to
+~thousands× on patterns Rust answers via memchr/DFA for free**. Compile cost is
+the one axis Roc wins: 0 at runtime (folded at build) vs ~30–700 µs/pattern for
+`Regex::new`. Full numbers, method, and a `find_all` stack-overflow finding
+(~3–4k matches, SIGBUS) are in `notes/2026-09-02-benchmark.md`.

@@ -11,6 +11,14 @@
 examples/smoke
 examples/*.wasm
 
+# built roc benchmark binary (roc build drops it at the repo root)
+/bench
+
+# generated benchmark haystack
+testdata/bench_haystack.txt
+
 # rust harness build
 tools/diff/target/
 tools/diff/Cargo.lock
+tools/bench/target/
+tools/bench/Cargo.lock
