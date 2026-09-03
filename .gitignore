@@ -11,8 +11,11 @@
 examples/smoke
 examples/*.wasm
 
-# built roc benchmark binary (roc build drops it at the repo root)
+# roc build drops the executable at the repo root, named after the app file
 /bench
+/smoke
+/difftest
+/repro
 
 # generated benchmark haystack
 testdata/bench_haystack.txt

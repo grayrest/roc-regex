@@ -173,31 +173,48 @@ Regex := [].{
     ## All non-overlapping matches as slot arrays, applying D14's empty-match
     ## advance: an empty match abutting the previous match end is skipped, and
     ## after any empty match the cursor steps one symbol so it cannot loop.
+    ## An explicit `while` loop rather than a recursive helper: it advances the
+    ## cursor by one match (or one symbol after an empty match) until
+    ## `captures_from` reports no more. A recursive form here would rely on the
+    ## LLVM (`--opt=speed`) backend eliminating a tail call whose body inlines
+    ## the whole matcher, which it does not — the stack then grows one frame per
+    ## match and overflows (SIGBUS) after a few thousand matches. The loop keeps
+    ## stack use O(1) regardless of match count.
     all_caps : Regex.T, List(U8) -> List(List(U64))
-    all_caps = |re, hay| Regex.all_loop(re, hay, 0, Regex.sentinel, [])
-
-    sentinel : U64
-    sentinel = 0xFFFF_FFFF_FFFF_FFFF
-
-    all_loop : Regex.T, List(U8), U64, U64, List(List(U64)) -> List(List(U64))
-    all_loop = |re, hay, at, last_end, acc|
-        if at > List.len(hay) {
-            acc
-        } else {
-            match Pike.captures_from(Regex.base(re), hay, at) {
-                Err(_) => acc
-                Ok(slots) => {
-                    s = List.get(slots, 0) ?? 0
-                    e = List.get(slots, 1) ?? 0
-                    if s == e and e == last_end {
-                        Regex.all_loop(re, hay, Regex.next_bound(hay, e), last_end, acc)
-                    } else {
-                        nat = if s == e { Regex.next_bound(hay, e) } else { e }
-                        Regex.all_loop(re, hay, nat, e, List.append(acc, slots))
+    all_caps = |re, hay| {
+        comp = Regex.base(re)
+        len = List.len(hay)
+        var at = 0
+        var last_end = Regex.sentinel
+        var acc = []
+        var running = True
+        while running {
+            if at > len {
+                running = False
+            } else {
+                match Pike.captures_from(comp, hay, at) {
+                    Err(_) => {
+                        running = False
+                    }
+                    Ok(slots) => {
+                        s = List.get(slots, 0) ?? 0
+                        e = List.get(slots, 1) ?? 0
+                        if s == e and e == last_end {
+                            at = Regex.next_bound(hay, e)
+                        } else {
+                            acc = List.append(acc, slots)
+                            last_end = e
+                            at = if s == e { Regex.next_bound(hay, e) } else { e }
+                        }
                     }
                 }
             }
         }
+        acc
+    }
+
+    sentinel : U64
+    sentinel = 0xFFFF_FFFF_FFFF_FFFF
 
     next_bound : List(U8), U64 -> U64
     next_bound = |hay, p|
