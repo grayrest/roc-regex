@@ -208,7 +208,14 @@ Comp := [
     ## word-ness for \b: the Unicode \w set. A scan per boundary — correct;
     ## M3's DFA does it via classes. (Uni.Rng and Comp.Rng share a shape.)
     is_word_cp : U32 -> Bool
-    is_word_cp = |c| List.any(Comp.ranges_w, |r| c >= r.lo and c <= r.hi)
+    is_word_cp = |c|
+        # ASCII fast path: \w over ASCII is exactly [0-9A-Za-z_], so the common
+        # case avoids the linear scan of the full Unicode \w range table.
+        if c < 0x80 {
+            (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 95
+        } else {
+            List.any(Comp.ranges_w, |r| c >= r.lo and c <= r.hi)
+        }
 
     # --- parser: alt -> cat -> repeat -> atom (S: M1 subset) -------------------
 
