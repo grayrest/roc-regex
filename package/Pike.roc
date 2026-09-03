@@ -29,14 +29,6 @@ Pike := [].{
     WClv : { cl : Pike.WCl, visited : List(U32), stack : List(U32) }
     WStep : { cl : Pike.WCl, matched : Pike.WM, visited : List(U32), stack : List(U32) }
 
-    ## Whole-match span, or NoMatch.
-    find : Comp.Compiled, List(U8) -> Try({ start : U64, end : U64 }, [NoMatch])
-    find = |c, hay|
-        match Pike.captures(c, hay) {
-            Ok(sl) => Ok({ start: List.get(sl, 0) ?? 0, end: List.get(sl, 1) ?? 0 })
-            Err(_) => Err(NoMatch)
-        }
-
     ## The full slot array (2·(n_groups+1) entries). Unset slots are `no_pos`.
     captures : Comp.Compiled, List(U8) -> Pike.M
     captures = |c, hay| {
@@ -52,33 +44,6 @@ Pike := [].{
         ns = (c.n_groups.to_u64() + 1) * 2
         visited = List.repeat(0, List.len(c.prog))
         Pike.run(c, hay, len, ns, at, { ths: [], gen: 1 }, Err(NoMatch), visited, [])
-    }
-
-    ## Anchored: does the pattern match starting exactly at `at`? Seeds one
-    ## thread at `at` and never re-seeds, so the match (if any) starts at `at`.
-    ## Used by the M4 prefilter, which supplies candidate start positions.
-    match_at : Comp.Compiled, List(U8), U64 -> Pike.M
-    match_at = |c, hay, at| {
-        len = List.len(hay)
-        ns = (c.n_groups.to_u64() + 1) * 2
-        visited = List.repeat(0, List.len(c.prog))
-        r = Pike.add(c, hay, at, len, { ths: [], gen: 1 }, { pc: 0, slots: List.repeat(Pike.no_pos, ns) }, visited, [])
-        Pike.arun(c, hay, len, at, r.cl, Err(NoMatch), r.visited, r.stack)
-    }
-
-    # like run, but never seeds new starts (anchored)
-    arun : Comp.Compiled, List(U8), U64, U64, Pike.Cl, Pike.M, List(U32), List(U32) -> Pike.M
-    arun = |c, hay, len, pos, cl, matched, visited, stack| {
-        nl0 = { ths: [], gen: cl.gen + 1 }
-        step = Pike.exec(c, hay, pos, len, cl.ths, 0, nl0, matched, visited, stack)
-        if pos >= len {
-            step.matched
-        } else if List.is_empty(step.cl.ths) {
-            step.matched
-        } else {
-            npos = pos + Comp.decode(hay, pos).len
-            Pike.arun(c, hay, len, npos, step.cl, step.matched, step.visited, step.stack)
-        }
     }
 
     no_pos : U64
