@@ -88,5 +88,4 @@ the one axis Roc wins: 0 at runtime (folded at build) vs ~30–700 µs/pattern f
 engine, double-buffered thread queues, ASCII word-boundary fast path) are in
 `notes/2026-09-02-benchmark.md`. Benchmarking also flushed out a `find_all`
 stack overflow on large inputs — a tail call Roc's optimizer wouldn't loopify —
-now fixed with an explicit `while` loop and written up for upstream in
-`upstream/2026-09-02-llvm-tco-match-loop/`.
+now fixed with an explicit `while` loop.
