@@ -6,6 +6,31 @@ Harness: `tools/bench/` (`gen` + `bench` bins, `run.sh` driver) and
 
 ---
 
+## 2026-09-04: adaptive literal prefilter for `find_all`
+
+`find_all` on a pattern with a required literal **prefix** (e.g. `Holmes`,
+`Holmes\d+`) now SIMD-scans for the prefix (Teddy over `[re.prefix]`) and
+verifies each candidate with `Pike.wmatch_at` (~2.5 µs/call — cheap), instead of
+stepping the DFA over every codepoint. It's **adaptive**: `Teddy.candidates_capped`
+bails to the DFA once candidates exceed `len / 512`, the point where
+per-candidate verification overtakes a straight DFA scan — so a *dense* literal
+can't regress.
+
+`literal` (`Holmes`) at 256 KiB:
+
+| haystack | DFA | adaptive prefilter |
+|---|---|---|
+| sparse (32 matches) | ~1.47M ns | **~66K ns (~22×)** |
+| dense (Sherlock, 1202) | ~1.01M ns | ~1.03M ns (bails → DFA) |
+
+Big win where the literal is rare (the real case — a word in a document), no
+regression where it's dense. This is the fix for the `literal`-vs-meta gap
+identified earlier: it was never `wmatch_at` (2.5 µs) nor the DFA per-byte cost —
+single literals carry `prefix`, not `tlits`, so no prefilter engaged at all.
+1512/1512 differential (verified with the gate forced always-on too).
+
+---
+
 ## 2026-09-04: `\b` / `\B` moved into the DFA
 
 Word boundaries are now baked into the determinizer (over the codepoint

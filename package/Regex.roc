@@ -229,8 +229,67 @@ Regex := [].{
     ## All whole-match spans. Uses the start-only whole-match engine (no
     ## per-thread slot allocation), with the same D14 empty-match advance as
     ## `all_caps`. `all_caps` (full slots) is kept for `captures`/`replace`/`split`.
+    # Adaptive-prefilter selectivity gate: use the literal prefilter only while
+    # candidates stay below len/K, where K is the point at which per-candidate
+    # verification (~a couple µs) overtakes a straight DFA byte-scan (~ns/byte).
+    # Denser than that and the prefilter loses, so we fall back to the DFA.
+    prefilter_k : U64
+    prefilter_k = 512
+
     find_all : Regex.T, List(U8) -> List(Regex.Span)
-    find_all = |re, hay| {
+    find_all = |re, hay|
+        # With a required literal prefix, SIMD-scan for candidates and verify each
+        # — a big win when the literal is rare. The capped scan bails to the DFA
+        # when the literal is dense (candidates > len/prefilter_k), where scanning
+        # every byte with the DFA is cheaper than verifying at every candidate.
+        if !List.is_empty(re.prefix) {
+            match Teddy.build([re.prefix]) {
+                Ok(t) =>
+                    match Teddy.candidates_capped(t, hay, List.len(hay) // Regex.prefilter_k) {
+                        Ok(cands) => Regex.find_all_teddy(Regex.base(re), hay, cands)
+                        Err(_) => Regex.find_all_engine(re, hay)
+                    }
+                Err(_) => Regex.find_all_engine(re, hay)
+            }
+        } else {
+            Regex.find_all_engine(re, hay)
+        }
+
+    # verify literal-prefix candidates left to right; a literal-prefixed pattern
+    # never matches empty, so a candidate inside the previous match is skipped.
+    find_all_teddy : Comp.Compiled, List(U8), List(U64) -> List(Regex.Span)
+    find_all_teddy = |c, hay, cands| {
+        ncand = List.len(cands)
+        var i = 0
+        var last_end = 0
+        var acc = []
+        var running = True
+        while running {
+            if i >= ncand {
+                running = False
+            } else {
+                at = List.get(cands, i) ?? 0
+                if at < last_end {
+                    i = i + 1
+                } else {
+                    match Pike.wmatch_at(c, hay, at) {
+                        Ok(span) => {
+                            acc = List.append(acc, span)
+                            last_end = span.end
+                            i = i + 1
+                        }
+                        Err(_) => {
+                            i = i + 1
+                        }
+                    }
+                }
+            }
+        }
+        acc
+    }
+
+    find_all_engine : Regex.T, List(U8) -> List(Regex.Span)
+    find_all_engine = |re, hay| {
         comp = Regex.base(re)
         len = List.len(hay)
         var at = 0

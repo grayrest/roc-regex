@@ -62,6 +62,56 @@ Teddy := [].{
         }
     }
 
+    ## As `candidates`, but bail with `Err(TooMany)` once more than `cap`
+    ## candidates have been found — the adaptive-prefilter selectivity gate. Dense
+    ## literals abort the scan early (cheaply) so the caller can fall back to the
+    ## DFA instead of verifying a candidate at nearly every position.
+    candidates_capped : Teddy.T, List(U8), U64 -> Try(List(U64), [TooMany])
+    candidates_capped = |t, hay, cap| {
+        len = List.len(hay)
+        if len < 16 {
+            cands = Teddy.scalar_tail(t, hay, 0, len, [])
+            if List.len(cands) > cap { Err(TooMany) } else { Ok(cands) }
+        } else {
+            match Teddy.scan_capped(t, hay, len, t.m - 1, U8x16.splat(0xFF), U8x16.splat(0xFF), [], cap) {
+                Err(TooMany) => Err(TooMany)
+                Ok(main) => {
+                    tail = Teddy.scan(t, hay, len, len - 16, U8x16.splat(0xFF), U8x16.splat(0xFF), main)
+                    Ok(Teddy.dedup_sorted(tail))
+                }
+            }
+        }
+    }
+
+    scan_capped : Teddy.T, List(U8), U64, U64, U8x16, U8x16, List(U64), U64 -> Try(List(U64), [TooMany])
+    scan_capped = |t, hay, len, w, prev0, prev1, acc, cap|
+        if List.len(acc) > cap {
+            Err(TooMany)
+        } else if w + 16 > len {
+            Ok(acc)
+        } else {
+            chunk = U8x16.load(hay, w) ?? U8x16.splat(0)
+            lomask = U8x16.splat(0x0F)
+            hlo = chunk.bitwise_and(lomask)
+            hhi = chunk.shr_zf_wrap(4).bitwise_and(lomask)
+            res0 = t.lo0.table_lookup(hlo).bitwise_and(t.hi0.table_lookup(hhi))
+            res1 = if t.m >= 2 { t.lo1.table_lookup(hlo).bitwise_and(t.hi1.table_lookup(hhi)) } else { U8x16.splat(0) }
+            cand =
+                if t.m == 1 {
+                    res0
+                } else if t.m == 2 {
+                    prev0.concat_shift_bytes(res0, 15).bitwise_and(res1)
+                } else {
+                    res2 = t.lo2.table_lookup(hlo).bitwise_and(t.hi2.table_lookup(hhi))
+                    a0 = prev0.concat_shift_bytes(res0, 14)
+                    a1 = prev1.concat_shift_bytes(res1, 15)
+                    a0.bitwise_and(a1).bitwise_and(res2)
+                }
+            bm = cand.eq_lanes(U8x16.splat(0)).bitwise_not().to_bitmask()
+            acc2 = if bm == 0 { acc } else { Teddy.bits(bm, w, t.m - 1, 0, acc) }
+            Teddy.scan_capped(t, hay, len, w + 16, res0, res1, acc2, cap)
+        }
+
     # scan 16-byte windows from `w`, carrying prev fingerprint results
     scan : Teddy.T, List(U8), U64, U64, U8x16, U8x16, List(U64) -> List(U64)
     scan = |t, hay, len, w, prev0, prev1, acc|
