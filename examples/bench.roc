@@ -16,7 +16,8 @@ Pat : { id : Str, src : Str }
 
 patterns : List(Pat)
 patterns = [
-	{ id: "literal", src: "Holmes" },
+	{ id: "literal_dense", src: "Holmes" },
+	{ id: "literal_sparse", src: "Moriarty" },
 	{ id: "teddy_alt", src: "Sherlock|Holmes|Watson|Adler|Irene|Norton|Baker|John" },
 	{ id: "class_plus", src: "[A-Za-z]+" },
 	{ id: "bounded_num", src: "[0-9]{2,4}" },

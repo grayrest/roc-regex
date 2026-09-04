@@ -42,10 +42,17 @@ fn main() {
     let mut rng = Lcg(0x9E3779B97F4A7C15);
     let mut buf = String::with_capacity(target + 64);
     let mut words_on_line = 0u32;
+    let mut ntok = 0u64;
 
     while buf.len() < target {
-        let r = rng.next() % 100;
-        let tok: String = if r < 4 {
+        let r = rng.next() % 100; // rolled every token, so injecting below keeps
+        ntok += 1; //                the RNG sequence (and dense-word counts) stable
+        // A deliberately RARE literal for the sparse-prefilter bench row: not in
+        // the word bank, injected ~every 700 tokens (~tens of occurrences), and
+        // its "Mor" fingerprint doesn't collide with lowercase "morning".
+        let tok: String = if ntok % 700 == 0 {
+            "Moriarty".to_string()
+        } else if r < 4 {
             rng.pick(NUMBERS).to_string()
         } else if r < 6 {
             rng.pick(EMAILS).to_string()

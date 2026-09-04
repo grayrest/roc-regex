@@ -16,12 +16,13 @@ bails to the DFA once candidates exceed `len / 512`, the point where
 per-candidate verification overtakes a straight DFA scan — so a *dense* literal
 can't regress.
 
-`literal` (`Holmes`) at 256 KiB:
+Two suite rows on the **same** 256 KiB haystack isolate the effect by literal
+rarity (`gen` injects a deliberately rare `Moriarty`):
 
-| haystack | DFA | adaptive prefilter |
-|---|---|---|
-| sparse (32 matches) | ~1.47M ns | **~66K ns (~22×)** |
-| dense (Sherlock, 1202) | ~1.01M ns | ~1.03M ns (bails → DFA) |
+| row | literal | matches | roc_ns |
+|---|---|---|---|
+| `literal_dense` | `Holmes` | ~1200 | ~1.0–2.0M (bails → DFA) |
+| `literal_sparse` | `Moriarty` | ~45 | **~146K (~10–14× faster)** |
 
 Big win where the literal is rare (the real case — a word in a document), no
 regression where it's dense. This is the fix for the `literal`-vs-meta gap

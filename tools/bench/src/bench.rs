@@ -21,7 +21,8 @@ use std::time::Instant;
 
 // (id, regex source). Ids are stable; the Roc bench mirrors this list.
 const PATTERNS: &[(&str, &str)] = &[
-    ("literal", "Holmes"),
+    ("literal_dense", "Holmes"),
+    ("literal_sparse", "Moriarty"),
     ("teddy_alt", "Sherlock|Holmes|Watson|Adler|Irene|Norton|Baker|John"),
     ("class_plus", "[A-Za-z]+"),
     ("bounded_num", "[0-9]{2,4}"),
