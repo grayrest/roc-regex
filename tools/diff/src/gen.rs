@@ -18,6 +18,10 @@ fn main() {
         "cat cats scatter", "192.168.1.100", "key=val other=x",
         "2026-09-02", "a-b-c", "color colour", "the@host now",
         "aabbabb", "xxxxx", "12345", "  \t ", "abcabcabc", "+42 -7",
+        // non-ASCII: exercises Unicode word-boundary classification on the DFA
+        // (word-ness of multi-byte codepoints) and multibyte span offsets
+        "café résumé", "αβγ foo", "naïve cat", "foo·bar", "1α cat β2",
+        "Москва cat", "日本語 cat text",
     ];
     println!("app [main!] {{");
     println!("\tpf: platform \"https://github.com/roc-lang/basic-cli/releases/download/0.21.0/4rAQg8kUYZ3Vksr4qMQHpaFYNiHSn9GgS7gVxghd1XYV.tar.zst\",");

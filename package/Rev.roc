@@ -10,34 +10,49 @@ import Comp
 import Trie
 
 Rev := [].{
-    ## A leftmost DFA: dense table (state*nc + class -> state+1, 0=dead) and a
-    ## match flag per state.
-    D : { table : List(U32), hit : List(U8), nc : U32 }
+    ## A leftmost DFA: dense table (state*nc + class -> state+1, 0=dead).
+    ## `accept_eoi[state]` is the accept flag at end-of-input. `accept_on` is
+    ## EMPTY for a look-free DFA (then `accept_eoi` doubles as the per-state match
+    ## flag, checked at every position); for a `\b`/`\B` DFA it is populated
+    ## per-transition (`accept_on[state*nc + cls]` = a match ends at the position
+    ## *before* `cls`), because a boundary adjacent to Match resolves against the
+    ## following symbol. `accept_on` non-empty is the "has word boundaries" flag.
+    D : { table : List(U32), accept_on : List(U8), accept_eoi : List(U8), nc : U32 }
 
     ## Build both DFAs at compile time (folds when the pattern is constant), or
-    ## say why not. `HasLook` -> look assertions; `TooBig` -> over budget; either
-    ## downgrades to the PikeVM (D10). Store the result in `Regex`'s engine.
+    ## say why not. `HasLook` -> `^`/`$` assertions (still PikeVM); `TooBig` ->
+    ## over budget; either downgrades to the PikeVM (D10). `\b`/`\B` are handled
+    ## in the determinizer (word boundaries baked into the transition function
+    ## over the codepoint alphabet).
     build : Comp.Compiled, U64 -> Try({ fwd : Rev.D, rev : Rev.D }, [HasLook, TooBig])
     build = |c, max_states|
-        if Rev.has_look(c.prog, 0) {
+        if Rev.has_anchor(c.prog, 0) {
             Err(HasLook)
         } else {
             nc = c.classes.n_classes
-            match Rev.determinize(c.uprog, c.usplits, c.classes, nc, max_states) {
+            wb = Comp.has_wb(c.prog, 0)
+            det = |prog, splits| if wb { Rev.determinize_wb(prog, splits, c.classes, nc, c.word_set, max_states) } else { Rev.determinize(prog, splits, c.classes, nc, max_states) }
+            match det(c.uprog, c.usplits) {
                 Err(_) => Err(TooBig)
                 Ok(fwd) =>
-                    match Rev.determinize(c.rprog, c.rsplits, c.classes, nc, max_states) {
+                    match det(c.rprog, c.rsplits) {
                         Err(_) => Err(TooBig)
                         Ok(rev) => Ok({ fwd, rev })
                     }
             }
         }
 
-    has_look : List(U32), U64 -> Bool
-    has_look = |prog, i|
+    # `^`/`$` still force the PikeVM; `\b`/`\B` do not (handled in the DFA).
+    has_anchor : List(U32), U64 -> Bool
+    has_anchor = |prog, i|
         match List.get(prog, i) {
             Err(_) => False
-            Ok(w) => if Comp.inst_op(w) == Comp.op_look { True } else { Rev.has_look(prog, i + 1) }
+            Ok(w) =>
+                if Comp.inst_op(w) == Comp.op_look and (Comp.inst_arg(w) == Comp.look_start or Comp.inst_arg(w) == Comp.look_end) {
+                    True
+                } else {
+                    Rev.has_anchor(prog, i + 1)
+                }
         }
 
     ## Run prebuilt DFAs: leftmost-first span, or NoMatch.
@@ -73,7 +88,7 @@ Rev := [].{
         s0 = Rev.close_pri(prog, splits, [0], [])
         match Rev.explore(prog, splits, classes, nc, max_states, [s0], { table: [], hit: [], smap: [s0], next: 1 }) {
             Err(e) => Err(e)
-            Ok(st) => Ok({ table: st.table, hit: st.hit, nc })
+            Ok(st) => Ok({ table: st.table, accept_on: [], accept_eoi: st.hit, nc })
         }
     }
 
@@ -102,6 +117,125 @@ Rev := [].{
                 })
                 st2 = { ..r.st, table: List.concat(r.st.table, r.ids), hit: List.append(r.st.hit, if is_m { 1 } else { 0 }) }
                 Rev.explore(prog, splits, classes, nc, max_states, r.work, st2)
+                }
+            }
+        }
+
+    # --- word-boundary determinization (\b / \B in the DFA) -------------------
+    #
+    # A wb state is `{ pcs, lw }`: the pending closure plus whether the codepoint
+    # that entered the state was a word codepoint. Two start states are seeded
+    # (lw False then True → ids 0 and 1) so a mid-string / reverse scan can begin
+    # from the correct left-context. `word_set` is the folded `\w` set ordinal;
+    # `is_word_class a` = is class `a` a word class.
+
+    WbState : { pcs : List(U32), lw : Bool }
+
+    determinize_wb : List(U32), List(U32), Trie.T, U32, U64, U64 -> Try(Rev.D, [TooBig])
+    determinize_wb = |prog, splits, classes, nc, word_set, max_states| {
+        pcs0 = Rev.close_pri(prog, splits, [0], [])
+        s0f = { pcs: pcs0, lw: False }
+        s0t = { pcs: pcs0, lw: True }
+        ciw = List.map(Rev.upto(nc.to_u64()), |a| Trie.accepts_atom(classes, word_set.to_u32_wrap(), a.to_u32_wrap()))
+        match Rev.explore_wb(prog, splits, classes, nc, ciw, max_states, [s0f, s0t], { table: [], acc_on: [], acc_eoi: [], smap: [s0f, s0t], next: 2 }) {
+            Err(e) => Err(e)
+            Ok(st) => Ok({ table: st.table, accept_on: st.acc_on, accept_eoi: st.acc_eoi, nc })
+        }
+    }
+
+    is_match_pc : List(U32), List(U32) -> Bool
+    is_match_pc = |prog, pcs| List.any(pcs, |pc| Comp.inst_op(List.get(prog, pc.to_u64()) ?? 0) == Comp.op_match)
+
+    explore_wb = |prog, splits, classes, nc, ciw, max_states, work, st|
+        match List.first(work) {
+            Err(_) => Ok(st)
+            Ok(state) => {
+                rest = List.drop_first(work, 1)
+                if (List.len(st.smap)).to_u64() > max_states {
+                    Err(TooBig)
+                } else {
+                    lw = state.lw
+                    # accept at end-of-input: right side is non-word
+                    eoi = Rev.close_resolve(prog, splits, state.pcs, [], [], lw != False, lw == False)
+                    is_eoi = Rev.is_match_pc(prog, eoi)
+                    r = List.fold(Rev.upto(nc.to_u64()), { st, work: rest, ids: [], accs: [] }, |acc, cls| {
+                        rw = List.get(ciw, cls) ?? False
+                        wok = lw != rw
+                        resolved = Rev.close_resolve(prog, splits, state.pcs, [], [], wok, !wok)
+                        accept = if Rev.is_match_pc(prog, resolved) { 1 } else { 0 }
+                        moved = List.fold(resolved, [], |m, pc| {
+                            w = List.get(prog, pc.to_u64()) ?? 0
+                            if Comp.inst_op(w) == Comp.op_char and Trie.accepts_atom(classes, Comp.inst_arg(w), cls.to_u32_wrap()) {
+                                List.append(m, pc + 1)
+                            } else {
+                                m
+                            }
+                        })
+                        tset = Rev.close_pri(prog, splits, moved, [])
+                        accs2 = List.append(acc.accs, accept)
+                        if List.is_empty(tset) {
+                            { st: acc.st, work: acc.work, ids: List.append(acc.ids, 0), accs: accs2 }
+                        } else {
+                            tstate = { pcs: tset, lw: rw }
+                            match Rev.index_of_wb(acc.st.smap, tstate) {
+                                Ok(id) => { st: acc.st, work: acc.work, ids: List.append(acc.ids, id + 1), accs: accs2 }
+                                Err(_) => {
+                                    nid = acc.st.next
+                                    { st: { ..acc.st, smap: List.append(acc.st.smap, tstate), next: nid + 1 }, work: List.append(acc.work, tstate), ids: List.append(acc.ids, nid + 1), accs: accs2 }
+                                }
+                            }
+                        }
+                    })
+                    st2 = { ..r.st, table: List.concat(r.st.table, r.ids), acc_on: List.concat(r.st.acc_on, r.accs), acc_eoi: List.append(r.st.acc_eoi, if is_eoi { 1 } else { 0 }) }
+                    Rev.explore_wb(prog, splits, classes, nc, ciw, max_states, r.work, st2)
+                }
+            }
+        }
+
+    index_of_wb : List(Rev.WbState), Rev.WbState -> Try(U32, [NotFound])
+    index_of_wb = |states, target| Rev.iw_loop(states, target, 0)
+    iw_loop = |states, target, i|
+        match List.get(states, i.to_u64()) {
+            Err(_) => Err(NotFound)
+            Ok(s) => if s.lw == target.lw and s.pcs == target.pcs { Ok(i) } else { Rev.iw_loop(states, target, i + 1) }
+        }
+
+    # resolve pending Looks in `stack` at a position with the given
+    # word-boundary / non-word-boundary flags, following satisfied assertions and
+    # dropping unsatisfied ones; yields Char/Match pcs in priority order.
+    close_resolve : List(U32), List(U32), List(U32), List(U32), List(U32), Bool, Bool -> List(U32)
+    close_resolve = |prog, splits, stack, seen, out, wok, nwok|
+        match List.first(stack) {
+            Err(_) => out
+            Ok(pc) => {
+                rest = List.drop_first(stack, 1)
+                if List.contains(seen, pc) {
+                    Rev.close_resolve(prog, splits, rest, seen, out, wok, nwok)
+                } else {
+                    seen2 = List.append(seen, pc)
+                    w = List.get(prog, pc.to_u64()) ?? 0
+                    op = Comp.inst_op(w)
+                    arg = Comp.inst_arg(w)
+                    if op == Comp.op_split {
+                        t1 = List.get(splits, arg.to_u64()) ?? 0
+                        t2 = List.get(splits, (arg + 1).to_u64()) ?? 0
+                        Rev.close_resolve(prog, splits, List.concat([t1, t2], rest), seen2, out, wok, nwok)
+                    } else if op == Comp.op_jmp {
+                        Rev.close_resolve(prog, splits, List.prepend(rest, arg), seen2, out, wok, nwok)
+                    } else if op == Comp.op_save {
+                        Rev.close_resolve(prog, splits, List.prepend(rest, pc + 1), seen2, out, wok, nwok)
+                    } else if op == Comp.op_look {
+                        pass = if arg == Comp.look_wordb { wok } else if arg == Comp.look_nwordb { nwok } else { False }
+                        if pass {
+                            Rev.close_resolve(prog, splits, List.prepend(rest, pc + 1), seen2, out, wok, nwok)
+                        } else {
+                            Rev.close_resolve(prog, splits, rest, seen2, out, wok, nwok)
+                        }
+                    } else if op == Comp.op_match {
+                        List.append(out, pc)
+                    } else {
+                        Rev.close_resolve(prog, splits, rest, seen2, List.append(out, pc), wok, nwok)
+                    }
                 }
             }
         }
@@ -151,6 +285,11 @@ Rev := [].{
                         Rev.close_go(prog, splits, List.prepend(rest, arg), seen2, out)
                     } else if op == Comp.op_save {
                         Rev.close_go(prog, splits, List.prepend(rest, pc + 1), seen2, out)
+                    } else if op == Comp.op_look {
+                        # leave the assertion pending in the set; a transition
+                        # resolves it once both sides' word-ness are known
+                        # (`close_resolve`). Look-free progs never reach this.
+                        Rev.close_go(prog, splits, rest, seen2, List.append(out, pc))
                     } else if op == Comp.op_match {
                         List.append(out, pc)
                     } else {
@@ -173,8 +312,14 @@ Rev := [].{
 
     # --- searches -------------------------------------------------------------
 
+    # `accept_on` non-empty selects the word-boundary scan; otherwise the plain
+    # look-free scan (where `accept_eoi` is the per-state match flag).
+    is_wb : Rev.D -> Bool
+    is_wb = |d| !(List.is_empty(d.accept_on))
+
     run_fwd : Rev.D, Trie.T, List(U8) -> Try(U64, [NoMatch])
-    run_fwd = |d, classes, hay| Rev.fwd(d, classes, hay, 0, 0, Err(NoMatch))
+    run_fwd = |d, classes, hay|
+        if Rev.is_wb(d) { Rev.fwd_wb(d, classes, hay, 0, 0, Err(NoMatch)) } else { Rev.fwd(d, classes, hay, 0, 0, Err(NoMatch)) }
 
     # forward end-scan starting at `at`. Terminates at the leftmost match's end:
     # the leftmost-first determinizer truncates the lazy dot-star closure at the
@@ -182,11 +327,23 @@ Rev := [].{
     # to EOF — this is what keeps `find_all` iteration linear (see the DFA-find_all
     # scope note). No explicit end bound is needed for that.
     run_fwd_from : Rev.D, Trie.T, List(U8), U64 -> Try(U64, [NoMatch])
-    run_fwd_from = |d, classes, hay, at| Rev.fwd(d, classes, hay, at, 0, Err(NoMatch))
+    run_fwd_from = |d, classes, hay, at|
+        if Rev.is_wb(d) {
+            Rev.fwd_wb(d, classes, hay, at, Rev.wstart_fwd(hay, at), Err(NoMatch))
+        } else {
+            Rev.fwd(d, classes, hay, at, 0, Err(NoMatch))
+        }
+
+    # left-context start state for a forward scan beginning at `at`: state 1 if
+    # the codepoint ending just before `at` is a word codepoint, else state 0
+    # (determinize_wb seeds [nonword, word] as ids 0, 1).
+    wstart_fwd : List(U8), U64 -> U32
+    wstart_fwd = |hay, at|
+        if at > 0 and Comp.is_word_cp(Comp.decode(hay, Rev.cp_start(hay, at - 1)).cp) { 1 } else { 0 }
 
     fwd : Rev.D, Trie.T, List(U8), U64, U32, Try(U64, [NoMatch]) -> Try(U64, [NoMatch])
     fwd = |d, classes, hay, pos, state, best| {
-        best2 = if (List.get(d.hit, state.to_u64()) ?? 0) == 1 { Ok(pos) } else { best }
+        best2 = if (List.get(d.accept_eoi, state.to_u64()) ?? 0) == 1 { Ok(pos) } else { best }
         if pos >= List.len(hay) {
             best2
         } else {
@@ -201,20 +358,51 @@ Rev := [].{
         }
     }
 
+    # word-boundary forward scan: accept is per position (`accept_on[state,cls]`
+    # resolves the boundary against the following codepoint) with `accept_eoi`
+    # at end-of-input (right side = non-word).
+    fwd_wb : Rev.D, Trie.T, List(U8), U64, U32, Try(U64, [NoMatch]) -> Try(U64, [NoMatch])
+    fwd_wb = |d, classes, hay, pos, state, best|
+        if pos >= List.len(hay) {
+            if (List.get(d.accept_eoi, state.to_u64()) ?? 0) == 1 { Ok(pos) } else { best }
+        } else {
+            dec = Comp.decode(hay, pos)
+            cls = Trie.class_of(classes, dec.cp)
+            idx = state.to_u64() * d.nc.to_u64() + cls.to_u64()
+            best2 = if (List.get(d.accept_on, idx) ?? 0) == 1 { Ok(pos) } else { best }
+            nxt = List.get(d.table, idx) ?? 0
+            if nxt == 0 {
+                best2
+            } else {
+                Rev.fwd_wb(d, classes, hay, pos + dec.len, nxt - 1, best2)
+            }
+        }
+
     # reverse DFA anchored at `end`, stepping backward; the smallest reached
     # position that is a match state is the leftmost start.
     run_rev : Rev.D, Trie.T, List(U8), U64 -> U64
-    run_rev = |d, classes, hay, end| Rev.rev(d, classes, hay, end, 0, 0, end)
+    run_rev = |d, classes, hay, end| Rev.run_rev_from(d, classes, hay, end, 0)
 
     # as `run_rev`, but the backward scan stops at floor `lo` (so the leftmost
     # start it can report is `lo`) — used by `find_from` to keep matches
     # non-overlapping across iteration.
     run_rev_from : Rev.D, Trie.T, List(U8), U64, U64 -> U64
-    run_rev_from = |d, classes, hay, end, lo| Rev.rev(d, classes, hay, end, lo, 0, end)
+    run_rev_from = |d, classes, hay, end, lo|
+        if Rev.is_wb(d) {
+            Rev.rev_wb(d, classes, hay, end, lo, Rev.wstart_rev(hay, end), end)
+        } else {
+            Rev.rev(d, classes, hay, end, lo, 0, end)
+        }
+
+    # left-context start state for the reverse scan beginning at `end`: in the
+    # reversed reading the "already-seen" side is the codepoint at `end`.
+    wstart_rev : List(U8), U64 -> U32
+    wstart_rev = |hay, end|
+        if end < List.len(hay) and Comp.is_word_cp(Comp.decode(hay, end).cp) { 1 } else { 0 }
 
     rev : Rev.D, Trie.T, List(U8), U64, U64, U32, U64 -> U64
     rev = |d, classes, hay, pos, lo, state, best| {
-        best2 = if (List.get(d.hit, state.to_u64()) ?? 0) == 1 { pos } else { best }
+        best2 = if (List.get(d.accept_eoi, state.to_u64()) ?? 0) == 1 { pos } else { best }
         if pos <= lo {
             best2
         } else {
@@ -226,6 +414,35 @@ Rev := [].{
                 best2
             } else {
                 Rev.rev(d, classes, hay, cs, lo, nxt - 1, best2)
+            }
+        }
+    }
+
+    # word-boundary reverse scan. A start recorded at `pos` is gated by the
+    # codepoint to its left (the one about to be consumed going backward), via
+    # `accept_on`; at the true haystack start (pos 0) that left side is non-word,
+    # so `accept_eoi` applies.
+    rev_wb : Rev.D, Trie.T, List(U8), U64, U64, U32, U64 -> U64
+    rev_wb = |d, classes, hay, pos, lo, state, best| {
+        accepted =
+            if pos == 0 {
+                (List.get(d.accept_eoi, state.to_u64()) ?? 0) == 1
+            } else {
+                lc = Trie.class_of(classes, Comp.decode(hay, Rev.cp_start(hay, pos - 1)).cp)
+                (List.get(d.accept_on, state.to_u64() * d.nc.to_u64() + lc.to_u64()) ?? 0) == 1
+            }
+        best2 = if accepted { pos } else { best }
+        if pos <= lo {
+            best2
+        } else {
+            cs = Rev.cp_start(hay, pos - 1)
+            dec = Comp.decode(hay, cs)
+            cls = Trie.class_of(classes, dec.cp)
+            nxt = List.get(d.table, state.to_u64() * d.nc.to_u64() + cls.to_u64()) ?? 0
+            if nxt == 0 {
+                best2
+            } else {
+                Rev.rev_wb(d, classes, hay, cs, lo, nxt - 1, best2)
             }
         }
     }

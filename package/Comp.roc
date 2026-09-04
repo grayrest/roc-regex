@@ -49,6 +49,12 @@ Comp := [
         usplits : List(U32),
         fbytes : List(U8),
         tlits : List(List(U8)),
+        # Set ordinal of the folded `\w` class when the pattern has a word
+        # boundary (`\b`/`\B`), else 0. Present so the DFA determinizer can ask
+        # "is this class a word class?" via `accepts_atom`; the fold also refines
+        # the S1 partition to be word-uniform. Only meaningful when a `\b`/`\B`
+        # op is in the prog (see `Comp.has_wb`).
+        word_set : U64,
     }
 
     # --- instruction encoding -------------------------------------------------
@@ -77,6 +83,19 @@ Comp := [
 
     inst : U32, U32 -> U32
     inst = |op, operand| op.shl_wrap(28).bitwise_or(operand)
+
+    # Does the prog assert a word boundary (`\b` or `\B`)?
+    has_wb : List(U32), U64 -> Bool
+    has_wb = |prog, i|
+        match List.get(prog, i) {
+            Err(_) => False
+            Ok(w) =>
+                if Comp.inst_op(w) == Comp.op_look and (Comp.inst_arg(w) == Comp.look_wordb or Comp.inst_arg(w) == Comp.look_nwordb) {
+                    True
+                } else {
+                    Comp.has_wb(prog, i + 1)
+                }
+        }
 
     inst_op : U32 -> U32
     inst_op = |w| w.shr_zf_wrap(28)
@@ -126,7 +145,18 @@ Comp := [
                         uast = Cat([dotstar, numbered.ast])
                         u1 = Comp.emit({ ..r1, prog: [], splits: [] }, uast, 0)
                         uprog = List.append(u1.prog, Comp.inst(Comp.op_match, 0))
-                        Ok({ prog, splits: p2.splits, classes: Trie.build(u1.sets), n_groups, prefix, rprog, rsplits: r1.splits, uprog, usplits: u1.splits, fbytes, tlits })
+                        # If the pattern asserts a word boundary, fold the `\w`
+                        # set into the class table: its ranges refine the S1
+                        # partition to be word-uniform, and its ordinal lets the
+                        # DFA read per-class word-ness. No effect on the PikeVM.
+                        wb =
+                            if Comp.has_wb(prog, 0) {
+                                r = Comp.push_set(u1, False, Comp.ranges_w)
+                                { sets: r.p.sets, word_set: r.idx.to_u64() }
+                            } else {
+                                { sets: u1.sets, word_set: 0 }
+                            }
+                        Ok({ prog, splits: p2.splits, classes: Trie.build(wb.sets), n_groups, prefix, rprog, rsplits: r1.splits, uprog, usplits: u1.splits, fbytes, tlits, word_set: wb.word_set })
                     }
                 Err(e) => Err(e)
             }

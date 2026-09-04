@@ -6,6 +6,25 @@ Harness: `tools/bench/` (`gen` + `bench` bins, `run.sh` driver) and
 
 ---
 
+## 2026-09-04: `\b` / `\B` moved into the DFA
+
+Word boundaries are now baked into the determinizer (over the codepoint
+alphabet: a left-context word bit in the state + per-position `accept_on` /
+`accept_eoi`, since a boundary adjacent to `Match` resolves against the
+following symbol). `\b`/`\B` patterns leave the PikeVM for the DFA; `^`/`$` still
+force the PikeVM. `word_bound` (`\bthe\b`) at 256 KiB:
+
+```
+              old_roc_ns   new_roc_ns  speedup   vsPV  vsMeta
+word_bound      32806800       989200     33x    0.2x     5x
+```
+
+From ~6× vs Rust's PikeVM to **faster than it** (0.2×) and within 5× of Rust's
+meta engine. Differential extended with non-ASCII haystacks (`café`, `αβγ`,
+`Москва`, `日本語`, …) to cover Unicode word-ness on the DFA: 1161/1161 agree.
+
+---
+
 ## 2026-09-04: `find_all` now runs on the DFA (supersedes the PikeVM numbers below)
 
 `Regex.find_all` used to call the PikeVM (`Pike.wfind_from`) unconditionally,
