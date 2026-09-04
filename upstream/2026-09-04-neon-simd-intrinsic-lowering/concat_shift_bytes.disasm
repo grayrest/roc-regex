@@ -1,0 +1,28 @@
+100036cd0: 4e183c88    	mov.d	x8, v4[1]
+100036cd4: f1000b3f    	cmp	x25, #0x2
+100036cd8: 54000121    	b.ne	0x100036cfc <_roc_main+0x9cc>
+100036cdc: 9e660089    	fmov	x9, d4
+100036ce0: 93c9e108    	extr	x8, x8, x9, #0x38
+100036ce4: 52801fea    	mov	w10, #0xff              ; =255
+100036ce8: aa092149    	orr	x9, x10, x9, lsl #8
+100036cec: 9e670121    	fmov	d1, x9
+100036cf0: 4e181d01    	mov.d	v1[1], x8
+100036cf4: 4e211c65    	and.16b	v5, v3, v1
+100036cf8: 14000012    	b	0x100036d40 <_roc_main+0xa10>
+100036cfc: 4e010301    	tbl.16b	v1, { v24 }, v1
+100036d00: 4e020262    	tbl.16b	v2, { v19 }, v2
+100036d04: 9e660089    	fmov	x9, d4
+100036d08: 93c9c108    	extr	x8, x8, x9, #0x30
+100036d0c: 529fffea    	mov	w10, #0xffff            ; =65535
+100036d10: aa094149    	orr	x9, x10, x9, lsl #16
+100036d14: 4e183c6a    	mov.d	x10, v3[1]
+100036d18: 9e66006b    	fmov	x11, d3
+100036d1c: 93cbe14a    	extr	x10, x10, x11, #0x38
+100036d20: 52801fec    	mov	w12, #0xff              ; =255
+100036d24: aa0b218b    	orr	x11, x12, x11, lsl #8
+100036d28: 8a080148    	and	x8, x10, x8
+100036d2c: 8a090169    	and	x9, x11, x9
+100036d30: 9e670125    	fmov	d5, x9
+100036d34: 4e181d05    	mov.d	v5[1], x8
+100036d38: 4e221c21    	and.16b	v1, v1, v2
+100036d3c: 4e251c25    	and.16b	v5, v1, v5

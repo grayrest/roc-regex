@@ -1,0 +1,46 @@
+100036d44: 4e2098a6    	cmeq.16b	v6, v5, #0
+100036d48: 4e258ca5    	cmtst.16b	v5, v5, v5
+100036d4c: 0e013ca8    	umov.b	w8, v5[0]
+100036d50: 12190108    	and	w8, w8, #0x80
+100036d54: 0e033caa    	umov.b	w10, v5[1]
+100036d58: 121f014a    	and	w10, w10, #0x2
+100036d5c: 5e0504a2    	mov	b2, v5[2]
+100036d60: 6e091ca2    	mov.b	v2[4], v5[3]
+100036d64: fd43a8c1    	ldr	d1, [x6, #0x750]
+100036d68: 0e211c47    	and.8b	v7, v2, v1
+100036d6c: 5e0904b0    	mov	b16, v5[4]
+100036d70: 6e092cb0    	mov.b	v16[4], v5[5]
+100036d74: fd43af82    	ldr	d2, [x28, #0x758]
+100036d78: 0e221e10    	and.8b	v16, v16, v2
+100036d7c: 0e0d3cab    	umov.b	w11, v5[6]
+100036d80: 121a016b    	and	w11, w11, #0x40
+100036d84: 0e0f3cac    	umov.b	w12, v5[7]
+100036d88: 0e153cad    	umov.b	w13, v5[10]
+100036d8c: 0e173cae    	umov.b	w14, v5[11]
+100036d90: 4e1304b1    	dup.16b	v17, v5[9]
+100036d94: 4ee61e26    	orn.16b	v6, v17, v6
+100036d98: 0e113ccf    	umov.b	w15, v6[8]
+100036d9c: 6e0540a5    	ext.16b	v5, v5, v5, #0x8
+100036da0: 0e0078a5    	zip2.8b	v5, v5, v0
+100036da4: 9e6600b0    	fmov	x16, d5
+100036da8: d360fe11    	lsr	x17, x16, #32
+100036dac: 2a110210    	orr	w16, w16, w17
+100036db0: 2a504210    	orr	w16, w16, w16, lsr #16
+100036db4: 2a0d020d    	orr	w13, w16, w13
+100036db8: 2a0f01ce    	orr	w14, w14, w15
+100036dbc: 2a0e01ad    	orr	w13, w13, w14
+100036dc0: 121901ad    	and	w13, w13, #0x80
+100036dc4: 2a0c014a    	orr	w10, w10, w12
+100036dc8: 2a481d48    	orr	w8, w10, w8, lsr #7
+100036dcc: 0e0c3cea    	mov.s	w10, v7[1]
+100036dd0: 1e2600ec    	fmov	w12, s7
+100036dd4: 2a0c0108    	orr	w8, w8, w12
+100036dd8: 0e0c3e0c    	mov.s	w12, v16[1]
+100036ddc: 1e26020e    	fmov	w14, s16
+100036de0: 2a0e0108    	orr	w8, w8, w14
+100036de4: 2a0a0108    	orr	w8, w8, w10
+100036de8: 2a0b018a    	orr	w10, w12, w11
+100036dec: 2a0a0108    	orr	w8, w8, w10
+100036df0: 2a4d1d08    	orr	w8, w8, w13, lsr #7
+100036df4: 72001d1f    	tst	w8, #0xff
+100036df8: 1a9f07fa    	cset	w26, ne

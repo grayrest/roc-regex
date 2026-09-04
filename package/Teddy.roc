@@ -73,23 +73,28 @@ Teddy := [].{
             hlo = chunk.bitwise_and(lomask)
             hhi = chunk.shr_zf_wrap(4).bitwise_and(lomask)
             res0 = t.lo0.table_lookup(hlo).bitwise_and(t.hi0.table_lookup(hhi))
+            # compute res1 once and reuse it for both `cand` and the next window's
+            # carry (`prev1`); recomputing it in the recursive call doubled the
+            # per-window pshufb work.
+            res1 = if t.m >= 2 { t.lo1.table_lookup(hlo).bitwise_and(t.hi1.table_lookup(hhi)) } else { U8x16.splat(0) }
             cand =
                 if t.m == 1 {
                     res0
                 } else if t.m == 2 {
-                    res1 = t.lo1.table_lookup(hlo).bitwise_and(t.hi1.table_lookup(hhi))
                     # res0 shifted left 1 (lane0 <- prev0[15]) AND res1
                     prev0.concat_shift_bytes(res0, 15).bitwise_and(res1)
                 } else {
-                    res1 = t.lo1.table_lookup(hlo).bitwise_and(t.hi1.table_lookup(hhi))
                     res2 = t.lo2.table_lookup(hlo).bitwise_and(t.hi2.table_lookup(hhi))
                     a0 = prev0.concat_shift_bytes(res0, 14)
                     a1 = prev1.concat_shift_bytes(res1, 15)
                     a0.bitwise_and(a1).bitwise_and(res2)
                 }
             bm = cand.eq_lanes(U8x16.splat(0)).bitwise_not().to_bitmask()
-            acc2 = Teddy.bits(bm, w, t.m - 1, 0, acc)
-            Teddy.scan(t, hay, len, w + 16, res0, if t.m >= 2 { t.lo1.table_lookup(hlo).bitwise_and(t.hi1.table_lookup(hhi)) } else { U8x16.splat(0) }, acc2)
+            # the whole point of the SIMD scan: when no lane is a candidate (the
+            # common case on real haystacks) skip the 16-way scalar bit-extraction
+            # entirely, so an empty window costs one vector step, not 16 iterations.
+            acc2 = if bm == 0 { acc } else { Teddy.bits(bm, w, t.m - 1, 0, acc) }
+            Teddy.scan(t, hay, len, w + 16, res0, res1, acc2)
         }
 
     # for each set bit `j` in `bm`, append candidate start (w + j - back), clamped
