@@ -622,7 +622,7 @@ Comp := [
     # from a property; sorted+merged first).
     complement : List(Comp.Rng) -> List(Comp.Rng)
     complement = |ranges| {
-        sorted = List.sort_with(ranges, |a, b| if a.lo < b.lo { LT } else if a.lo > b.lo { GT } else { EQ })
+        sorted = List.sort_with(ranges, |a, b| U32.order_relative_to(a.lo, b.lo))
         r = List.fold(sorted, { out: [], next: 0 }, |st, rg|
             if rg.lo > st.next {
                 { out: List.append(st.out, { lo: st.next, hi: rg.lo - 1 }), next: rg.hi + 1 }

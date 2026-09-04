@@ -132,7 +132,7 @@ Teddy := [].{
 
     dedup_sorted : List(U64) -> List(U64)
     dedup_sorted = |xs| {
-        sorted = List.sort_with(xs, |a, b| if a < b { LT } else if a > b { GT } else { EQ })
+        sorted = List.sort_with(xs, |a, b| U64.order_relative_to(a, b))
         List.fold(sorted, [], |acc, x| if (List.last(acc) ?? 0) == x and !List.is_empty(acc) { acc } else { List.append(acc, x) })
     }
 }

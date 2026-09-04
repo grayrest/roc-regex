@@ -36,7 +36,7 @@ Trie := [].{
     cut_points : List(U32) -> List(U32)
     cut_points = |sets| {
         raw = Trie.collect_cuts(sets, 0, [0, 0x11_0000])
-        Trie.dedup_sorted(List.sort_with(raw, |a, b| if a < b { LT } else if a > b { GT } else { EQ }))
+        Trie.dedup_sorted(List.sort_with(raw, |a, b| U32.order_relative_to(a, b)))
     }
 
     collect_cuts : List(U32), U64, List(U32) -> List(U32)
