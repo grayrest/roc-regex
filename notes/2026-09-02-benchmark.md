@@ -53,7 +53,24 @@ direct single-byte SIMD scan (`Teddy.byte_candidates_capped`: one `eq_lanes` per
 `literal_sparse` → ~23–30K ns, **~3× vs Rust's meta**. We're now within ~2–3× of
 `memmem`; the rest is inner-loop/rare-byte-selection territory (memmem scans the
 *rarest* literal byte, not the first — same byte here since `M` is rare) —
-deep diminishing returns. This is the fix for the `literal`-vs-meta gap
+deep diminishing returns.
+
+**4× unrolled scan (2026-09-04):** the byte scan processes 64 bytes/iteration and
+skips a no-match block with a single OR-reduced `to_bitmask` (one movemask per 64
+bytes, not per 16). `literal_sparse` → **~15K ns, ~1× vs Rust's meta** — parity
+with `memmem`. That's the end of the chase: sparse literal `find_all` now matches
+Rust's fully-optimized engine; `literal_dense` still bails to the DFA (~15× vs
+meta, the DFA-per-byte cost, compiler-bound).
+
+### Chase summary (`literal_sparse`, same 256 KiB haystack)
+
+| step | ns | vs meta |
+|---|---|---|
+| PikeVM `wmatch_at` verify | ~140K | 14× |
+| anchored-DFA verify | ~47K | 5× |
+| first-byte (m=1) scan | ~30K | 4× |
+| memchr single-byte scan | ~23K | 3× |
+| 4× unrolled scan | **~15K** | **~1×** | This is the fix for the `literal`-vs-meta gap
 identified earlier: it was never `wmatch_at` (2.5 µs) nor the DFA per-byte cost —
 single literals carry `prefix`, not `tlits`, so no prefilter engaged at all.
 1512/1512 differential (verified with the gate forced always-on too).

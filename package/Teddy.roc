@@ -91,18 +91,42 @@ Teddy := [].{
     byte_candidates_capped = |b, hay, cap|
         Teddy.byte_scan(b, hay, List.len(hay), 0, [], cap)
 
+    # Unrolled 4×: the common (no-match) 64-byte block is skipped with a single
+    # OR-reduced `to_bitmask`, so the hot path is one movemask per 64 bytes rather
+    # than per 16. Only when a lane hits do we extract each window's offsets.
     byte_scan : U8, List(U8), U64, U64, List(U64), U64 -> Try(List(U64), [TooMany])
     byte_scan = |b, hay, len, w, acc, cap|
         if List.len(acc) > cap {
             Err(TooMany)
-        } else if w + 16 > len {
-            Ok(Teddy.byte_tail(b, hay, w, len, acc))
+        } else if w + 64 <= len {
+            bv = U8x16.splat(b)
+            m0 = (U8x16.load(hay, w) ?? bv).eq_lanes(bv)
+            m1 = (U8x16.load(hay, w + 16) ?? bv).eq_lanes(bv)
+            m2 = (U8x16.load(hay, w + 32) ?? bv).eq_lanes(bv)
+            m3 = (U8x16.load(hay, w + 48) ?? bv).eq_lanes(bv)
+            any = m0.bitwise_or(m1).bitwise_or(m2).bitwise_or(m3).to_bitmask()
+            if any == 0 {
+                Teddy.byte_scan(b, hay, len, w + 64, acc, cap)
+            } else {
+                a0 = Teddy.bits_of(m0, w, acc)
+                a1 = Teddy.bits_of(m1, w + 16, a0)
+                a2 = Teddy.bits_of(m2, w + 32, a1)
+                a3 = Teddy.bits_of(m3, w + 48, a2)
+                Teddy.byte_scan(b, hay, len, w + 64, a3, cap)
+            }
+        } else if w + 16 <= len {
+            a = Teddy.bits_of((U8x16.load(hay, w) ?? U8x16.splat(b)).eq_lanes(U8x16.splat(b)), w, acc)
+            Teddy.byte_scan(b, hay, len, w + 16, a, cap)
         } else {
-            chunk = U8x16.load(hay, w) ?? U8x16.splat(0)
-            bm = chunk.eq_lanes(U8x16.splat(b)).to_bitmask()
-            acc2 = if bm == 0 { acc } else { Teddy.bits(bm, w, 0, 0, acc) }
-            Teddy.byte_scan(b, hay, len, w + 16, acc2, cap)
+            Ok(Teddy.byte_tail(b, hay, w, len, acc))
         }
+
+    # append offsets of set lanes in a per-lane 0x00/0xFF mask at window `w`
+    bits_of : U8x16, U64, List(U64) -> List(U64)
+    bits_of = |m, w, acc| {
+        bm = m.to_bitmask()
+        if bm == 0 { acc } else { Teddy.bits(bm, w, 0, 0, acc) }
+    }
 
     # scalar scan of the final < 16 bytes
     byte_tail : U8, List(U8), U64, U64, List(U64) -> List(U64)
