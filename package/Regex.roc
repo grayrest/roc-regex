@@ -19,7 +19,7 @@ Regex := [].{
     ## The `engine` field records M3's outcome (D10): `Three` carries the D5
     ## forward+reverse DFAs for a look-free pattern within budget, else `Pike`.
     ## Documented-unstable.
-    T : { prog : List(U32), splits : List(U32), classes : Trie.T, n_groups : U32, prefix : List(U8), rprog : List(U32), rsplits : List(U32), uprog : List(U32), usplits : List(U32), fbytes : List(U8), tlits : List(List(U8)), word_set : U64, engine : [Pike, Three({ fwd : Rev.D, rev : Rev.D })] }
+    T : { prog : List(U32), splits : List(U32), classes : Trie.T, n_groups : U32, prefix : List(U8), rprog : List(U32), rsplits : List(U32), uprog : List(U32), usplits : List(U32), fbytes : List(U8), tlits : List(List(U8)), word_set : U64, engine : [Pike, Three({ fwd : Rev.D, rev : Rev.D, averify : [NoVerify, Verify(Rev.D)] })] }
 
     ## A match, as half-open BYTE offsets into the haystack (D3, D15).
     Span : { start : U64, end : U64 }
@@ -246,7 +246,19 @@ Regex := [].{
             match Teddy.build([re.prefix]) {
                 Ok(t) =>
                     match Teddy.candidates_capped(t, hay, List.len(hay) // Regex.prefilter_k) {
-                        Ok(cands) => Regex.find_all_teddy(Regex.base(re), hay, cands)
+                        Ok(cands) => {
+                            # verify each candidate with the anchored DFA when the
+                            # engine has one (plain prefix patterns); otherwise the
+                            # PikeVM (anchor patterns / Pike engine).
+                            verify = match re.engine {
+                                Three(d) => d.averify
+                                Pike => NoVerify
+                            }
+                            match verify {
+                                Verify(av) => Regex.find_all_teddy_dfa(av, re.classes, hay, cands)
+                                NoVerify => Regex.find_all_teddy(Regex.base(re), hay, cands)
+                            }
+                        }
                         Err(_) => Regex.find_all_engine(re, hay)
                     }
                 Err(_) => Regex.find_all_engine(re, hay)
@@ -255,8 +267,43 @@ Regex := [].{
             Regex.find_all_engine(re, hay)
         }
 
-    # verify literal-prefix candidates left to right; a literal-prefixed pattern
-    # never matches empty, so a candidate inside the previous match is skipped.
+    # verify literal-prefix candidates with the anchored DFA: run it from each
+    # candidate — matches iff the pattern matches there, a tight table loop with
+    # no per-candidate allocation. A literal-prefixed pattern never matches empty,
+    # so a candidate inside the previous match is skipped.
+    find_all_teddy_dfa : Rev.D, Trie.T, List(U8), List(U64) -> List(Regex.Span)
+    find_all_teddy_dfa = |av, classes, hay, cands| {
+        ncand = List.len(cands)
+        var i = 0
+        var last_end = 0
+        var acc = []
+        var running = True
+        while running {
+            if i >= ncand {
+                running = False
+            } else {
+                at = List.get(cands, i) ?? 0
+                if at < last_end {
+                    i = i + 1
+                } else {
+                    match Rev.run_fwd_from(av, classes, hay, at) {
+                        Ok(end) => {
+                            acc = List.append(acc, { start: at, end })
+                            last_end = end
+                            i = i + 1
+                        }
+                        Err(_) => {
+                            i = i + 1
+                        }
+                    }
+                }
+            }
+        }
+        acc
+    }
+
+    # verify literal-prefix candidates with the PikeVM (anchor patterns / Pike
+    # engine, where no anchored verify DFA was built).
     find_all_teddy : Comp.Compiled, List(U8), List(U64) -> List(Regex.Span)
     find_all_teddy = |c, hay, cands| {
         ncand = List.len(cands)

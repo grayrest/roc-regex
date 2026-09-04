@@ -19,13 +19,24 @@ can't regress.
 Two suite rows on the **same** 256 KiB haystack isolate the effect by literal
 rarity (`gen` injects a deliberately rare `Moriarty`):
 
-| row | literal | matches | roc_ns |
-|---|---|---|---|
-| `literal_dense` | `Holmes` | ~1200 | ~1.0–2.0M (bails → DFA) |
-| `literal_sparse` | `Moriarty` | ~45 | **~146K (~10–14× faster)** |
+| row | literal | matches | roc_ns | vsMeta |
+|---|---|---|---|---|
+| `literal_dense` | `Holmes` | ~1200 | ~1.0–2.1M (bails → DFA) | ~30–58× |
+| `literal_sparse` | `Moriarty` | ~45 | **~47K** | **~5×** |
 
 Big win where the literal is rare (the real case — a word in a document), no
-regression where it's dense. This is the fix for the `literal`-vs-meta gap
+regression where it's dense.
+
+**DFA-anchored verify (2026-09-04):** candidates are verified by running an
+anchored DFA (`c.prog` — `Save0·body·Save1·Match`, already dot-star-free —
+determinized) from each candidate, a tight table loop with no per-candidate
+allocation, instead of the PikeVM `wmatch_at`. That cut `literal_sparse` verify
+from ~110 µs (59 × ~1.9 µs `wmatch_at`) to ~2 µs, taking the row from ~140K →
+~47K ns and 14× → **5× vs Rust's meta**. The residual gap is now
+`Teddy.candidates()` (scan + list + dedup), not verify. Only plain prefix
+patterns get the DFA verify; `^`/`$`-anchored ones keep the PikeVM verify (their
+anchors live in `c.prog` but the determinizer can't take them). `wmatch_at`
+itself is cheap per call (~2.5 µs) — it was the ×N over many candidates that hurt. This is the fix for the `literal`-vs-meta gap
 identified earlier: it was never `wmatch_at` (2.5 µs) nor the DFA per-byte cost —
 single literals carry `prefix`, not `tlits`, so no prefilter engaged at all.
 1512/1512 differential (verified with the gate forced always-on too).

@@ -29,7 +29,7 @@ Rev := [].{
     ## over budget; either downgrades to the PikeVM (D10). `\b`/`\B` are handled
     ## in the determinizer (word boundaries baked into the transition function
     ## over the codepoint alphabet).
-    build : Comp.Compiled, U64 -> Try({ fwd : Rev.D, rev : Rev.D }, [HasLook, TooBig])
+    build : Comp.Compiled, U64 -> Try({ fwd : Rev.D, rev : Rev.D, averify : [NoVerify, Verify(Rev.D)] }, [HasLook, TooBig])
     build = |c, max_states|
         # `uprog`/`rprog` have outermost `^`/`$` stripped (Comp), so an anchor
         # remaining here is a *buried* one -> bail to the PikeVM.
@@ -39,13 +39,30 @@ Rev := [].{
             nc = c.classes.n_classes
             wb = Comp.has_wb(c.uprog, 0)
             det = |prog, splits| if wb { Rev.determinize_wb(prog, splits, c.classes, nc, c.word_set, max_states) } else { Rev.determinize(prog, splits, c.classes, nc, max_states) }
+            # Anchored verify DFA for the literal-prefix prefilter: `c.prog`
+            # (Save0·body·Save1·Match) is already the anchored forward NFA (no
+            # dot-star), so determinizing it gives a DFA that, run from a candidate
+            # position, matches iff the pattern matches THERE — a tight table loop
+            # verify with no per-candidate allocation (vs the PikeVM `wmatch_at`).
+            # Only for plain prefix patterns: outermost `^`/`$` need the anchors
+            # `c.prog` keeps but the determinizer can't take, so those keep the
+            # PikeVM verify.
+            averify =
+                if !List.is_empty(c.prefix) and !c.anchored_start and !c.accept_eoi_only {
+                    match det(c.prog, c.splits) {
+                        Ok(av) => Verify(av)
+                        Err(_) => NoVerify
+                    }
+                } else {
+                    NoVerify
+                }
             match det(c.uprog, c.usplits) {
                 Err(_) => Err(TooBig)
                 Ok(fwd0) =>
                     # the outermost-anchor constraints ride on the forward D only
                     match det(c.rprog, c.rsplits) {
                         Err(_) => Err(TooBig)
-                        Ok(rev) => Ok({ fwd: { ..fwd0, eoi_only: c.accept_eoi_only, anchored: c.anchored_start }, rev })
+                        Ok(rev) => Ok({ fwd: { ..fwd0, eoi_only: c.accept_eoi_only, anchored: c.anchored_start }, rev, averify })
                     }
             }
         }
@@ -64,7 +81,7 @@ Rev := [].{
         }
 
     ## Run prebuilt DFAs: leftmost-first span, or NoMatch.
-    find : { fwd : Rev.D, rev : Rev.D }, Trie.T, List(U8) -> Try({ start : U64, end : U64 }, [NoMatch])
+    find : { fwd : Rev.D, rev : Rev.D, averify : [NoVerify, Verify(Rev.D)] }, Trie.T, List(U8) -> Try({ start : U64, end : U64 }, [NoMatch])
     find = |d, classes, hay| Rev.find_from(d, classes, hay, 0)
 
     ## Leftmost-first span at-or-after `at` — the iterator step for `find_all`.
@@ -75,7 +92,7 @@ Rev := [].{
     ## is `len` by definition, so we only run the reverse from `len` to find the
     ## leftmost start (>= `at`), reporting NoMatch when no match ends at `len`.
     ## An outermost `^` (`anchored`) additionally requires that start to be 0.
-    find_from : { fwd : Rev.D, rev : Rev.D }, Trie.T, List(U8), U64 -> Try({ start : U64, end : U64 }, [NoMatch])
+    find_from : { fwd : Rev.D, rev : Rev.D, averify : [NoVerify, Verify(Rev.D)] }, Trie.T, List(U8), U64 -> Try({ start : U64, end : U64 }, [NoMatch])
     find_from = |d, classes, hay, at|
         if d.fwd.eoi_only {
             len = List.len(hay)
