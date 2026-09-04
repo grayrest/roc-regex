@@ -6,7 +6,6 @@ edition = "2021"
 [dependencies]
 regex = "1.13"
 regex-automata = "0.4"
-aho-corasick = "1.1"
 
 [[bin]]
 name = "gen"
@@ -15,10 +14,6 @@ path = "src/gen.rs"
 [[bin]]
 name = "bench"
 path = "src/bench.rs"
-
-[[bin]]
-name = "teddy"
-path = "src/teddy.rs"
 
 [profile.release]
 opt-level = 3
