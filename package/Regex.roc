@@ -243,30 +243,25 @@ Regex := [].{
         # when the literal is dense (candidates > len/prefilter_k), where scanning
         # every byte with the DFA is cheaper than verifying at every candidate.
         if !List.is_empty(re.prefix) {
-            # Scan for just the prefix's FIRST byte (Teddy m=1): a leaner
-            # per-window scan than the 3-byte fingerprint, and with the cheap
-            # anchored-DFA verify the extra candidates it may admit cost little.
-            # A common first byte simply produces more candidates and trips the
-            # selectivity cap (→ DFA), so this never regresses the dense case.
-            fb1 = List.sublist(re.prefix, { start: 0, len: 1 })
-            match Teddy.build([fb1]) {
-                Ok(t) =>
-                    match Teddy.candidates_capped(t, hay, List.len(hay) // Regex.prefilter_k) {
-                        Ok(cands) => {
-                            # verify each candidate with the anchored DFA when the
-                            # engine has one (plain prefix patterns); otherwise the
-                            # PikeVM (anchor patterns / Pike engine).
-                            verify = match re.engine {
-                                Three(d) => d.averify
-                                Pike => NoVerify
-                            }
-                            match verify {
-                                Verify(av) => Regex.find_all_teddy_dfa(av, re.classes, hay, cands)
-                                NoVerify => Regex.find_all_teddy(Regex.base(re), hay, cands)
-                            }
-                        }
-                        Err(_) => Regex.find_all_engine(re, hay)
+            # memchr-style scan for the prefix's FIRST byte, then verify each
+            # candidate. Leaner than a Teddy fingerprint (one eq per window, no
+            # dedup); the anchored-DFA verify filters false positives cheaply, and
+            # a common first byte trips the selectivity cap (→ DFA), so the dense
+            # case can't regress.
+            fb = List.get(re.prefix, 0) ?? 0
+            match Teddy.byte_candidates_capped(fb, hay, List.len(hay) // Regex.prefilter_k) {
+                Ok(cands) => {
+                    # verify with the anchored DFA when the engine has one (plain
+                    # prefix patterns); otherwise the PikeVM (anchor / Pike engine).
+                    verify = match re.engine {
+                        Three(d) => d.averify
+                        Pike => NoVerify
                     }
+                    match verify {
+                        Verify(av) => Regex.find_all_teddy_dfa(av, re.classes, hay, cands)
+                        NoVerify => Regex.find_all_teddy(Regex.base(re), hay, cands)
+                    }
+                }
                 Err(_) => Regex.find_all_engine(re, hay)
             }
         } else {

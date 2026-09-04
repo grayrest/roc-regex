@@ -83,6 +83,36 @@ Teddy := [].{
         }
     }
 
+    ## memchr-style single-byte candidate scan (offsets of byte `b`), capped like
+    ## `candidates_capped`. Leaner than a Teddy fingerprint — one `eq_lanes` per
+    ## 16-byte window, no nibble tables, no overlap so no dedup — and enough for
+    ## the literal-prefix prefilter, whose anchored-DFA verify filters the rest.
+    byte_candidates_capped : U8, List(U8), U64 -> Try(List(U64), [TooMany])
+    byte_candidates_capped = |b, hay, cap|
+        Teddy.byte_scan(b, hay, List.len(hay), 0, [], cap)
+
+    byte_scan : U8, List(U8), U64, U64, List(U64), U64 -> Try(List(U64), [TooMany])
+    byte_scan = |b, hay, len, w, acc, cap|
+        if List.len(acc) > cap {
+            Err(TooMany)
+        } else if w + 16 > len {
+            Ok(Teddy.byte_tail(b, hay, w, len, acc))
+        } else {
+            chunk = U8x16.load(hay, w) ?? U8x16.splat(0)
+            bm = chunk.eq_lanes(U8x16.splat(b)).to_bitmask()
+            acc2 = if bm == 0 { acc } else { Teddy.bits(bm, w, 0, 0, acc) }
+            Teddy.byte_scan(b, hay, len, w + 16, acc2, cap)
+        }
+
+    # scalar scan of the final < 16 bytes
+    byte_tail : U8, List(U8), U64, U64, List(U64) -> List(U64)
+    byte_tail = |b, hay, at, len, acc|
+        if at >= len {
+            acc
+        } else {
+            Teddy.byte_tail(b, hay, at + 1, len, if (List.get(hay, at) ?? 0) == b { List.append(acc, at) } else { acc })
+        }
+
     scan_capped : Teddy.T, List(U8), U64, U64, U8x16, U8x16, List(U64), U64 -> Try(List(U64), [TooMany])
     scan_capped = |t, hay, len, w, prev0, prev1, acc, cap|
         if List.len(acc) > cap {

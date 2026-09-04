@@ -45,7 +45,15 @@ set when the first byte is rare. The extra candidates a common first byte would
 admit just trip the selectivity cap (→ DFA), so it never regresses the dense
 case. `literal_sparse` → ~30–40K ns, **~4× vs Rust's meta** (`memmem`). The
 residual is the scan itself (~8.5 GB/s vs `memmem`'s rare-byte scan) plus
-`candidates()` list/dedup. This is the fix for the `literal`-vs-meta gap
+`candidates()` list/dedup.
+
+**memchr-style byte scan (2026-09-04):** replaced the m=1 Teddy scan with a
+direct single-byte SIMD scan (`Teddy.byte_candidates_capped`: one `eq_lanes` per
+16-byte window, no nibble tables, no window overlap → no `dedup_sorted`).
+`literal_sparse` → ~23–30K ns, **~3× vs Rust's meta**. We're now within ~2–3× of
+`memmem`; the rest is inner-loop/rare-byte-selection territory (memmem scans the
+*rarest* literal byte, not the first — same byte here since `M` is rare) —
+deep diminishing returns. This is the fix for the `literal`-vs-meta gap
 identified earlier: it was never `wmatch_at` (2.5 µs) nor the DFA per-byte cost —
 single literals carry `prefix`, not `tlits`, so no prefilter engaged at all.
 1512/1512 differential (verified with the gate forced always-on too).
