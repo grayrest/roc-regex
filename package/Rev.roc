@@ -17,7 +17,12 @@ Rev := [].{
     ## per-transition (`accept_on[state*nc + cls]` = a match ends at the position
     ## *before* `cls`), because a boundary adjacent to Match resolves against the
     ## following symbol. `accept_on` non-empty is the "has word boundaries" flag.
-    D : { table : List(U32), accept_on : List(U8), accept_eoi : List(U8), nc : U32 }
+    ## `eoi_only` (outermost `$`): the forward scan records a match only at
+    ## end-of-input. `anchored` (outermost `^`): the forward `uprog` is anchored
+    ## (no dot-star), so a search may only begin at position 0 — `run_fwd_from`
+    ## refuses a non-zero start. Both are forward-only (the reverse D leaves them
+    ## False).
+    D : { table : List(U32), accept_on : List(U8), accept_eoi : List(U8), nc : U32, eoi_only : Bool, anchored : Bool }
 
     ## Build both DFAs at compile time (folds when the pattern is constant), or
     ## say why not. `HasLook` -> `^`/`$` assertions (still PikeVM); `TooBig` ->
@@ -26,18 +31,21 @@ Rev := [].{
     ## over the codepoint alphabet).
     build : Comp.Compiled, U64 -> Try({ fwd : Rev.D, rev : Rev.D }, [HasLook, TooBig])
     build = |c, max_states|
-        if Rev.has_anchor(c.prog, 0) {
+        # `uprog`/`rprog` have outermost `^`/`$` stripped (Comp), so an anchor
+        # remaining here is a *buried* one -> bail to the PikeVM.
+        if Rev.has_anchor(c.uprog, 0) {
             Err(HasLook)
         } else {
             nc = c.classes.n_classes
-            wb = Comp.has_wb(c.prog, 0)
+            wb = Comp.has_wb(c.uprog, 0)
             det = |prog, splits| if wb { Rev.determinize_wb(prog, splits, c.classes, nc, c.word_set, max_states) } else { Rev.determinize(prog, splits, c.classes, nc, max_states) }
             match det(c.uprog, c.usplits) {
                 Err(_) => Err(TooBig)
-                Ok(fwd) =>
+                Ok(fwd0) =>
+                    # the outermost-anchor constraints ride on the forward D only
                     match det(c.rprog, c.rsplits) {
                         Err(_) => Err(TooBig)
-                        Ok(rev) => Ok({ fwd, rev })
+                        Ok(rev) => Ok({ fwd: { ..fwd0, eoi_only: c.accept_eoi_only, anchored: c.anchored_start }, rev })
                     }
             }
         }
@@ -57,20 +65,33 @@ Rev := [].{
 
     ## Run prebuilt DFAs: leftmost-first span, or NoMatch.
     find : { fwd : Rev.D, rev : Rev.D }, Trie.T, List(U8) -> Try({ start : U64, end : U64 }, [NoMatch])
-    find = |d, classes, hay|
-        match Rev.run_fwd(d.fwd, classes, hay) {
-            Err(_) => Err(NoMatch)
-            Ok(end) => Ok({ start: Rev.run_rev(d.rev, classes, hay, end), end })
-        }
+    find = |d, classes, hay| Rev.find_from(d, classes, hay, 0)
 
     ## Leftmost-first span at-or-after `at` — the iterator step for `find_all`.
     ## The forward scan starts at `at`; the reverse start-scan is floored at `at`
     ## so the returned start is >= at (non-overlapping with the previous match).
+    ##
+    ## An outermost `$` (`eoi_only`) short-circuits the forward end-scan: the end
+    ## is `len` by definition, so we only run the reverse from `len` to find the
+    ## leftmost start (>= `at`), reporting NoMatch when no match ends at `len`.
+    ## An outermost `^` (`anchored`) additionally requires that start to be 0.
     find_from : { fwd : Rev.D, rev : Rev.D }, Trie.T, List(U8), U64 -> Try({ start : U64, end : U64 }, [NoMatch])
     find_from = |d, classes, hay, at|
-        match Rev.run_fwd_from(d.fwd, classes, hay, at) {
-            Err(_) => Err(NoMatch)
-            Ok(end) => Ok({ start: Rev.run_rev_from(d.rev, classes, hay, end, at), end })
+        if d.fwd.eoi_only {
+            len = List.len(hay)
+            if at > len {
+                Err(NoMatch)
+            } else {
+                match Rev.run_rev_check(d.rev, classes, hay, len, at) {
+                    Err(_) => Err(NoMatch)
+                    Ok(start) => if d.fwd.anchored and start != 0 { Err(NoMatch) } else { Ok({ start, end: len }) }
+                }
+            }
+        } else {
+            match Rev.run_fwd_from(d.fwd, classes, hay, at) {
+                Err(_) => Err(NoMatch)
+                Ok(end) => Ok({ start: Rev.run_rev_from(d.rev, classes, hay, end, at), end })
+            }
         }
 
     ## is_match via the forward DFA (any match-state reachable).
@@ -88,7 +109,7 @@ Rev := [].{
         s0 = Rev.close_pri(prog, splits, [0], [])
         match Rev.explore(prog, splits, classes, nc, max_states, [s0], { table: [], hit: [], smap: [s0], next: 1 }) {
             Err(e) => Err(e)
-            Ok(st) => Ok({ table: st.table, accept_on: [], accept_eoi: st.hit, nc })
+            Ok(st) => Ok({ table: st.table, accept_on: [], accept_eoi: st.hit, nc, eoi_only: False, anchored: False })
         }
     }
 
@@ -139,7 +160,7 @@ Rev := [].{
         ciw = List.map(Rev.upto(nc.to_u64()), |a| Trie.accepts_atom(classes, word_set.to_u32_wrap(), a.to_u32_wrap()))
         match Rev.explore_wb(prog, splits, classes, nc, ciw, max_states, [s0f, s0t], { table: [], acc_on: [], acc_eoi: [], smap: [s0f, s0t], next: 2 }) {
             Err(e) => Err(e)
-            Ok(st) => Ok({ table: st.table, accept_on: st.acc_on, accept_eoi: st.acc_eoi, nc })
+            Ok(st) => Ok({ table: st.table, accept_on: st.acc_on, accept_eoi: st.acc_eoi, nc, eoi_only: False, anchored: False })
         }
     }
 
@@ -328,7 +349,11 @@ Rev := [].{
     # scope note). No explicit end bound is needed for that.
     run_fwd_from : Rev.D, Trie.T, List(U8), U64 -> Try(U64, [NoMatch])
     run_fwd_from = |d, classes, hay, at|
-        if Rev.is_wb(d) {
+        # an outermost `^` anchors the forward DFA to position 0: a search that
+        # starts anywhere else (find_all iteration) cannot match.
+        if d.anchored and at != 0 {
+            Err(NoMatch)
+        } else if Rev.is_wb(d) {
             Rev.fwd_wb(d, classes, hay, at, Rev.wstart_fwd(hay, at), Err(NoMatch))
         } else {
             Rev.fwd(d, classes, hay, at, 0, Err(NoMatch))
@@ -382,6 +407,25 @@ Rev := [].{
     # position that is a match state is the leftmost start.
     run_rev : Rev.D, Trie.T, List(U8), U64 -> U64
     run_rev = |d, classes, hay, end| Rev.run_rev_from(d, classes, hay, end, 0)
+
+    # sentinel "no start found" for the existence-reporting reverse
+    no_start : U64
+    no_start = 0xFFFF_FFFF_FFFF_FFFF
+
+    # reverse from `end` (floored at `lo`) reporting whether a match actually ends
+    # at `end`: `Ok(leftmost start)` if an accept state was reached, else NoMatch.
+    # Used by the outermost-`$` path, where the forward end-scan is skipped and
+    # `end == len` is given — so we must confirm a match exists there.
+    run_rev_check : Rev.D, Trie.T, List(U8), U64, U64 -> Try(U64, [NoMatch])
+    run_rev_check = |d, classes, hay, end, lo| {
+        r =
+            if Rev.is_wb(d) {
+                Rev.rev_wb(d, classes, hay, end, lo, Rev.wstart_rev(hay, end), Rev.no_start)
+            } else {
+                Rev.rev(d, classes, hay, end, lo, 0, Rev.no_start)
+            }
+        if r == Rev.no_start { Err(NoMatch) } else { Ok(r) }
+    }
 
     # as `run_rev`, but the backward scan stops at floor `lo` (so the leftmost
     # start it can report is `lo`) — used by `find_from` to keep matches

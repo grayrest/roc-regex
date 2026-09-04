@@ -69,11 +69,14 @@ non-termination bug (`(a*)+`) in the three-pass closure.
 `\b` / `\B` (including Unicode word boundaries) now run **in the DFA** — the
 codepoint alphabet makes word-ness a single-symbol property, so the boundary is
 baked into the transition function (a left-context bit + per-position accept)
-rather than falling back to the PikeVM. `^` / `$` anchors still use the PikeVM
-(`notes/2026-09-04-word-boundary-dfa-scope.md`).
+rather than falling back to the PikeVM
+(`notes/2026-09-04-word-boundary-dfa-scope.md`). Outermost `^` / `$` text
+anchors also run on the DFA (`^` → an anchored forward scan, `$` → reverse from
+`len`); anchors buried inside alternations/groups still use the PikeVM
+(`notes/2026-09-04-anchors-dfa-scope.md`).
 
-Honest gaps: full `\p{}` breadth, `(?i:...)` scoped flags, `^`/`$` in the DFA,
-captures direct from the reverse pass, and the shared-vs-per-pattern trie
+Honest gaps: full `\p{}` breadth, `(?i:...)` scoped flags, buried `^`/`$` in the
+DFA, captures direct from the reverse pass, and the shared-vs-per-pattern trie
 decision (D3 fork). Each is in the milestone notes under `notes/`.
 
 ## Benchmark

@@ -55,6 +55,15 @@ Comp := [
         # the S1 partition to be word-uniform. Only meaningful when a `\b`/`\B`
         # op is in the prog (see `Comp.has_wb`).
         word_set : U64,
+        # Outermost text anchors, stripped from the DFA progs (`uprog`/`rprog`)
+        # and re-imposed as scan constraints (approach B): `anchored_start` (`^`)
+        # builds an anchored forward `uprog` (no dot-star) so a match can only
+        # begin at 0; `accept_eoi_only` (`$`) makes the forward accept only at
+        # end-of-input. `prog` keeps the anchors for the PikeVM/captures. Both
+        # False when there are no anchors, or when a `^`/`$` is buried (then the
+        # anchors stay in `uprog` and the DFA build bails to the PikeVM).
+        anchored_start : Bool,
+        accept_eoi_only : Bool,
     }
 
     # --- instruction encoding -------------------------------------------------
@@ -97,6 +106,54 @@ Comp := [
                 }
         }
 
+    # Does the AST contain a text anchor (`^`/`$`) anywhere?
+    ast_has_anchor : Comp -> Bool
+    ast_has_anchor = |ast|
+        match ast {
+            Look(k) => k == Comp.look_start or k == Comp.look_end
+            Cat(xs) => List.any(xs, Comp.ast_has_anchor)
+            Alt(xs) => List.any(xs, Comp.ast_has_anchor)
+            Star(x, _) => Comp.ast_has_anchor(x)
+            Plus(x, _) => Comp.ast_has_anchor(x)
+            Quest(x, _) => Comp.ast_has_anchor(x)
+            Group(x, _) => Comp.ast_has_anchor(x)
+            _ => False
+        }
+
+    is_look_kind : Comp, U32 -> Bool
+    is_look_kind = |ast, k|
+        match ast {
+            Look(j) => j == k
+            _ => False
+        }
+
+    ## Peel outermost text anchors off a top-level `Cat` (a `^` at the head, a `$`
+    ## at the tail). `clean` is False if any `^`/`$` remains buried in `core` — the
+    ## caller then keeps the anchors in the DFA prog so the build bails to the
+    ## PikeVM (approach B handles only outermost anchors).
+    AnchorSplit : { core : Comp, start : Bool, end : Bool, clean : Bool }
+    split_anchors : Comp -> Comp.AnchorSplit
+    split_anchors = |ast|
+        match ast {
+            Look(k) if k == Comp.look_start => { core: Empty, start: True, end: False, clean: True }
+            Look(k) if k == Comp.look_end => { core: Empty, start: False, end: True, clean: True }
+            Cat(xs) => {
+                has_start = match List.first(xs) {
+                    Ok(a) => Comp.is_look_kind(a, Comp.look_start)
+                    Err(_) => False
+                }
+                xs1 = if has_start { List.drop_first(xs, 1) } else { xs }
+                has_end = match List.last(xs1) {
+                    Ok(a) => Comp.is_look_kind(a, Comp.look_end)
+                    Err(_) => False
+                }
+                xs2 = if has_end { List.sublist(xs1, { start: 0, len: List.len(xs1) - 1 }) } else { xs1 }
+                core = if List.len(xs2) == 1 { List.get(xs2, 0) ?? Empty } else { Cat(xs2) }
+                { core, start: has_start, end: has_end, clean: !(Comp.ast_has_anchor(core)) }
+            }
+            _ => { core: ast, start: False, end: False, clean: !(Comp.ast_has_anchor(ast)) }
+        }
+
     inst_op : U32 -> U32
     inst_op = |w| w.shr_zf_wrap(28)
 
@@ -133,16 +190,28 @@ Comp := [
                         p1 = Comp.emit(prog0, numbered.ast, 1)
                         p2 = Comp.push_inst(p1, Comp.inst(Comp.op_save, 1))
                         prog = List.append(p2.prog, Comp.inst(Comp.op_match, 0))
-                        # reverse NFA: compile the reversed AST into the SAME sets
+                        # DFA progs (uprog/rprog) are built from the CORE with the
+                        # outermost text anchors peeled off (approach B): `^` makes
+                        # the forward anchored (no dot-star), `$` becomes an
+                        # accept-only-at-EOI flag. A buried `^`/`$` leaves `clean`
+                        # False, so the core keeps the anchors and the DFA build
+                        # bails to the PikeVM. `prog` above always keeps the
+                        # anchors (captures run on the PikeVM).
+                        anc = Comp.split_anchors(numbered.ast)
+                        core = if anc.clean { anc.core } else { numbered.ast }
+                        a_start = anc.clean and anc.start
+                        a_eoi = anc.clean and anc.end
+                        # reverse NFA of the core: reversed into the SAME sets
                         # table (so classes/trie are shared). No Save ops needed.
-                        rev = Comp.reverse_ast(numbered.ast)
+                        rev = Comp.reverse_ast(core)
                         r1 = Comp.emit({ ..p2, prog: [], splits: [] }, rev, 0)
                         rprog = List.append(r1.prog, Comp.inst(Comp.op_match, 0))
-                        # unanchored forward NFA for the DFA end-scan: a lazy dot-star
-                        # (persistent lowest-priority thread, truncated on match) then
-                        # the pattern (D5).
+                        # forward NFA for the DFA end-scan. `^` -> anchored (the
+                        # core alone, matches only from the scan start). otherwise
+                        # a lazy dot-star prefix (persistent lowest-priority thread,
+                        # truncated on match) then the core (D5).
                         dotstar = Star(Chars({ neg: False, ranges: [{ lo: 0, hi: 0x10_FFFF }] }), False)
-                        uast = Cat([dotstar, numbered.ast])
+                        uast = if a_start { core } else { Cat([dotstar, core]) }
                         u1 = Comp.emit({ ..r1, prog: [], splits: [] }, uast, 0)
                         uprog = List.append(u1.prog, Comp.inst(Comp.op_match, 0))
                         # If the pattern asserts a word boundary, fold the `\w`
@@ -156,7 +225,7 @@ Comp := [
                             } else {
                                 { sets: u1.sets, word_set: 0 }
                             }
-                        Ok({ prog, splits: p2.splits, classes: Trie.build(wb.sets), n_groups, prefix, rprog, rsplits: r1.splits, uprog, usplits: u1.splits, fbytes, tlits, word_set: wb.word_set })
+                        Ok({ prog, splits: p2.splits, classes: Trie.build(wb.sets), n_groups, prefix, rprog, rsplits: r1.splits, uprog, usplits: u1.splits, fbytes, tlits, word_set: wb.word_set, anchored_start: a_start, accept_eoi_only: a_eoi })
                     }
                 Err(e) => Err(e)
             }

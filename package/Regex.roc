@@ -154,7 +154,10 @@ Regex := [].{
     is_match : Regex.T, List(U8) -> Bool
     is_match = |re, hay|
         match re.engine {
-            Three(d) => Rev.is_match(d.fwd, re.classes, hay)
+            # an outermost `$` skips the forward end-scan (see Rev.find_from), so
+            # is_match goes through the full span finder for that case; otherwise
+            # the forward-only DFA suffices.
+            Three(d) => if d.fwd.eoi_only { (match Rev.find(d, re.classes, hay) { Ok(_) => True Err(_) => False }) } else { Rev.is_match(d.fwd, re.classes, hay) }
             Pike =>
                 match Regex.find(re, hay) {
                     Ok(_) => True
@@ -165,7 +168,10 @@ Regex := [].{
     # the Comp.Compiled view (drop the engine field) for Pike, which is
     # engine-agnostic.
     base : Regex.T -> Comp.Compiled
-    base = |re| { prog: re.prog, splits: re.splits, classes: re.classes, n_groups: re.n_groups, prefix: re.prefix, rprog: re.rprog, rsplits: re.rsplits, uprog: re.uprog, usplits: re.usplits, fbytes: re.fbytes, tlits: re.tlits, word_set: re.word_set }
+    # `anchored_start`/`accept_eoi_only` matter only to the DFA build (they are
+    # baked into the engine there); the PikeVM view keeps the anchors in `prog`,
+    # so they default to False here.
+    base = |re| { prog: re.prog, splits: re.splits, classes: re.classes, n_groups: re.n_groups, prefix: re.prefix, rprog: re.rprog, rsplits: re.rsplits, uprog: re.uprog, usplits: re.usplits, fbytes: re.fbytes, tlits: re.tlits, word_set: re.word_set, anchored_start: False, accept_eoi_only: False }
 
 
     ## --- iteration and rewriting (D15, D14) ---------------------------------
