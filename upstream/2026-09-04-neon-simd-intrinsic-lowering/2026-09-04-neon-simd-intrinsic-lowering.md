@@ -1,110 +1,93 @@
-# `U8x16.to_bitmask` (and `concat_shift_bytes`) lower to long scalar sequences on AArch64 NEON
+# `U8x16.to_bitmask` / `concat_shift_bytes` lower to scalar sequences on AArch64 NEON
 
 **Compiler:** `Roc compiler version release-fast-43746ac5`
-**Host:** arm64 macOS (Darwin 25.3.0), `--opt=speed`
+**Host:** arm64 macOS (Darwin 25.3.0)
+**Status:** **FIXED** by the local `roc-simdfix` build — validated below.
 
 ## One line
 
-`U8x16.to_bitmask()` compiles to a **46-instruction** per-lane scalar extraction
-(`umov.b`/`mov.b`/`fmov`/`orr`) instead of the standard ~4-instruction AArch64
-NEON movemask reduction (`shrn.8b v, v.8h, #4; fmov x, d; …`). In a SIMD scan
-loop this single intrinsic dominates the per-window cost and makes an otherwise
-identical algorithm run ~2–3× slower than the C/Rust equivalent. A second,
-smaller instance: `concat_shift_bytes` (a byte-wise vector shift/align) lowers to
-a 28-instruction scalar GPR path instead of a single `ext.16b`.
+In a 128-bit-NEON SIMD scan built with `--opt=speed`, a per-window
+`…bitwise_not().to_bitmask()` (movemask) plus `concat_shift_bytes` (byte align)
+lower to a long **scalar** teardown — the 16-byte vector is pulled into GPRs
+lane-by-lane (`umov.b`/`fmov`/`mov.d`/`extr`) and recombined with scalar `orr` —
+instead of the NEON idioms (`shrn`/`addv` movemask; `ext.16b` align). It roughly
+doubles the scan's per-window cost. `roc-simdfix` removes the scalar path and the
+scan gets ~2.5× faster (details below).
 
-## Why it matters (the workload)
+## Scope note (what does and does not exercise this)
 
-This is a regex engine whose literal prefilter is a 128-bit **Teddy** — the same
-algorithm as `aho-corasick`'s packed Teddy: per 16-byte window it does two
-`tbl.16b` (pshufb) table lookups, some `and.16b`, a byte-align (`ext.16b`), and
-one **movemask** (`to_bitmask`) to extract candidate lanes. No data structures
-are built in the scan; it is pure SIMD over bytes. Both this engine and
-`aho-corasick` go through LLVM and emit 128-bit NEON on arm64, so equivalent
-source should produce equivalent code.
+This is a regex engine. Its 128-bit **Teddy** literal prefilter
+(`package/Teddy.roc`, `scan`/`candidates`) is the SIMD scan in question, and it
+is reached only through `Regex.find` (single search on a pattern with a required
+literal prefix). **`Regex.find_all` does not use Teddy** — it runs the lazy-DFA
+engine — so `examples/bench.roc` (which calls `find_all`) contains no Teddy code
+at all, and the old/new compilers produce a byte-identical `bench` binary. That
+is consistent with this bug, not a counterexample: the fix only changes objects
+that actually emit `to_bitmask`/`concat_shift_bytes`. The numbers below come from
+a direct scan microbenchmark, not from `find_all`.
 
-It doesn't. Scanning an identical 256 KiB haystack for the literal `Holmes`
-(`m = 3` fingerprint), allocation-free on both sides:
+## Measurement (`--opt=speed`, in-process, 256 KiB haystack, literal `Holmes`, m=3)
+
+The full Teddy inner loop (two `tbl.16b` lookups + `concat_shift_bytes` +
+`bitwise_not().to_bitmask()`), scanned allocation-free:
 
 | | ns / 256 KiB | throughput |
 |---|---|---|
-| `aho-corasick` 128-bit Teddy (Rust) | 30,400 | 8.6 GB/s |
-| this engine's `Teddy.scan` (Roc) | 65,850 | 4.0 GB/s |
+| stock `roc` (`release-fast-43746ac5`) | ~63,400 | ~4.1 GB/s |
+| **`roc-simdfix`** | **~25,400** | **~10.3 GB/s** |
+| `aho-corasick` 128-bit Teddy (Rust ref) | ~29,900 | ~8.8 GB/s |
 
-**~2.17× slower.** Isolating `to_bitmask` with a single-byte fingerprint
-(`m = 1`, no `concat_shift_bytes`) widens the gap to **~3.4×** (Roc 58,056 ns vs
-Rust 17,061 ns) — i.e. the movemask is the dominant term: with less surrounding
-work it accounts for *more* of the loop, not less.
+The fix is ~2.5× and takes the Roc scan past the Rust reference. Reference bin:
+`tools/bench/src/teddy.rs` (aho-corasick packed, forced 128-bit).
 
-## The disassembly
+## Evidence (`--opt=speed`, not `--debug`)
 
-Captured from the regex build; `to_bitmask.disasm` and `concat_shift_bytes.disasm`
-in this directory are the full blobs, `repro.roc` is a standalone package-free
-driver that reproduces the movemask blob in `_roc_main`.
-
-### `to_bitmask` — 46 instructions for one movemask
-
-The whole block for `cand.eq_lanes(0).bitwise_not().to_bitmask()` is a per-lane
-teardown of the 16-byte vector into GPRs and a scalar OR-reduction:
+Caveat that cost the first draft of this report: a **`--debug`** build shows an
+even worse ~46-instruction scalar `to_bitmask`, but that is debug codegen. Under
+`--opt=speed`, a *simple* `eq_lanes(0).to_bitmask()` already optimizes to `shrn`
+— so a minimal repro can hide the bug. The **full** Teddy chain does not: the
+stock `--opt=speed` scan loop is 79 instructions, **34 of them scalar extract /
+recombine** (`umov.b`, `extr`, `mov.d`, `fmov`, `orr`). `to_bitmask.disasm` in
+this directory is that loop. The shape:
 
 ```
-cmeq.16b v6, v5, #0
-cmtst.16b v5, v5, v5
-umov.b   w8,  v5[0]      ; and w8, w8, #0x80
-umov.b   w10, v5[1]      ; and w10, w10, #0x2
-mov      b2,  v5[2]  /  mov.b v2[4], v5[3]
-umov.b   w11, v5[6]      ; …
-… (16 lanes extracted one at a time) …
-zip2.8b  v5, v5, v0
-fmov     x16, d5
-orr      w16, w16, w17
-orr      w16, w16, w16, lsr #16
-… (a dozen scalar orr to fold the lanes) …
-tst      w8, #0xff
-cset     w26, ne
+mov.d x8, v3[1] / fmov x9, d3 / extr x8, x8, x9, #0x38   ; concat_shift_bytes,
+mov.d x10, v2[1] / fmov x11, d2 / extr x10, x10, x11, #0x38 ;  done in GPRs
+umov.b w8,  v4[0]                                         ; to_bitmask: pull
+umov.b w10, v4[1]                                         ;  each lane to a GPR
+umov.b w11, v4[6] / umov.b w12, v4[7] / …                 ;  …then scalar orr
 ```
 
-### `concat_shift_bytes` — 28 instructions for one `ext.16b`
+`roc-simdfix` compiles the same source to a loop with **0 `umov.b`, 0 `extr`** —
+`tbl.16b`/`and.16b` plus a `shrn`-based movemask, no GPR round-trip.
 
-`prevN.concat_shift_bytes(resN, k)` (take the top `16-k` bytes of `prev`
-concatenated with the low `k` of `res`, i.e. a byte align) is done by moving both
-halves of each vector to GPRs and recombining with `extr`/`orr`:
+## What should happen (and what the fix does)
 
-```
-mov.d x8, v4[1] / fmov x9, d4 / extr x8, x8, x9, #0x38 / …
-extr  x8, x8, x9, #0x30 / mov.d x10, v3[1] / fmov x11, d3 / extr x10, x10, x11, #0x38 / …
-```
+1. **`to_bitmask` → shift-narrow movemask.** For a per-lane 0x00/0xFF mask:
+   `shrn.8b v,v.8h,#4; fmov x,d` gives a 64-bit value at 4 bits/lane; test with
+   `cbz`/`tst`. (x86 lowers this to a single `pmovmskb`.) The stock backend does
+   this for a bare `to_bitmask`, but the `bitwise_not().to_bitmask()` /
+   full-Teddy combination falls back to the per-lane scalar path.
+2. **`concat_shift_bytes` → `ext.16b vd,vn,vm,#k`** — one instruction, not the
+   `mov.d`/`fmov`/`extr` GPR pair.
 
-AArch64 has `ext.16b vd, vn, vm, #k` for exactly this — one instruction.
-
-## What should happen
-
-Both are standard NEON idioms that LLVM emits for the equivalent C intrinsics /
-`std::simd`; the Roc lowering is emitting IR that the backend can't recognize as
-a movemask / vector-align and falls back to scalar.
-
-1. **`to_bitmask` → the shift-narrow reduction.** For a per-lane 0x00/0xFF mask:
-   `shrn.8b v0, v0.8h, #4` packs the 16 lanes into a 64-bit register at 4 bits
-   each; `fmov x, d0` then a `cbz`/`tst` (or per-set-bit iteration via `rbit`
-   + `clz`). ~3–4 instructions. (The equivalent x86 lowering is a single
-   `pmovmskb`.) Alternatively `and` with a per-lane bit-position vector then
-   `addv`/`addp`.
-2. **`concat_shift_bytes` → `ext.16b vd, vn, vm, #k`.** One instruction.
-3. If these are lowered via hand-written IR sequences, emitting the target
-   intrinsic (`@llvm.aarch64.neon.*`) or the shufflevector/`lshr`+`trunc` pattern
-   LLVM canonicalizes to `shrn` would fix it without a source change.
-
-With (1) alone the Teddy scan's per-window instruction count roughly halves and
-the ~2–3× gap to `aho-corasick` should largely close.
+`roc-simdfix` emits both, closing the gap.
 
 ## Reproduction
 
+`repro.roc` here carries a previous window, `concat_shift_bytes`-aligns it, and
+`bitwise_not().to_bitmask()`s — enough that the stock/`roc-simdfix` binaries
+differ at `--opt=speed`:
+
 ```
-roc build --no-cache --opt=speed --debug repro.roc
-# disassemble _roc_main; the per-window loop body is: ldr q, cmeq.16b, then the
-# ~46-instruction umov.b/mov.b/fmov/orr movemask (no shrn/addv) shown above.
-./repro <any-file>   # prints the count of 16-byte windows containing a 0 byte
+roc          build --opt=speed repro.roc && objdump -d ... | grep -c umov.b   # >0
+roc-simdfix  build --opt=speed repro.roc && objdump -d ... | grep -c umov.b   # 0
 ```
 
-`to_bitmask.disasm` / `concat_shift_bytes.disasm` are the captured blobs from the
-regex Teddy scan (`package/Teddy.roc`, `count`/`scan`).
+The scalar path is most pronounced in the real m=3 Teddy (two `concat_shift`s +
+interleaved `and.16b` + final movemask): `package/Teddy.roc`'s `scan` — 79-instr
+loop, 34 scalar-extract, at stock `--opt=speed`. `to_bitmask.disasm` is that
+loop. Timing that scan in-process over a 256 KiB haystack gave the ~63k→~25k
+ns/iter above. (A *bare* `to_bitmask`, and small combinations, already lower to
+`shrn` at `--opt=speed` — so a minimal repro understates it; the multi-fingerprint
+register pressure is what tips the backend into the scalar teardown.)
