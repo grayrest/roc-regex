@@ -7,7 +7,8 @@ evaluated during the build and the artifact is stored in the executable; the
 same call on a runtime pattern runs at runtime. One function, one code path, no
 macro and no build step.
 
-Nothing is implemented.
+The engine is implemented end to end (M1–M4) and agrees with the Rust `regex`
+crate across the differential corpus; see **Status** below.
 
 | document | status |
 |---|---|
@@ -29,10 +30,14 @@ later found to be overstated the correction is recorded next to it rather than
 substituted for it. Two rev-1 throughput figures were struck outright after an
 audit found their loops never left their start state.
 
-The single number the current plan most depends on is still absent: **the
-artifact size of a realistic pattern including its per-pattern class trie**,
-which sets both stop rule 1's threshold and D10's default budget. M1's gate
-takes it.
+The number the current plan most depends on — **the artifact size of a realistic
+pattern including its per-pattern class trie** — is now measured by
+`tools/size/probe.sh`: a folded binary is ~460–674 KB (the parser/determinizer
+is stripped when `compile` folds), the DFA tables cost ~224 B for an ASCII class
+up to ~33 KB for a Unicode class, and the dominant term is the per-pattern
+Unicode class data (~180 KB for `\w`, needed by both the DFA and the PikeVM) —
+the D3 shared-vs-per-pattern-trie question, not the engine. This sets stop
+rule 1's threshold and D10's default budget.
 
 ## Status: M1 complete
 
