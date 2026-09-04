@@ -48,6 +48,16 @@ Rev := [].{
             Ok(end) => Ok({ start: Rev.run_rev(d.rev, classes, hay, end), end })
         }
 
+    ## Leftmost-first span at-or-after `at` — the iterator step for `find_all`.
+    ## The forward scan starts at `at`; the reverse start-scan is floored at `at`
+    ## so the returned start is >= at (non-overlapping with the previous match).
+    find_from : { fwd : Rev.D, rev : Rev.D }, Trie.T, List(U8), U64 -> Try({ start : U64, end : U64 }, [NoMatch])
+    find_from = |d, classes, hay, at|
+        match Rev.run_fwd_from(d.fwd, classes, hay, at) {
+            Err(_) => Err(NoMatch)
+            Ok(end) => Ok({ start: Rev.run_rev_from(d.rev, classes, hay, end, at), end })
+        }
+
     ## is_match via the forward DFA (any match-state reachable).
     is_match : Rev.D, Trie.T, List(U8) -> Bool
     is_match = |fwd, classes, hay|
@@ -166,6 +176,14 @@ Rev := [].{
     run_fwd : Rev.D, Trie.T, List(U8) -> Try(U64, [NoMatch])
     run_fwd = |d, classes, hay| Rev.fwd(d, classes, hay, 0, 0, Err(NoMatch))
 
+    # forward end-scan starting at `at`. Terminates at the leftmost match's end:
+    # the leftmost-first determinizer truncates the lazy dot-star closure at the
+    # first Match, so the state goes dead just past the match rather than looping
+    # to EOF — this is what keeps `find_all` iteration linear (see the DFA-find_all
+    # scope note). No explicit end bound is needed for that.
+    run_fwd_from : Rev.D, Trie.T, List(U8), U64 -> Try(U64, [NoMatch])
+    run_fwd_from = |d, classes, hay, at| Rev.fwd(d, classes, hay, at, 0, Err(NoMatch))
+
     fwd : Rev.D, Trie.T, List(U8), U64, U32, Try(U64, [NoMatch]) -> Try(U64, [NoMatch])
     fwd = |d, classes, hay, pos, state, best| {
         best2 = if (List.get(d.hit, state.to_u64()) ?? 0) == 1 { Ok(pos) } else { best }
@@ -186,12 +204,18 @@ Rev := [].{
     # reverse DFA anchored at `end`, stepping backward; the smallest reached
     # position that is a match state is the leftmost start.
     run_rev : Rev.D, Trie.T, List(U8), U64 -> U64
-    run_rev = |d, classes, hay, end| Rev.rev(d, classes, hay, end, end, 0, end)
+    run_rev = |d, classes, hay, end| Rev.rev(d, classes, hay, end, 0, 0, end)
+
+    # as `run_rev`, but the backward scan stops at floor `lo` (so the leftmost
+    # start it can report is `lo`) — used by `find_from` to keep matches
+    # non-overlapping across iteration.
+    run_rev_from : Rev.D, Trie.T, List(U8), U64, U64 -> U64
+    run_rev_from = |d, classes, hay, end, lo| Rev.rev(d, classes, hay, end, lo, 0, end)
 
     rev : Rev.D, Trie.T, List(U8), U64, U64, U32, U64 -> U64
-    rev = |d, classes, hay, pos, end, state, best| {
+    rev = |d, classes, hay, pos, lo, state, best| {
         best2 = if (List.get(d.hit, state.to_u64()) ?? 0) == 1 { pos } else { best }
-        if pos == 0 {
+        if pos <= lo {
             best2
         } else {
             cs = Rev.cp_start(hay, pos - 1)
@@ -201,7 +225,7 @@ Rev := [].{
             if nxt == 0 {
                 best2
             } else {
-                Rev.rev(d, classes, hay, cs, end, nxt - 1, best2)
+                Rev.rev(d, classes, hay, cs, lo, nxt - 1, best2)
             }
         }
     }

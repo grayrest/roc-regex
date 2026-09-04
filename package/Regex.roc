@@ -235,7 +235,14 @@ Regex := [].{
             if at > len {
                 running = False
             } else {
-                match Pike.wfind_from(comp, hay, at) {
+                # DFA iterator step for look-free in-budget patterns (Three);
+                # the PikeVM otherwise. Same empty-match advancement either way.
+                next =
+                    match re.engine {
+                        Three(d) => Rev.find_from(d, re.classes, hay, at)
+                        Pike => Pike.wfind_from(comp, hay, at)
+                    }
+                match next {
                     Err(_) => {
                         running = False
                     }

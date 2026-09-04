@@ -76,16 +76,33 @@ notes under `notes/`.
 `tools/bench/run.sh` times this engine against the vendored Rust `regex` crate
 on an identical haystack (match counts are compared to enforce identical work).
 Match throughput only — the regex is compiled once, before the timing loop, on
-both sides. The comparison also includes an **engine-matched** column (Rust's
+both sides. The comparison includes an **engine-matched** column (Rust's
 `regex-automata` PikeVM — the same O(n·states) algorithm), separate from Rust's
-meta engine (a lazy DFA + memchr/SIMD). Roc's PikeVM is **~6–15× (mostly ~10×)
-slower than Rust's PikeVM**; the larger 37–1300× against the meta engine is
-mostly the DFA-vs-PikeVM *algorithm* gap, not implementation. Roc runs at ~3–8
-MB/s, Rust's PikeVM at ~30–90 MB/s, its DFA at 125 MB/s–6 GB/s. Compile cost is
-the one axis Roc wins: 0 at runtime (folded at build) vs ~30–700 µs/pattern for
-`Regex::new`. Full numbers, method, and the 2026-09-03 work that cut the gap
-~2–2.5× (generation-set dedup, reused closure stack, start-only whole-match
-engine, double-buffered thread queues, ASCII word-boundary fast path) are in
-`notes/2026-09-02-benchmark.md`. Benchmarking also flushed out a `find_all`
-stack overflow on large inputs — a tail call Roc's optimizer wouldn't loopify —
-now fixed with an explicit `while` loop.
+meta engine (a lazy DFA + memchr/SIMD).
+
+As of 2026-09-04, **`find_all` runs on the DFA** for look-free, in-budget
+patterns (it already did for `find`/`is_match`); only look patterns (`\b`, …),
+over-budget (`TooBig`), and the capture paths stay on the PikeVM. This made
+`find_all` **12–71× faster** on DFA-able patterns — the Roc DFA is now *faster
+than Rust's PikeVM* (0.1–0.8×) and within **2–3×** of Rust's meta engine on
+regex-class patterns; the remaining double-digit gaps (`literal`, `caps_email`)
+are literal-prefilter territory (Teddy/memchr), not the DFA. Scaling is linear
+(no O(n²) across match count). Look patterns still run the PikeVM, ~6× vs Rust's
+PikeVM after the 2026-09-03 allocation work (generation-set dedup, reused
+closure stack, start-only whole-match engine, double-buffered thread queues,
+ASCII word-boundary fast path). Compile cost is the axis Roc wins outright: 0 at
+runtime (folded at build) vs ~30–700 µs/pattern for `Regex::new`.
+
+`tools/size/probe.sh` measures the folded-artifact size. Folding requires a
+top-level `Regex.compile` (not a `let` in an effectful body — so the bench above
+is the *runtime-compiled* scan; throughput is identical either way). A folded
+binary is ~460–674 KB (the compiler is stripped, vs ~1.1 MB runtime-compiled).
+The DFA tables are cheap (~224 bytes for an ASCII class, ~33 KB for a Unicode
+class); the dominant artifact cost is the per-pattern Unicode class data (~180 KB
+for `\w`), needed by both engines — the D3 trie question, not the DFA.
+
+Full numbers and method are in `notes/2026-09-02-benchmark.md`;
+`notes/2026-09-04-dfa-find-all-scope.md` has the DFA `find_all` design.
+Benchmarking also flushed out a `find_all` stack overflow on large inputs — a
+tail call Roc's optimizer wouldn't loopify — now fixed with an explicit `while`
+loop.

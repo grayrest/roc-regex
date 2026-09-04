@@ -9,6 +9,7 @@
 
 # built examples
 examples/smoke
+examples/bench
 examples/*.wasm
 
 # roc build drops the executable at the repo root, named after the app file

@@ -4,6 +4,75 @@ First throughput comparison against the vendored Rust `regex` 1.13 crate.
 Harness: `tools/bench/` (`gen` + `bench` bins, `run.sh` driver) and
 `examples/bench.roc`. Reproduce with `tools/bench/run.sh`.
 
+---
+
+## 2026-09-04: `find_all` now runs on the DFA (supersedes the PikeVM numbers below)
+
+`Regex.find_all` used to call the PikeVM (`Pike.wfind_from`) unconditionally,
+even though `Regex.find` / `is_match` already ran the DFA. It now branches on
+`re.engine`: look-free, in-budget patterns (`Three(d)`) iterate via the forward
++ reverse DFA (`Rev.find_from`), leaving only look patterns (`\b`, …) and
+`TooBig`/capture paths on the PikeVM. New code is small — `Rev.run_fwd_from`,
+`run_rev_from` (reverse floored at the search start for non-overlap), and
+`Rev.find_from`. `1431/1431` differential, `21/21` smoke.
+
+Speedup over the old PikeVM `find_all`, at 256 KiB (`vsPV`/`vsMeta` = ratio to
+Rust's `regex-automata` PikeVM / meta engine):
+
+```
+pattern         old_roc_ns   new_roc_ns  speedup   vsPV  vsMeta   cnt
+literal           36298200      1889600     19x    0.5x     32x   ok
+teddy_alt         77417050      2294900     34x    0.4x      6x   ok
+class_plus        80519400      6653700     12x    0.8x      3x   ok
+bounded_num       36244450      1045950     35x    0.3x     10x   ok
+word_bound        32806800     32525850      1x    5.9x    156x   ok   (still Pike: \b)
+two_words         85171900      5030400     17x    0.6x      3x   ok
+caps_email        71822850      1014000     71x    0.1x     14x   ok
+uni_letters       82022300      6723350     12x    0.8x      3x   ok
+dotstar_lit       82923650      1293650     65x    0.2x      2x   ok
+```
+
+`vsPV < 1` means the Roc DFA is **faster than Rust's PikeVM** on every DFA-able
+pattern; the regex-class patterns are within 2–3× of Rust's fully-optimized
+meta engine, the remaining double-digit gaps (`literal` 32×, `caps_email` 14×)
+being literal-prefilter territory (Teddy/memchr), not a DFA gap.
+
+**Linear scaling confirmed** (the O(n²) worry did not materialize): 128 K→256 K
+time ratios were 1.79–2.05× across patterns. The leftmost-first determinizer
+truncates the lazy dot-star closure at the first `Match`, so the forward state
+goes dead just past each match instead of scanning to EOF — no explicit end
+bound needed. Scope + reasoning: `notes/2026-09-04-dfa-find-all-scope.md`.
+
+### Folded vs runtime, and artifact size (`tools/size/probe.sh`)
+
+Building the size probe surfaced that **`Regex.compile` only folds for
+module-level defs**, not `let`-bindings inside an effectful body. Both
+`examples/bench.roc` and the naive probe use a `let` in the timing loop, so
+**the throughput numbers above are the runtime-compiled path** — the binary
+links the whole parser/NFA/determinizer and runs it at startup (measured
+outside the timing window, so the ns/op figures are unaffected; the scan code
+is identical either way).
+
+The folded (AOT) path needs a top-level `rx = Regex.unwrap(Regex.compile("…"))`.
+`tools/size/probe.sh` builds one such binary per pattern (`--opt=size`) with a
+runtime-file haystack so the folded regex is retained. Findings:
+
+- Folding **strips the compiler**: a folded binary is ~460–674 KB vs ~1.1 MB
+  for the runtime-compiled path.
+- **DFA tables are cheap.** `[A-Za-z]+` (DFA) adds ~**224 bytes** over an
+  ASCII `\bthe\b` (Pike) baseline. For a Unicode class pattern the DFA table is
+  ~**33 KB** (`\w+` DFA vs `\b\w+\b` Pike, isolating the table from the class
+  data).
+- **The dominant cost is the per-pattern Unicode class data**, needed by *both*
+  engines: `\w` adds ~**180 KB** (`\b\w+\b`, Pike, no DFA). This is the D3
+  shared-vs-per-pattern-trie question the README flags, and it dwarfs the DFA.
+
+So switching `find_all` to the DFA is a large throughput win at a small
+(ASCII) to modest (Unicode, ~33 KB) artifact cost; the real artifact lever is
+the class trie, not the engine.
+
+---
+
 ## Method
 
 - **Identical work.** Both engines run the same 9 patterns over the same
