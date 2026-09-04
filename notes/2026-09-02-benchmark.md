@@ -36,7 +36,16 @@ from ~110 µs (59 × ~1.9 µs `wmatch_at`) to ~2 µs, taking the row from ~140K 
 `Teddy.candidates()` (scan + list + dedup), not verify. Only plain prefix
 patterns get the DFA verify; `^`/`$`-anchored ones keep the PikeVM verify (their
 anchors live in `c.prog` but the determinizer can't take them). `wmatch_at`
-itself is cheap per call (~2.5 µs) — it was the ×N over many candidates that hurt. This is the fix for the `literal`-vs-meta gap
+itself is cheap per call (~2.5 µs) — it was the ×N over many candidates that hurt.
+
+**First-byte scan (2026-09-04):** with the verify now cheap, the prefilter scans
+for just the prefix's **first byte** (Teddy m=1) rather than the 3-byte
+fingerprint — ~1.7× less per-window work (2 vs 6 `tbl` lookups), same candidate
+set when the first byte is rare. The extra candidates a common first byte would
+admit just trip the selectivity cap (→ DFA), so it never regresses the dense
+case. `literal_sparse` → ~30–40K ns, **~4× vs Rust's meta** (`memmem`). The
+residual is the scan itself (~8.5 GB/s vs `memmem`'s rare-byte scan) plus
+`candidates()` list/dedup. This is the fix for the `literal`-vs-meta gap
 identified earlier: it was never `wmatch_at` (2.5 µs) nor the DFA per-byte cost —
 single literals carry `prefix`, not `tlits`, so no prefilter engaged at all.
 1512/1512 differential (verified with the gate forced always-on too).

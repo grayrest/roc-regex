@@ -243,7 +243,13 @@ Regex := [].{
         # when the literal is dense (candidates > len/prefilter_k), where scanning
         # every byte with the DFA is cheaper than verifying at every candidate.
         if !List.is_empty(re.prefix) {
-            match Teddy.build([re.prefix]) {
+            # Scan for just the prefix's FIRST byte (Teddy m=1): a leaner
+            # per-window scan than the 3-byte fingerprint, and with the cheap
+            # anchored-DFA verify the extra candidates it may admit cost little.
+            # A common first byte simply produces more candidates and trips the
+            # selectivity cap (→ DFA), so this never regresses the dense case.
+            fb1 = List.sublist(re.prefix, { start: 0, len: 1 })
+            match Teddy.build([fb1]) {
                 Ok(t) =>
                     match Teddy.candidates_capped(t, hay, List.len(hay) // Regex.prefilter_k) {
                         Ok(cands) => {
