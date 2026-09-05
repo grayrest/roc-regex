@@ -47,8 +47,12 @@ Rev := [].{
             # Only for plain prefix patterns: outermost `^`/`$` need the anchors
             # `c.prog` keeps but the determinizer can't take, so those keep the
             # PikeVM verify.
+            has_frange = match c.frange {
+                Range(_, _) => True
+                NoRange => False
+            }
             averify =
-                if !List.is_empty(c.prefix) and !c.anchored_start and !c.accept_eoi_only {
+                if (!List.is_empty(c.prefix) or has_frange) and !c.anchored_start and !c.accept_eoi_only {
                     match det(c.prog, c.splits) {
                         Ok(av) => Verify(av)
                         Err(_) => NoVerify
