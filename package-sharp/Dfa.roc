@@ -14,7 +14,9 @@ import Arena
 import Build
 import Deriv
 import Ref
+import Trie
 import TSet
+import Utf8
 
 Dfa := [].{
     E : {
@@ -39,6 +41,8 @@ Dfa := [].{
         fold_states : U64,
         fold_marks : Arena.Marks,
         runtime_cap : U64,
+        # complete folds only: fused ASCII byte -> next state, `state * 128 + byte`
+        atable : List(U32),
     }
 
     dead : U32
@@ -78,7 +82,7 @@ Dfa := [].{
             st_node: [0], st_flags: [0], st_nk: [Dfa.nk_notnull], st_pend: [0], st_minpend: [0],
             node_state: [], table: List.repeat(0.U32, a.nmt.to_u64()), end_table: List.repeat(0.U32, a.nmt.to_u64()),
             s_rev_ts: 0, s_noprefix: 0, max_states, complete: True,
-            fold_states: 0, fold_marks: Arena.marks(a), runtime_cap: Dfa.default_runtime_cap,
+            fold_states: 0, fold_marks: Arena.marks(a), runtime_cap: Dfa.default_runtime_cap, atable: [],
         }
         d = Dfa.get_state(e0, Arena.bot, False)
         r1 = Dfa.get_state(d.e, rev_ts, True)
@@ -90,9 +94,25 @@ Dfa := [].{
     default_runtime_cap : U64
     default_runtime_cap = 100_000
 
-    ## Record the fold's extent; everything created later can be evicted.
-    freeze : Dfa.E -> Dfa.E
-    freeze = |e| { ..e, fold_states: List.len(e.st_node), fold_marks: Arena.marks(e.a) }
+    ## Record the fold's extent; everything created later can be evicted. For a
+    ## complete fold, also fuse the ASCII byte -> state table the fast scans use
+    ## (`ascii` is the trie's byte -> class table).
+    freeze : Dfa.E, List(U32) -> Dfa.E
+    freeze = |e, ascii| {
+        n = List.len(e.st_node)
+        atable =
+            if e.complete {
+                List.map(Arena.upto(n * 128), |i| {
+                    s = i // 128
+                    b = i % 128
+                    cls = (List.get(ascii, b) ?? 0).to_u64()
+                    List.get(e.table, s * e.nmt.to_u64() + cls) ?? 0
+                })
+            } else {
+                []
+            }
+        { ..e, fold_states: n, fold_marks: Arena.marks(e.a), atable }
+    }
 
     ## Drop every state and node minted since the fold, keeping only the node of
     ## state `s`, rebuilt into the truncated arena; returns its new state.
@@ -472,4 +492,215 @@ Dfa := [].{
 
     dedup : List(U64) -> List(U64)
     dedup = |xs| List.fold(xs, [], |acc, x| if List.last(acc) == Ok(x) { acc } else { List.append(acc, x) })
+
+    # --- complete folds: byte loops over the fused table, no threading -----------
+    #
+    # Everything a complete fold needs is read-only, so these scans take `e` by
+    # reference, index the haystack directly (ASCII through `atable`, other
+    # symbols through the trie), and report byte offsets. Pending-nullable
+    # offsets are symbol counts, so they move by `Utf8.advance`/`retreat`.
+
+    ## RE#'s llmatch on a complete fold, as byte spans
+    find_all_fast : Dfa.E, Trie.T, List(U8) -> List({ start : U64, end : U64 })
+    find_all_fast = |e, t, hay| {
+        sts = Dfa.starts_fast(e, t, hay) |> List.sort_with(|x, y| U64.order_relative_to(x, y)) |> Dfa.dedup
+        fin = List.fold(sts, { spans: [], next_valid: 0 }, |acc, s|
+            if s < acc.next_valid {
+                acc
+            } else {
+                match Dfa.end_fast(e, t, hay, s) {
+                    Ok(en) => { spans: List.append(acc.spans, { start: s, end: en }), next_valid: en }
+                    Err(_) => acc
+                }
+            })
+        fin.spans
+    }
+
+    # next state on the symbol ending at `pos`; returns the state and the symbol's start
+    step_rev_fast : Dfa.E, Trie.T, List(U8), U32, U64 -> { s : U32, cs : U64 }
+    step_rev_fast = |e, t, hay, s, pos| {
+        b = List.get(hay, pos - 1) ?? 0
+        if b < 0x80 {
+            { s: List.get(e.atable, s.to_u64() * 128 + b.to_u64()) ?? Dfa.dead, cs: pos - 1 }
+        } else {
+            d = Utf8.decode_rev(hay, pos)
+            cls = if d.ok { Trie.class_of(t, d.cp) } else { t.invalid }
+            { s: List.get(e.table, s.to_u64() * e.nmt.to_u64() + cls.to_u64()) ?? Dfa.dead, cs: d.cs }
+        }
+    }
+
+    ## the reverse sweep on a complete fold: match-start byte offsets
+    starts_fast : Dfa.E, Trie.T, List(U8) -> List(U64)
+    starts_fast = |e, t, hay| {
+        n = List.len(hay)
+        if n == 0 {
+            if Deriv.nullable(e.a, Deriv.loc_both, Dfa.st_node_of(e, e.s_rev_ts)) { [0] } else { [] }
+        } else {
+            s0 = e.s_rev_ts
+            node = Dfa.st_node_of(e, s0)
+            f = Dfa.flags(e, s0)
+            null_at_end = f.bitwise_and(Dfa.fl_always) != 0 or Deriv.nullable(e.a, Deriv.loc_end, node)
+            st =
+                if !(null_at_end or Arena.depends_anchor(e.a, node)) {
+                    { s: s0, pos: n, acc: [] }
+                } else {
+                    acc0 = if null_at_end { if f.bitwise_and(Dfa.fl_pending) != 0 { Dfa.add_pending_fast(e, s0, [], hay, n) } else { [n] } } else { [] }
+                    d = Utf8.decode_rev(hay, n)
+                    cls = if d.ok { Trie.class_of(t, d.cp) } else { t.invalid }
+                    # the fold fills End transitions only for an anchor-dependent
+                    # start; otherwise End equals Center
+                    s1e = List.get(e.end_table, s0.to_u64() * e.nmt.to_u64() + cls.to_u64()) ?? 0
+                    s1 = if s1e != 0 { s1e } else { List.get(e.table, s0.to_u64() * e.nmt.to_u64() + cls.to_u64()) ?? Dfa.dead }
+                    pos = d.cs
+                    if pos != 0 {
+                        { s: s1, pos, acc: if Dfa.is_null(e, s1) { Dfa.set_null_fast(e, s1, acc0, hay, pos) } else { acc0 } }
+                    } else {
+                        nd = Dfa.st_node_of(e, s1)
+                        really = Dfa.flags(e, s1).bitwise_and(Dfa.fl_always) != 0 or Deriv.nullable(e.a, Deriv.loc_begin, nd)
+                        acc1 =
+                            if really {
+                                k = Dfa.nk(e, s1)
+                                if k == Dfa.nk_current or k == Dfa.nk_prev {
+                                    List.append(acc0, Utf8.advance(hay, 0, k.to_u64()))
+                                } else {
+                                    pairs = Arena.rs_get(e.a, List.get(e.st_pend, s1.to_u64()) ?? 0)
+                                    if List.is_empty(pairs) { List.append(acc0, 0) } else { Dfa.add_pairs_fast(acc0, pairs, hay, 0) }
+                                }
+                            } else {
+                                acc0
+                            }
+                        { s: s1, pos, acc: acc1 }
+                    }
+                }
+            col = Dfa.collect_fast(e, t, hay, st.pos, st.s, st.acc)
+            Dfa.start_fast(e, col.s, col.acc, hay)
+        }
+    }
+
+    collect_fast : Dfa.E, Trie.T, List(U8), U64, U32, List(U64) -> { s : U32, acc : List(U64) }
+    collect_fast = |e, t, hay, pos0, s0, acc0| {
+        var pos = pos0
+        var s = s0
+        var acc = acc0
+        while pos > 0 {
+            r = Dfa.step_rev_fast(e, t, hay, s, pos)
+            s = r.s
+            pos = r.cs
+            if Dfa.is_null(e, s) {
+                acc = Dfa.set_null_fast(e, s, acc, hay, pos)
+            }
+        }
+        { s, acc }
+    }
+
+    # `HandleInputStart` at byte 0
+    start_fast : Dfa.E, U32, List(U64), List(U8) -> List(U64)
+    start_fast = |e, s, acc, hay| {
+        node = Dfa.st_node_of(e, s)
+        really = Dfa.flags(e, s).bitwise_and(Dfa.fl_always) != 0 or Deriv.nullable(e.a, Deriv.loc_begin, node)
+        if really and List.last(acc) != Ok(0) {
+            k = Dfa.nk(e, s)
+            if k == Dfa.nk_current or k == Dfa.nk_prev {
+                p = Utf8.advance(hay, 0, k.to_u64())
+                acc1 = if List.last(acc) == Ok(p) { acc } else { List.append(acc, p) }
+                fresh =
+                    Arena.is_or(e.a, node)
+                    and List.any(Arena.children(e.a, node), |c| Arena.pend(e.a, c) == Arena.rs_empty and Deriv.nullable(e.a, Deriv.loc_begin, c))
+                if k != 0 and fresh { List.append(acc1, 0) } else { acc1 }
+            } else {
+                pairs = Arena.rs_get(e.a, List.get(e.st_pend, s.to_u64()) ?? 0)
+                if List.is_empty(pairs) {
+                    List.append(acc, 0)
+                } else {
+                    fs = Utf8.advance(hay, 0, Arena.ps(List.get(pairs, 0) ?? 0).to_u64())
+                    if List.is_empty(acc) or List.last(acc) != Ok(fs) { Dfa.add_pairs_fast(acc, pairs, hay, 0) } else { acc }
+                }
+            }
+        } else {
+            acc
+        }
+    }
+
+    set_null_fast : Dfa.E, U32, List(U64), List(U8), U64 -> List(U64)
+    set_null_fast = |e, s, acc, hay, pos| {
+        k = Dfa.nk(e, s)
+        if k == Dfa.nk_current {
+            List.append(acc, pos)
+        } else if k == Dfa.nk_prev {
+            List.append(acc, Utf8.advance(hay, pos, 1))
+        } else {
+            Dfa.add_pending_fast(e, s, acc, hay, pos)
+        }
+    }
+
+    add_pending_fast : Dfa.E, U32, List(U64), List(U8), U64 -> List(U64)
+    add_pending_fast = |e, s, acc, hay, pos|
+        Dfa.add_pairs_fast(acc, Arena.rs_get(e.a, List.get(e.st_pend, s.to_u64()) ?? 0), hay, pos)
+
+    add_pairs_fast : List(U64), List(U32), List(U8), U64 -> List(U64)
+    add_pairs_fast = |acc, pairs, hay, pos|
+        List.fold_rev(pairs, acc, |p, ac| {
+            s = Arena.ps(p).to_u64()
+            en = Arena.pe(p).to_u64()
+            List.fold(Arena.upto(en - s + 1), ac, |ac2, i| List.append(ac2, Utf8.advance(hay, pos, en - i)))
+        })
+
+    ## the forward end pass on a complete fold, from byte offset `start`
+    end_fast : Dfa.E, Trie.T, List(U8), U64 -> Try(U64, [NoEnd])
+    end_fast = |e, t, hay, start| {
+        n = List.len(hay)
+        if start >= n {
+            Dfa.at_eoi_fast(e, e.s_noprefix, hay, n, Err(NoEnd))
+        } else {
+            var pos = start
+            var s = e.s_noprefix
+            var best = Err(NoEnd)
+            while s != Dfa.dead {
+                if Dfa.is_null(e, s) {
+                    k = Dfa.nk(e, s)
+                    best = if k == Dfa.nk_current { Ok(pos) } else if k == Dfa.nk_prev { Ok(Utf8.retreat(hay, pos, 1)) } else { Dfa.null_fallback_fast(e, s, hay, pos, best) }
+                }
+                b = List.get(hay, pos) ?? 0
+                if b < 0x80 {
+                    s = List.get(e.atable, s.to_u64() * 128 + b.to_u64()) ?? Dfa.dead
+                    pos = pos + 1
+                } else {
+                    d = Utf8.decode(hay, pos)
+                    cls = if d.ok { Trie.class_of(t, d.cp) } else { t.invalid }
+                    s = List.get(e.table, s.to_u64() * e.nmt.to_u64() + cls.to_u64()) ?? Dfa.dead
+                    pos = pos + d.len
+                }
+                if pos >= n {
+                    best = Dfa.at_eoi_fast(e, s, hay, n, best)
+                    s = Dfa.dead
+                }
+            }
+            best
+        }
+    }
+
+    null_fallback_fast : Dfa.E, U32, List(U8), U64, Try(U64, [NoEnd]) -> Try(U64, [NoEnd])
+    null_fallback_fast = |e, s, hay, pos, best|
+        if Dfa.flags(e, s).bitwise_and(Dfa.fl_pending) != 0 {
+            Dfa.max_end(best, Utf8.retreat(hay, pos, (List.get(e.st_minpend, s.to_u64()) ?? 0).to_u64()))
+        } else {
+            Ok(pos)
+        }
+
+    at_eoi_fast : Dfa.E, U32, List(U8), U64, Try(U64, [NoEnd]) -> Try(U64, [NoEnd])
+    at_eoi_fast = |e, s, hay, pos, best| {
+        f = Dfa.flags(e, s)
+        if f.bitwise_and(Dfa.fl_always) != 0 or f.bitwise_and(Dfa.fl_anchor_null) != 0 {
+            if f.bitwise_and(Dfa.fl_anchor_null) != 0 and f.bitwise_and(Dfa.fl_pending) == 0 {
+                if Deriv.nullable(e.a, Deriv.loc_end, Dfa.st_node_of(e, s)) { Ok(pos) } else { best }
+            } else {
+                k = Dfa.nk(e, s)
+                if k == Dfa.nk_current { Ok(pos) }
+                else if k == Dfa.nk_prev { Ok(Utf8.retreat(hay, pos, 1)) }
+                else { Dfa.max_end(best, Utf8.retreat(hay, pos, (List.get(e.st_minpend, s.to_u64()) ?? 0).to_u64())) }
+            }
+        } else {
+            best
+        }
+    }
 }

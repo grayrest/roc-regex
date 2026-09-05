@@ -68,6 +68,44 @@ Utf8 := [].{
     sym_start = |b, i|
         if i > 0 and Utf8.is_cont(Utf8.at(b, i)) { Utf8.sym_start(b, i - 1) } else { i }
 
+    ## The symbol ENDING at byte position `pos` (exclusive), for right-to-left
+    ## scans: `cs` is where it starts. Valid UTF-8 decodes exactly; a malformed
+    ## sequence is one Invalid symbol back to its lead byte, or, for a run of
+    ## bare continuation bytes, back to the byte after the preceding non-
+    ## continuation byte. Invalid input may segment differently forwards and
+    ## backwards (D8 rule 7).
+    decode_rev : List(U8), U64 -> { cs : U64, cp : U32, ok : Bool }
+    decode_rev = |b, pos| {
+        i = pos - 1
+        bi = Utf8.at(b, i)
+        if bi < 0x80 {
+            { cs: i, cp: bi.to_u32(), ok: True }
+        } else {
+            l = Utf8.sym_start(b, i)
+            bl = Utf8.at(b, l)
+            if !Utf8.is_cont(bl) and bl < 0x80 {
+                # bare continuation run after an ASCII byte
+                { cs: l + 1, cp: 0, ok: False }
+            } else if Utf8.is_cont(bl) {
+                # the run reaches offset 0 with no lead
+                { cs: l, cp: 0, ok: False }
+            } else {
+                d = Utf8.decode(b, l)
+                if d.ok and l + d.len == pos { { cs: l, cp: d.cp, ok: True } } else { { cs: l, cp: 0, ok: False } }
+            }
+        }
+    }
+
+    ## the byte position `k` symbols after `pos`
+    advance : List(U8), U64, U64 -> U64
+    advance = |b, pos, k|
+        if k == 0 or pos >= List.len(b) { pos + k } else { Utf8.advance(b, pos + (Utf8.decode(b, pos)).len, k - 1) }
+
+    ## the byte position `k` symbols before `pos`
+    retreat : List(U8), U64, U64 -> U64
+    retreat = |b, pos, k|
+        if k == 0 or pos == 0 { pos } else { Utf8.retreat(b, (Utf8.decode_rev(b, pos)).cs, k - 1) }
+
     ## encode one codepoint
     encode : U32 -> List(U8)
     encode = |cp|

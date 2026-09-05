@@ -93,6 +93,12 @@ evict_str = |re, hay|
 	|> List.map(|s| "${s.start.to_str()}-${s.end.to_str()}")
 	|> Str.join_with(",")
 
+thr_str : Sharp.T, Str -> Str
+thr_str = |re, hay|
+	Sharp.find_all_threaded(re, Str.to_utf8(hay))
+	|> List.map(|s| "${s.start.to_str()}-${s.end.to_str()}")
+	|> Str.join_with(",")
+
 ref_str : Sharp.T, Str -> Str
 ref_str = |re, hay|
 	Sharp.find_all_ref(re, Str.to_utf8(hay))
@@ -135,7 +141,8 @@ run = |c0, filler| {
 				got = spans_str(re, c.hay)
 				ref = ref_str(re, c.hay)
 				ev = evict_str(re, c.hay)
-				{ ok: got == c.want and ref == c.want and ev == c.want, got: if ref == got and ev == got { got } else { "dfa=[${got}] ref=[${ref}] evict=[${ev}]" }, skipped: False }
+				th = thr_str(re, c.hay)
+				{ ok: got == c.want and ref == c.want and ev == c.want and th == c.want, got: if ref == got and ev == got and th == got { got } else { "dfa=[${got}] ref=[${ref}] evict=[${ev}] threaded=[${th}]" }, skipped: False }
 			} else if c.kind == "ends" {
 				{ ok: ends_ok(re, c.hay, c.want) and spans_str(re, c.hay) == ref_str(re, c.hay), got: "dfa=[${spans_str(re, c.hay)}] ref=[${ref_str(re, c.hay)}]", skipped: False }
 			} else if c.kind == "unsupported" {

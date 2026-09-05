@@ -315,3 +315,36 @@ Two things the differential caught:
 
 RejectBoth (140 = 4 patterns × 35): `\Bcat`, `a(?=bb)b`, `(?<=a)b|(?<=c)d`,
 `~(\ba)` — RE#'s unsupported fragment, rejected on both sides.
+
+## M4 step 0 (2026-09-05): the byte-loop scan for complete folds
+
+A complete fold is a read-only table, so `Dfa.find_all_fast` scans the
+haystack directly — ASCII through a fused byte→state table built at `freeze`,
+other symbols through `Utf8.decode`/`decode_rev` and the trie — with no
+engine record threaded and no per-call class/offset lists. Pending-nullable
+offsets are symbol counts, moved with `Utf8.advance`/`retreat`. The threaded
+scan stays for incomplete folds and the corpus cross-checks the two
+(`find_all_threaded`) on every case: 331/331; RE# differential 3430/3430.
+
+`tools/sharp-size/probe.sh`, 256 KB, `--opt=size`, ns per `find_all`:
+
+| pattern | before | after | existing `Regex` DFA (memory) |
+|---|---|---|---|
+| `Holmes` | 23.0 M | 3.5 M | prefilter path, ~0.015 M |
+| `Sherlock\|Holmes\|…` | 26.5 M | 1.8 M | ~2.3 M |
+| `[A-Za-z]+` | 58.8 M | 14.2 M | ~3.0 M |
+| `[0-9]{2,4}` | 30.2 M | 4.8 M | ~1.0 M |
+| `\bthe\b` | 23.6 M | 1.4 M | ~1.0 M |
+| `\w+\s+\w+` | 48.8 M | 12.2 M | ~2.5 M |
+| `(\w+)@(\w+)` | 24.6 M | 4.0 M | ~1.0 M |
+| `\p{L}+` | 58.9 M | 15.4 M | ~3.1 M |
+| `.*Holmes` | 28.0 M | 4.7 M | ~1.3 M |
+| `_*cat_*&_*dog_*` | 65.6 M | 18.4 M | — |
+| `~(_*\d\d_*)` | 70.0 M | 18.8 M | — |
+| `a(?=.*b)` (incomplete, threaded) | 29.7 M | 34.4 M | — |
+
+Builds also fell to ~8.5 s / ~1.0 GB (the fast path lets the compiler drop
+the threaded scan and `Ref.prepare` from a complete-fold binary). Remaining
+gap to the existing engine on dense patterns: RE#'s design sweeps the WHOLE
+haystack in reverse before any forward pass (two passes over every byte),
+and there are no accelerators yet — S13's work.

@@ -86,7 +86,7 @@ Sharp := [].{
                         match np.a.err {
                             Unsup(msg) => Err(Err.whole(src, Unsupported(msg)))
                             NoErr => {
-                                e = Dfa.freeze(Dfa.explore(Dfa.init(np.a, rts.id, np.id, Sharp.max_states(trie.n_classes))))
+                                e = Dfa.freeze(Dfa.explore(Dfa.init(np.a, rts.id, np.id, Sharp.max_states(trie.n_classes))), trie.ascii)
                                 Ok({ a: e.a, trie, root: root.id, rev: rv.id, rev_ts: rts.id, ts: ts.id, noprefix: np.id, e })
                             }
                         }
@@ -114,7 +114,20 @@ Sharp := [].{
 
     ## All non-overlapping leftmost-longest matches.
     find_all : Sharp.T, List(U8) -> List(Sharp.Span)
-    find_all = |re, hay| {
+    find_all = |re, hay|
+        if re.e.complete {
+            # a complete fold is a read-only table: the byte-loop scans
+            Dfa.find_all_fast(re.e, re.trie, hay)
+        } else {
+            h = Ref.prepare(re.trie, hay)
+            r = Dfa.find_all(re.e, h)
+            List.map(r.spans, |sp| { start: List.get(h.pos, sp.start) ?? 0, end: List.get(h.pos, sp.end) ?? 0 })
+        }
+
+    ## `find_all` on the threaded (extensible) scan regardless of completeness —
+    ## the corpus cross-checks it against the fast path
+    find_all_threaded : Sharp.T, List(U8) -> List(Sharp.Span)
+    find_all_threaded = |re, hay| {
         h = Ref.prepare(re.trie, hay)
         r = Dfa.find_all(re.e, h)
         List.map(r.spans, |sp| { start: List.get(h.pos, sp.start) ?? 0, end: List.get(h.pos, sp.end) ?? 0 })
