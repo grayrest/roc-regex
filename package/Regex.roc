@@ -254,23 +254,27 @@ Regex := [].{
         if !List.is_empty(re.prefix) {
             # memchr-style scan for the prefix's FIRST byte, then verify each
             # candidate. Leaner than a Teddy fingerprint (one eq per window, no
-            # dedup); the anchored-DFA verify filters false positives cheaply, and
-            # a common first byte trips the selectivity cap (→ DFA), so the dense
-            # case can't regress.
+            # dedup). The cap tracks the verify cost: an anchored-DFA verify
+            # rejects a false positive in a step or two (~ns), so it keeps the
+            # loose `inner_prefilter_k` gate — a selective-but-frequent first byte
+            # like Holmes's `H` (one per match, but >len/512) still prefilters
+            # rather than falling to a full DFA pass. The PikeVM verify is ~µs, so
+            # it keeps the tight `prefilter_k` gate.
             fb = List.get(re.prefix, 0) ?? 0
-            match Teddy.byte_candidates_capped(fb, hay, List.len(hay) // Regex.prefilter_k) {
-                Ok(cands) => {
-                    # verify with the anchored DFA when the engine has one (plain
-                    # prefix patterns); otherwise the PikeVM (anchor / Pike engine).
-                    verify = match re.engine {
-                        Three(d) => d.averify
-                        Pike => NoVerify
-                    }
+            verify = match re.engine {
+                Three(d) => d.averify
+                Pike => NoVerify
+            }
+            k = match verify {
+                Verify(_) => Regex.inner_prefilter_k
+                NoVerify => Regex.prefilter_k
+            }
+            match Teddy.byte_candidates_capped(fb, hay, List.len(hay) // k) {
+                Ok(cands) =>
                     match verify {
                         Verify(av) => Regex.find_all_teddy_dfa(av, re.classes, hay, cands)
                         NoVerify => Regex.find_all_teddy(Regex.base(re), hay, cands)
                     }
-                }
                 Err(_) => Regex.find_all_engine(re, hay)
             }
         } else {
