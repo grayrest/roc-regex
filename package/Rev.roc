@@ -48,7 +48,7 @@ Rev := [].{
     ## over budget; either downgrades to the PikeVM (D10). `\b`/`\B` are handled
     ## in the determinizer (word boundaries baked into the transition function
     ## over the codepoint alphabet).
-    build : Comp.Compiled, U64 -> Try({ fwd : Rev.D, rev : Rev.D, averify : [NoVerify, Verify(Rev.D)], inner : [NoInner, Inner({ lit : List(U8), lrev : Rev.D, full : Rev.D })] }, [HasLook, TooBig])
+    build : Comp.Compiled, U64 -> Try({ fwd : Rev.D, rev : Rev.D, averify : [NoVerify, Verify(Rev.D)], inner : [NoInner, Inner({ lit : List(U8), lrev : Rev.D, end : [FromStart(Rev.D), FromLit(Rev.D)] })] }, [HasLook, TooBig])
     build = |c, max_states|
         # `uprog`/`rprog` have outermost `^`/`$` stripped (Comp), so an anchor
         # remaining here is a *buried* one -> bail to the PikeVM.
@@ -91,9 +91,17 @@ Rev := [].{
                         match det(s.lrev_prog, s.lrev_splits) {
                             Err(_) => NoInner
                             Ok(lrev) =>
-                                match det(c.prog, c.splits) {
-                                    Err(_) => NoInner
-                                    Ok(full) => Inner({ lit: s.lit, lrev, full })
+                                match s.end {
+                                    EndFull =>
+                                        match det(c.prog, c.splits) {
+                                            Err(_) => NoInner
+                                            Ok(full) => Inner({ lit: s.lit, lrev, end: FromStart(full) })
+                                        }
+                                    EndRight(r) =>
+                                        match det(r.rfwd_prog, r.rfwd_splits) {
+                                            Err(_) => NoInner
+                                            Ok(rfwd) => Inner({ lit: s.lit, lrev, end: FromLit(rfwd) })
+                                        }
                                 }
                         }
                     NoInner => NoInner
@@ -123,7 +131,7 @@ Rev := [].{
         }
 
     ## Run prebuilt DFAs: leftmost-first span, or NoMatch.
-    find : { fwd : Rev.D, rev : Rev.D, averify : [NoVerify, Verify(Rev.D)], inner : [NoInner, Inner({ lit : List(U8), lrev : Rev.D, full : Rev.D })] }, Trie.T, List(U8) -> Try({ start : U64, end : U64 }, [NoMatch])
+    find : { fwd : Rev.D, rev : Rev.D, averify : [NoVerify, Verify(Rev.D)], inner : [NoInner, Inner({ lit : List(U8), lrev : Rev.D, end : [FromStart(Rev.D), FromLit(Rev.D)] })] }, Trie.T, List(U8) -> Try({ start : U64, end : U64 }, [NoMatch])
     find = |d, classes, hay| Rev.find_from(d, classes, hay, 0)
 
     ## Leftmost-first span at-or-after `at` — the iterator step for `find_all`.
@@ -134,7 +142,7 @@ Rev := [].{
     ## is `len` by definition, so we only run the reverse from `len` to find the
     ## leftmost start (>= `at`), reporting NoMatch when no match ends at `len`.
     ## An outermost `^` (`anchored`) additionally requires that start to be 0.
-    find_from : { fwd : Rev.D, rev : Rev.D, averify : [NoVerify, Verify(Rev.D)], inner : [NoInner, Inner({ lit : List(U8), lrev : Rev.D, full : Rev.D })] }, Trie.T, List(U8), U64 -> Try({ start : U64, end : U64 }, [NoMatch])
+    find_from : { fwd : Rev.D, rev : Rev.D, averify : [NoVerify, Verify(Rev.D)], inner : [NoInner, Inner({ lit : List(U8), lrev : Rev.D, end : [FromStart(Rev.D), FromLit(Rev.D)] })] }, Trie.T, List(U8), U64 -> Try({ start : U64, end : U64 }, [NoMatch])
     find_from = |d, classes, hay, at|
         if d.fwd.eoi_only {
             len = List.len(hay)

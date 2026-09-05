@@ -19,7 +19,7 @@ Regex := [].{
     ## The `engine` field records M3's outcome (D10): `Three` carries the D5
     ## forward+reverse DFAs for a look-free pattern within budget, else `Pike`.
     ## Documented-unstable.
-    T : { prog : List(U32), splits : List(U32), classes : Trie.T, n_groups : U32, prefix : List(U8), rprog : List(U32), rsplits : List(U32), uprog : List(U32), usplits : List(U32), fbytes : List(U8), frange : [NoRange, Range(U8, U8)], exact : Bool, exact_alt : Bool, tlits : List(List(U8)), word_set : U64, engine : [Pike, Three({ fwd : Rev.D, rev : Rev.D, averify : [NoVerify, Verify(Rev.D)], inner : [NoInner, Inner({ lit : List(U8), lrev : Rev.D, full : Rev.D })] })] }
+    T : { prog : List(U32), splits : List(U32), classes : Trie.T, n_groups : U32, prefix : List(U8), rprog : List(U32), rsplits : List(U32), uprog : List(U32), usplits : List(U32), fbytes : List(U8), frange : [NoRange, Range(U8, U8)], exact : Bool, exact_alt : Bool, tlits : List(List(U8)), word_set : U64, engine : [Pike, Three({ fwd : Rev.D, rev : Rev.D, averify : [NoVerify, Verify(Rev.D)], inner : [NoInner, Inner({ lit : List(U8), lrev : Rev.D, end : [FromStart(Rev.D), FromLit(Rev.D)] })] })] }
 
     ## A match, as half-open BYTE offsets into the haystack (D3, D15).
     Span : { start : U64, end : U64 }
@@ -380,9 +380,11 @@ Regex := [].{
     # reverse-inner verify: for each interior-literal candidate `p`, run the
     # reverse DFA of LEFT·lit backward from `p+litlen` (floored at the previous
     # match end). It both confirms the literal is present at `p` and yields the
-    # leftmost start `s`; the anchored full-pattern DFA from `s` then gives the
-    # leftmost-first end (greedy-correct for a variable-length LEFT).
-    find_all_inner : { lit : List(U8), lrev : Rev.D, full : Rev.D }, Trie.T, List(U8), List(U64) -> List(Regex.Span)
+    # leftmost start `s`. The end comes from `end`: `FromStart(full)` runs the
+    # anchored full-pattern DFA from `s` (greedy-correct for a variable-length
+    # LEFT); `FromLit(rfwd)` runs the anchored lit·RIGHT DFA from `p` (hard
+    # separator — the end is RIGHT-determined, so LEFT isn't re-scanned).
+    find_all_inner : { lit : List(U8), lrev : Rev.D, end : [FromStart(Rev.D), FromLit(Rev.D)] }, Trie.T, List(U8), List(U64) -> List(Regex.Span)
     find_all_inner = |inr, classes, hay, cands| {
         ncand = List.len(cands)
         len = List.len(hay)
@@ -404,8 +406,13 @@ Regex := [].{
                         Err(_) => {
                             i = i + 1
                         }
-                        Ok(s) =>
-                            match Rev.run_fwd_from(inr.full, classes, hay, s) {
+                        Ok(s) => {
+                            end_r =
+                                match inr.end {
+                                    FromStart(full) => Rev.run_fwd_from(full, classes, hay, s)
+                                    FromLit(rfwd) => Rev.run_fwd_from(rfwd, classes, hay, p)
+                                }
+                            match end_r {
                                 Err(_) => {
                                     i = i + 1
                                 }
@@ -415,6 +422,7 @@ Regex := [].{
                                     i = i + 1
                                 }
                             }
+                        }
                     }
                 }
             }
