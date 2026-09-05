@@ -130,7 +130,12 @@ Sharp := [].{
     ## `find_all` on the fast scan with every accelerator off (A/B measurement)
     find_all_plain : Sharp.T, List(U8) -> List(Sharp.Span)
     find_all_plain = |re, hay|
-        if re.e.complete { Dfa.find_all_fast(re.e, re.trie, Accel.none, hay) } else { Sharp.find_all_threaded(re, hay) }
+        if re.e.complete { Dfa.find_all_fast_opts(re.e, re.trie, Accel.none, hay, False) } else { Sharp.find_all_threaded(re, hay) }
+
+    ## `find_all` with the compile-time accelerators but no per-state skips
+    find_all_noskip : Sharp.T, List(U8) -> List(Sharp.Span)
+    find_all_noskip = |re, hay|
+        if re.e.complete { Dfa.find_all_fast_opts(re.e, re.trie, re.accel, hay, False) } else { Sharp.find_all_threaded(re, hay) }
 
     ## `find_all` on the threaded (extensible) scan regardless of completeness —
     ## the corpus cross-checks it against the fast path
@@ -182,7 +187,15 @@ Sharp := [].{
     ## the fast reverse sweep alone (profiling): match starts, accelerated or not
     match_starts_fast : Sharp.T, List(U8), Bool -> List(U64)
     match_starts_fast = |re, hay, accel|
-        Dfa.starts_fast(re.e, re.trie, if accel { re.accel.init } else { NoInit }, hay)
+        if accel { Dfa.starts_fast(re.e, re.trie, re.accel.init, hay) } else { Dfa.starts_fast_opts(re.e, re.trie, NoInit, hay, False) }
+
+    ## the reverse sweep with the prefix accelerator but no per-state skips
+    match_starts_noskip : Sharp.T, List(U8) -> List(U64)
+    match_starts_noskip = |re, hay| Dfa.starts_fast_opts(re.e, re.trie, re.accel.init, hay, False)
+
+    ## how many states of a complete fold carry a skip set (S13 diagnostics)
+    n_skip_states : Sharp.T -> U64
+    n_skip_states = |re| List.count_if(re.e.skip_ok, |x| x == 1)
 
     ## Did the fold explore every reachable state?
     is_complete : Sharp.T -> Bool

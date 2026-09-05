@@ -428,3 +428,94 @@ states, the remaining `LengthLookup` variants (SetLookup / RemainingSets /
 FixedLengthPrefixMatchEnd), and a forward-direction accelerator for the end
 pass (the dense-class patterns spend their time in two full sweeps, which no
 skip helps).
+
+## M4 accelerators, stage 2 (2026-09-05): per-state skip sets, and the loop shapes
+
+Built: RE#'s per-state startsets (`_createStartset` / `CanSkipFlag`,
+`skip_active_rev`, the forward `CanSkip`). At `freeze`, every state of a
+complete fold gets the set of minterms whose transition leaves it (for the
+initial state also not to dead); when that set is neither empty nor full and
+not too common, the state is skippable and the sweeps jump to the nearest
+byte in it. The kernel is `Bset`: nibble-table byte-set membership
+(`table_lookup` on lo/hi nibbles, 16 bytes per compare), forwards and
+backwards; a non-ASCII byte always counts as a member so a skip stops at any
+multibyte symbol and the automaton decodes it. `too_common` is RE#'s
+`CommonalityScoreSimple` weight (lowercase and whitespace 20, else 10) over
+the ASCII members, > 300 — RE#'s own test leans on .NET's `SearchValues`
+kinds, so this is ours: `[a-z]` (520) and `\w` are too common, `[A-Z]`
+(260), `\d` (100), `\s` and single letters are not.
+
+Where it pays: `~(_*\d\d_*)` (both sweeps skip to digits), `[0-9]{2,4}`,
+`.*Holmes`'s end pass (`.*` skips to `\n`/`H`), `Sherlock|Holmes|…` (the
+initial state's set is the eight capitals — RE#'s potential-start set falls
+out of the startset here). Where it does not: `_*cat_*&_*dog_*` skips to
+`t`/`g`, which are frequent enough that a 16-byte window buys about what 10
+table steps cost (RE# would skip here too, with 32-64-byte vectors).
+Incomplete folds do not skip yet (RE# computes startsets lazily per state).
+
+### Sorting the starts
+
+An always-nullable pattern has a start at every position; sorting 262k
+starts (`List.sort_with` with a closure) cost more than both sweeps. The
+reverse sweep emits starts descending except where pending nullables resolve
+out of order, so `Dfa.ascending` checks for descending order and reverses
+with dedup in one pass, sorting only otherwise. `~(_*\d\d_*)`: 8.7 → 3.4 ms.
+
+### The loop shapes (the biggest win of the milestone)
+
+With the accelerators in, `[A-Za-z]+`'s reverse sweep still took 4.6 ms for
+262k bytes — 18 ns a step for a table lookup — while a bare loop in a scratch
+app doing the same lookups and appends took 0.9 ms. Bisected with local
+copies of the loop (`revloop*.roc`):
+
+1. **Per-call cost of the engine record.** `step_rev_fast(e, …)`,
+   `is_null(e, …)`, `set_null_fast(e, …)` per step, and `end_fast(e, …)` per
+   start, each pass `Dfa.E` (~27 lists). When the compiler does not inline
+   the call, that is a record copy plus refcount traffic, ~100 ns. Binding
+   `e.atable`/`e.st_nk`/… to locals before the loop and writing the step
+   inline: reverse sweep 4.6 → 0.9 ms, end pass 4.9 → 0.5 ms.
+2. **`List.fold` closures.** The end pass as a fold over the starts copied
+   its captured environment per start: 8 ms for 262k starts. A `while` over
+   an index in the same function: 0.5 ms.
+3. **A Roc miscompile.** Mixing an inline `acc = List.append(acc, p)` with
+   `acc = set_null_fast(e, s, acc, hay, p)` (which appends inside) in one
+   `var` loop corrupted the heap — a store one past a list buffer's capacity,
+   layout-dependent (adding unused functions to the app hid it), deterministic
+   under Guard Malloc. Repro and notes in
+   `upstream/2026-09-05-sharp-var-list-append/`; reduction owed. Every append
+   in the loops is now inline; helpers return fresh lists.
+
+The `has_skip`/prefix record hoisting from stage 1 was the same phenomenon
+in miniature: a loop with the accelerator value merely in scope ran 36 ms.
+Rule adopted: hot loops are one function, tables in locals, `while` not
+fold, appends inline. `Sharp.find_all` on the 256 KB haystack is now
+validated fast-vs-threaded under Guard Malloc for twelve patterns (`gm.roc`),
+plus the corpus and the RE# differential.
+
+### Measurements (`tools/sharp-size/probe.sh`, 256 KB, `--opt=size`, ns per `find_all`)
+
+| pattern | stage 1 | stage 2 | existing `Regex` DFA |
+|---|---|---|---|
+| `Holmes` | 0.032 M | 0.118 M (0.027 at `--opt=speed`) | ~0.015 M |
+| `Sherlock\|Holmes\|…` | 1.5 M | 1.28 M | ~2.3 M |
+| `[A-Za-z]+` | 8.5 M | 2.82 M | ~3.0 M |
+| `[0-9]{2,4}` | 2.6 M | 0.65 M | ~1.0 M |
+| `\bthe\b` | 0.56 M | 0.45 M | ~1.0 M |
+| `\w+\s+\w+` | 6.6 M | 2.58 M | ~2.5 M |
+| `(\w+)@(\w+)` | 0.32 M | 0.19 M | ~1.0 M |
+| `\p{L}+` | 8.4 M | 2.69 M | ~3.1 M |
+| `.*Holmes` | 1.2 M | 0.22 M | ~1.3 M |
+| `_*cat_*&_*dog_*` | 11.6 M | 2.40 M | — |
+| `~(_*\d\d_*)` | 11.9 M | 1.97 M | — |
+| `a(?=.*b)` (incomplete, threaded) | 26.8 M | 27.4 M | — |
+
+A/B at `--opt=speed`, full / no per-state skips / no accelerators (ms):
+class_plus 2.31 / 2.23 / 2.23; compl 1.40 / 2.13 / 2.13; bounded_num
+0.54 / 0.97 / 0.99; dotstar_lit 0.18 / 0.35 / 0.84; teddy_alt 0.94 / 0.82 /
+0.82; inter 1.94 / 1.94 / 1.94; word_bound 0.89 / 0.75 / 0.99 (the skip check
+costs ~0.15 ms on this one with no skippable state — not yet understood).
+
+Still owed from S13: the threaded (incomplete-fold) path has none of this;
+`LengthLookup`'s `FixedLengthPrefixMatchEnd`/`SetLookup`/`RemainingSets`;
+RE#'s potential-start sets beyond what the initial startset gives; 32-byte
+kernels for the frequent-byte cases; the word_bound skip-check overhead.

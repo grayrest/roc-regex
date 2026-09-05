@@ -11,6 +11,7 @@
 ## codepoint, or one `Invalid` symbol per malformed run, is one step, which is
 ## what the lookahead `rel` counters count. Spans convert to bytes at the end.
 import Arena
+import Bset
 import Build
 import Deriv
 import Lit
@@ -46,6 +47,12 @@ Dfa := [].{
         runtime_cap : U64,
         # complete folds only: fused ASCII byte -> next state, `state * 128 + byte`
         atable : List(U32),
+        # complete folds only (RE#'s per-state startsets / `CanSkipFlag`): for
+        # state `s`, `skip_ok[s] == 1` says the bytes that change the state form
+        # a rare enough set that a scan in `s` can skip to the nearest one;
+        # `skip_lo` holds its `Bset` table at `s * 16`
+        skip_ok : List(U8),
+        skip_lo : List(U8),
     }
 
     dead : U32
@@ -85,7 +92,7 @@ Dfa := [].{
             st_node: [0], st_flags: [0], st_nk: [Dfa.nk_notnull], st_pend: [0], st_minpend: [0],
             node_state: [], table: List.repeat(0.U32, a.nmt.to_u64()), end_table: List.repeat(0.U32, a.nmt.to_u64()),
             s_rev_ts: 0, s_noprefix: 0, max_states, complete: True,
-            fold_states: 0, fold_marks: Arena.marks(a), runtime_cap: Dfa.default_runtime_cap, atable: [],
+            fold_states: 0, fold_marks: Arena.marks(a), runtime_cap: Dfa.default_runtime_cap, atable: [], skip_ok: [], skip_lo: [],
         }
         d = Dfa.get_state(e0, Arena.bot, False)
         r1 = Dfa.get_state(d.e, rev_ts, True)
@@ -114,7 +121,27 @@ Dfa := [].{
             } else {
                 []
             }
-        { ..e, fold_states: n, fold_marks: Arena.marks(e.a), atable }
+        sk = if e.complete { Dfa.skip_sets(e, ascii, n) } else { { ok: [], lo: [] } }
+        { ..e, fold_states: n, fold_marks: Arena.marks(e.a), atable, skip_ok: sk.ok, skip_lo: sk.lo }
+    }
+
+    # RE#'s `_createStartset` for every state of a complete fold: the minterms
+    # whose transition leaves the state (for the initial state, also not to
+    # dead) as an ASCII byte set; skippable when neither empty nor full and not
+    # too common. Non-ASCII bytes stop a skip regardless (`Bset`).
+    skip_sets : Dfa.E, List(U32), U64 -> { ok : List(U8), lo : List(U8) }
+    skip_sets = |e, ascii, n| {
+        nmt = e.nmt.to_u64()
+        List.fold(Arena.upto(n), { ok: [], lo: [] }, |acc, s| {
+            initial = s == e.s_rev_ts.to_u64()
+            ss = List.fold(Arena.upto(nmt), 0, |ts, m| {
+                d = (List.get(e.table, s * nmt + m) ?? 0).to_u64()
+                if d != s and (!initial or d != Dfa.dead.to_u64()) { TSet.union(ts, TSet.bit(m.to_u32_wrap())) } else { ts }
+            })
+            bytes = List.keep_if(Arena.upto(128), |b| TSet.contains(ss, List.get(ascii, b) ?? 0)) |> List.map(|b| b.to_u8_wrap())
+            usable = s > Dfa.dead.to_u64() and ss != 0 and ss != TSet.full(e.nmt) and !Bset.too_common(bytes)
+            { ok: List.append(acc.ok, if usable { 1 } else { 0 }), lo: List.concat(acc.lo, Bset.table(bytes)) }
+        })
     }
 
     ## Drop every state and node minted since the fold, keeping only the node of
@@ -493,6 +520,33 @@ Dfa := [].{
         { e: fin.e, spans: fin.spans }
     }
 
+    ## The reverse sweep emits starts in descending order except where pending
+    ## nullables (lookaheads) resolve out of order, so: reverse and dedup in one
+    ## pass when already descending, sort otherwise. An always-nullable pattern
+    ## has a start at every position, and sorting those dominated its scan.
+    ascending : List(U64) -> List(U64)
+    ascending = |sts| {
+        n = List.len(sts)
+        var i = 1
+        var desc = True
+        while desc and i < n {
+            desc = (List.get(sts, i) ?? 0) <= (List.get(sts, i - 1) ?? 0)
+            i = i + 1
+        }
+        if desc {
+            var out = List.with_capacity(n)
+            var j = n
+            while j > 0 {
+                j = j - 1
+                v = List.get(sts, j) ?? 0
+                out = if j + 1 < n and (List.get(sts, j + 1) ?? 0) == v { out } else { List.append(out, v) }
+            }
+            out
+        } else {
+            sts |> List.sort_with(|x, y| U64.order_relative_to(x, y)) |> Dfa.dedup
+        }
+    }
+
     dedup : List(U64) -> List(U64)
     dedup = |xs| List.fold(xs, [], |acc, x| if List.last(acc) == Ok(x) { acc } else { List.append(acc, x) })
 
@@ -511,30 +565,110 @@ Dfa := [].{
 
     ## RE#'s llmatch on a complete fold, as byte spans
     find_all_fast : Dfa.E, Trie.T, Dfa.Accels, List(U8) -> List({ start : U64, end : U64 })
-    find_all_fast = |e, t, ac, hay|
+    find_all_fast = |e, t, ac, hay| Dfa.find_all_fast_opts(e, t, ac, hay, True)
+
+    ## `skip` turns the per-state skip sets off (A/B measurement)
+    find_all_fast_opts : Dfa.E, Trie.T, Dfa.Accels, List(U8), Bool -> List({ start : U64, end : U64 })
+    find_all_fast_opts = |e, t, ac, hay, skip|
         match ac.override {
             Literal(lit) => Dfa.find_all_literal(hay, lit)
             NoOverride => {
-                sts = Dfa.starts_fast(e, t, ac.init, hay) |> List.sort_with(|x, y| U64.order_relative_to(x, y)) |> Dfa.dedup
-                fin = List.fold(sts, { spans: [], next_valid: 0 }, |acc, s|
-                    if s < acc.next_valid {
-                        acc
-                    } else {
-                        end =
-                            match ac.len {
-                                FixedLength(n) => Ok(Utf8.advance(hay, s, n.to_u64()))
-                                MatchEnd => Dfa.end_fast(e, t, hay, s)
-                            }
-                        match end {
-                            Ok(en) => { spans: List.append(acc.spans, { start: s, end: en }), next_valid: en }
-                            Err(_) => acc
-                        }
-                    })
-                fin.spans
+                sts = Dfa.starts_fast_opts(e, t, ac.init, hay, skip) |> Dfa.ascending
+                Dfa.ends_fast(e, t, ac.len, hay, sts, skip)
             }
         }
 
-    # the pattern is exactly `lit`: a forward literal search (RE#'s FixedLengthString)
+    ## The forward end pass over ascending starts (RE#'s `llmatch_ends`): a
+    ## start inside the previous match is dropped, every other start gets the
+    ## longest end from `s_noprefix`. One function, `while` loops, tables bound
+    ## once: calling `end_fast` per start passed the engine record each time
+    ## (4.9 ms against 0.5 ms for 40k matches), and a `List.fold` closure over
+    ## the starts copied its captured environment per start (8 ms for 262k).
+    ends_fast : Dfa.E, Trie.T, Dfa.Len, List(U8), List(U64), Bool -> List({ start : U64, end : U64 })
+    ends_fast = |e, t, len, hay, sts, skip| {
+        n = List.len(hay)
+        at = e.atable
+        nks = e.st_nk
+        skip_ok = e.skip_ok
+        skip_lo = e.skip_lo
+        table = e.table
+        nmt = e.nmt.to_u64()
+        s_np = e.s_noprefix
+        is_fixed = match len { FixedLength(_) => True, MatchEnd => False }
+        fixed = match len { FixedLength(k) => k.to_u64(), MatchEnd => 0 }
+        n_sts = List.len(sts)
+        var spans = []
+        var next_valid = 0
+        var i = 0
+        while i < n_sts {
+            start = List.get(sts, i) ?? 0
+            i = i + 1
+            if start < next_valid {
+                {}
+            } else if is_fixed {
+                en = Utf8.advance(hay, start, fixed)
+                spans = List.append(spans, { start, end: en })
+                next_valid = en
+            } else if start >= n {
+                match Dfa.at_eoi_fast(e, s_np, hay, n, Err(NoEnd)) {
+                    Ok(en) => {
+                        spans = List.append(spans, { start, end: en })
+                        next_valid = en
+                    }
+                    Err(_) => {}
+                }
+            } else {
+                var pos = start
+                var s = s_np
+                var best = Err(NoEnd)
+                while s != Dfa.dead {
+                    b0 = List.get(hay, pos) ?? 0
+                    # RE#'s forward `CanSkip`: the state loops on every byte up to the
+                    # nearest member; the last such position is the best end, so jump
+                    # there (never past the last byte: the regular step then reaches
+                    # the end-of-input handling)
+                    if skip and (List.get(skip_ok, s.to_u64()) ?? 0) == 1 and !Bset.member(skip_lo, s.to_u64(), b0) {
+                        pos =
+                            match Bset.find(hay, skip_lo, s.to_u64(), pos + 1) {
+                                Ok(p) => p
+                                Err(_) => n - 1
+                            }
+                    }
+                    k = List.get(nks, s.to_u64()) ?? Dfa.nk_notnull
+                    if k == Dfa.nk_current {
+                        best = Ok(pos)
+                    } else if k == Dfa.nk_prev {
+                        best = Ok(Utf8.retreat(hay, pos, 1))
+                    } else if k != Dfa.nk_notnull {
+                        best = Dfa.null_fallback_fast(e, s, hay, pos, best)
+                    }
+                    b = List.get(hay, pos) ?? 0
+                    if b < 0x80 {
+                        s = List.get(at, s.to_u64() * 128 + b.to_u64()) ?? Dfa.dead
+                        pos = pos + 1
+                    } else {
+                        d = Utf8.decode(hay, pos)
+                        cls = if d.ok { Trie.class_of(t, d.cp) } else { t.invalid }
+                        s = List.get(table, s.to_u64() * nmt + cls.to_u64()) ?? Dfa.dead
+                        pos = pos + d.len
+                    }
+                    if pos >= n {
+                        best = Dfa.at_eoi_fast(e, s, hay, n, best)
+                        s = Dfa.dead
+                    }
+                }
+                match best {
+                    Ok(en) => {
+                        spans = List.append(spans, { start, end: en })
+                        next_valid = en
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+        spans
+    }
+
     find_all_literal : List(U8), List(U8) -> List({ start : U64, end : U64 })
     find_all_literal = |hay, lit| {
         plen = List.len(lit)
@@ -563,7 +697,10 @@ Dfa := [].{
 
     ## the reverse sweep on a complete fold: match-start byte offsets
     starts_fast : Dfa.E, Trie.T, Dfa.Init, List(U8) -> List(U64)
-    starts_fast = |e, t, ini, hay| {
+    starts_fast = |e, t, ini, hay| Dfa.starts_fast_opts(e, t, ini, hay, True)
+
+    starts_fast_opts : Dfa.E, Trie.T, Dfa.Init, List(U8), Bool -> List(U64)
+    starts_fast_opts = |e, t, ini, hay, skip| {
         n = List.len(hay)
         if n == 0 {
             if Deriv.nullable(e.a, Deriv.loc_both, Dfa.st_node_of(e, e.s_rev_ts)) { [0] } else { [] }
@@ -604,48 +741,205 @@ Dfa := [].{
                         { s: s1, pos, acc: acc1 }
                     }
                 }
-            col = Dfa.collect_fast(e, t, ini, hay, st.pos, st.s, st.acc)
+            col = Dfa.collect_fast(e, t, ini, hay, st.pos, st.s, st.acc, skip)
             Dfa.start_fast(e, col.s, col.acc, hay)
         }
     }
 
     # `collect_skip`: in the start state, a required prefix lets the sweep jump
     # to the prefix's last occurrence and land in the state it leads to (RE#'s
-    # `TrySkipInitialRevChar`); no match can start in the skipped stretch. The
-    # skip parameters are hoisted out of the loop: matching on the accelerator
-    # value per iteration doubled the scan time of patterns without one.
-    collect_fast : Dfa.E, Trie.T, Dfa.Init, List(U8), U64, U32, List(U64) -> { s : U32, acc : List(U64) }
-    collect_fast = |e, t, ini, hay, pos0, s0, acc0| {
-        has_skip = match ini { Prefix(_) => True, NoInit => False }
-        pf = match ini { Prefix(p) => p, NoInit => { sets: [], anchor: 0, anchor_byte: 0, state: 0 } }
-        start_state = e.s_rev_ts
+    # `TrySkipInitialRevChar`); no match can start in the skipped stretch. In
+    # any state with a skip set, the sweep jumps to the nearest byte that
+    # changes the state (RE#'s `skip_active_rev`).
+    #
+    # The two loops are separate functions with nothing but scalars and the
+    # lists they read alive: a single loop that matched on the accelerator
+    # value, or merely had the prefix record in scope, ran 4-35x slower
+    # (measured 4.6 ms and 36 ms against 1.1 ms for 256 KB of `[A-Za-z]+`).
+    collect_fast : Dfa.E, Trie.T, Dfa.Init, List(U8), U64, U32, List(U64), Bool -> { s : U32, acc : List(U64) }
+    collect_fast = |e, t, ini, hay, pos0, s0, acc0, skip|
+        match ini {
+            NoInit => Dfa.collect_plain(e, t, hay, pos0, s0, acc0, skip)
+            Prefix(pf) => Dfa.collect_prefix(e, t, pf, hay, pos0, s0, acc0, skip)
+        }
+
+    collect_plain : Dfa.E, Trie.T, List(U8), U64, U32, List(U64), Bool -> { s : U32, acc : List(U64) }
+    collect_plain = |e, t, hay, pos0, s0, acc0, skip| {
+        # The tables the loop reads are bound once, and every append to `acc`
+        # is written out in this function: passing the engine record to a
+        # helper per step cost 4-5x, and mixing inline appends with appends
+        # inside a helper that took `acc` corrupted the heap (a Roc
+        # miscompile, see upstream/2026-09-05-sharp-var-list-append).
+        at = e.atable
+        nks = e.st_nk
+        skip_ok = e.skip_ok
+        skip_lo = e.skip_lo
+        table = e.table
+        nmt = e.nmt.to_u64()
         var pos = pos0
         var s = s0
         var acc = acc0
         while pos > 0 {
-            if has_skip and s == start_state {
-                match Rlit.rfind_sets(hay, t, pf, pos) {
-                    Ok(start) => {
-                        pos = start
-                        s = pf.state
+            b = List.get(hay, pos - 1) ?? 0
+            if skip and (List.get(skip_ok, s.to_u64()) ?? 0) == 1 and !Bset.member(skip_lo, s.to_u64(), b) {
+                # RE#'s `skip_active_rev`: the state loops on every byte back to
+                # the nearest member, so each skipped position (all ASCII, one
+                # byte per symbol) is a match start when the state is nullable
+                np =
+                    match Bset.rfind(hay, skip_lo, s.to_u64(), pos - 1) {
+                        Ok(p) => p + 1
+                        Err(_) => 0
                     }
-                    Err(_) => {
-                        pos = 0
+                k = List.get(nks, s.to_u64()) ?? Dfa.nk_notnull
+                if k != Dfa.nk_notnull {
+                    var p = pos
+                    while p > np {
+                        p = p - 1
+                        if k == Dfa.nk_current {
+                            acc = List.append(acc, p)
+                        } else if k == Dfa.nk_prev {
+                            acc = List.append(acc, Utf8.advance(hay, p, 1))
+                        } else {
+                            extra = Dfa.pend_positions(e, s, hay, p)
+                            var j = 0
+                            while j < List.len(extra) {
+                                acc = List.append(acc, List.get(extra, j) ?? 0)
+                                j = j + 1
+                            }
+                        }
                     }
                 }
+                pos = np
             } else {
-                r = Dfa.step_rev_fast(e, t, hay, s, pos)
-                s = r.s
-                pos = r.cs
-            }
-            if Dfa.is_null(e, s) {
-                acc = Dfa.set_null_fast(e, s, acc, hay, pos)
+                if b < 0x80 {
+                    s = List.get(at, s.to_u64() * 128 + b.to_u64()) ?? Dfa.dead
+                    pos = pos - 1
+                } else {
+                    d = Utf8.decode_rev(hay, pos)
+                    cls = if d.ok { Trie.class_of(t, d.cp) } else { t.invalid }
+                    s = List.get(table, s.to_u64() * nmt + cls.to_u64()) ?? Dfa.dead
+                    pos = d.cs
+                }
+                k = List.get(nks, s.to_u64()) ?? Dfa.nk_notnull
+                if k == Dfa.nk_current {
+                    acc = List.append(acc, pos)
+                } else if k == Dfa.nk_prev {
+                    acc = List.append(acc, Utf8.advance(hay, pos, 1))
+                } else if k != Dfa.nk_notnull {
+                    extra = Dfa.pend_positions(e, s, hay, pos)
+                    var j = 0
+                    while j < List.len(extra) {
+                        acc = List.append(acc, List.get(extra, j) ?? 0)
+                        j = j + 1
+                    }
+                }
             }
         }
         { s, acc }
     }
 
-    # `HandleInputStart` at byte 0
+    collect_prefix : Dfa.E, Trie.T, Rlit.Prefix, List(U8), U64, U32, List(U64), Bool -> { s : U32, acc : List(U64) }
+    collect_prefix = |e, t, pf, hay, pos0, s0, acc0, skip| {
+        at = e.atable
+        nks = e.st_nk
+        skip_ok = e.skip_ok
+        skip_lo = e.skip_lo
+        table = e.table
+        nmt = e.nmt.to_u64()
+        start_state = e.s_rev_ts
+        land = pf.state
+        var pos = pos0
+        var s = s0
+        var acc = acc0
+        while pos > 0 {
+            if s == start_state {
+                match Rlit.rfind_sets(hay, t, pf, pos) {
+                    Ok(start) => {
+                        pos = start
+                        s = land
+                    }
+                    Err(_) => {
+                        pos = 0
+                    }
+                }
+                k = List.get(nks, s.to_u64()) ?? Dfa.nk_notnull
+                if k == Dfa.nk_current {
+                    acc = List.append(acc, pos)
+                } else if k == Dfa.nk_prev {
+                    acc = List.append(acc, Utf8.advance(hay, pos, 1))
+                } else if k != Dfa.nk_notnull {
+                    extra = Dfa.pend_positions(e, s, hay, pos)
+                    var j = 0
+                    while j < List.len(extra) {
+                        acc = List.append(acc, List.get(extra, j) ?? 0)
+                        j = j + 1
+                    }
+                }
+            } else {
+                b = List.get(hay, pos - 1) ?? 0
+                if skip and (List.get(skip_ok, s.to_u64()) ?? 0) == 1 and !Bset.member(skip_lo, s.to_u64(), b) {
+                    # RE#'s `skip_active_rev`: the state loops on every byte back to
+                    # the nearest member, so each skipped position (all ASCII, one
+                    # byte per symbol) is a match start when the state is nullable
+                    np =
+                        match Bset.rfind(hay, skip_lo, s.to_u64(), pos - 1) {
+                            Ok(p) => p + 1
+                            Err(_) => 0
+                        }
+                    k = List.get(nks, s.to_u64()) ?? Dfa.nk_notnull
+                    if k != Dfa.nk_notnull {
+                        var p = pos
+                        while p > np {
+                            p = p - 1
+                            if k == Dfa.nk_current {
+                                acc = List.append(acc, p)
+                            } else if k == Dfa.nk_prev {
+                                acc = List.append(acc, Utf8.advance(hay, p, 1))
+                            } else {
+                                extra = Dfa.pend_positions(e, s, hay, p)
+                                var j = 0
+                                while j < List.len(extra) {
+                                    acc = List.append(acc, List.get(extra, j) ?? 0)
+                                    j = j + 1
+                                }
+                            }
+                        }
+                    }
+                    pos = np
+                } else {
+                    if b < 0x80 {
+                        s = List.get(at, s.to_u64() * 128 + b.to_u64()) ?? Dfa.dead
+                        pos = pos - 1
+                    } else {
+                        d = Utf8.decode_rev(hay, pos)
+                        cls = if d.ok { Trie.class_of(t, d.cp) } else { t.invalid }
+                        s = List.get(table, s.to_u64() * nmt + cls.to_u64()) ?? Dfa.dead
+                        pos = d.cs
+                    }
+                    k = List.get(nks, s.to_u64()) ?? Dfa.nk_notnull
+                    if k == Dfa.nk_current {
+                        acc = List.append(acc, pos)
+                    } else if k == Dfa.nk_prev {
+                        acc = List.append(acc, Utf8.advance(hay, pos, 1))
+                    } else if k != Dfa.nk_notnull {
+                        extra = Dfa.pend_positions(e, s, hay, pos)
+                        var j = 0
+                        while j < List.len(extra) {
+                            acc = List.append(acc, List.get(extra, j) ?? 0)
+                            j = j + 1
+                        }
+                    }
+                }
+            }
+        }
+        { s, acc }
+    }
+
+    ## the positions a pending-nullable state marks at `pos` (fresh list)
+    pend_positions : Dfa.E, U32, List(U8), U64 -> List(U64)
+    pend_positions = |e, s, hay, pos|
+        Dfa.add_pairs_fast([], Arena.rs_get(e.a, List.get(e.st_pend, s.to_u64()) ?? 0), hay, pos)
+
     start_fast : Dfa.E, U32, List(U64), List(U8) -> List(U64)
     start_fast = |e, s, acc, hay| {
         node = Dfa.st_node_of(e, s)
@@ -699,27 +993,52 @@ Dfa := [].{
 
     ## the forward end pass on a complete fold, from byte offset `start`
     end_fast : Dfa.E, Trie.T, List(U8), U64 -> Try(U64, [NoEnd])
-    end_fast = |e, t, hay, start| {
+    end_fast = |e, t, hay, start| Dfa.end_fast_opts(e, t, hay, start, True)
+
+    end_fast_opts : Dfa.E, Trie.T, List(U8), U64, Bool -> Try(U64, [NoEnd])
+    end_fast_opts = |e, t, hay, start, skip| {
         n = List.len(hay)
         if start >= n {
             Dfa.at_eoi_fast(e, e.s_noprefix, hay, n, Err(NoEnd))
         } else {
+            at = e.atable
+            nks = e.st_nk
+            skip_ok = e.skip_ok
+            skip_lo = e.skip_lo
+            table = e.table
+            nmt = e.nmt.to_u64()
             var pos = start
             var s = e.s_noprefix
             var best = Err(NoEnd)
             while s != Dfa.dead {
-                if Dfa.is_null(e, s) {
-                    k = Dfa.nk(e, s)
-                    best = if k == Dfa.nk_current { Ok(pos) } else if k == Dfa.nk_prev { Ok(Utf8.retreat(hay, pos, 1)) } else { Dfa.null_fallback_fast(e, s, hay, pos, best) }
+                b0 = List.get(hay, pos) ?? 0
+                # RE#'s forward `CanSkip`: the state loops on every byte up to the
+                # nearest member; the last such position is the best end, so jump
+                # there (never past the last byte: the regular step then reaches
+                # the end-of-input handling)
+                if skip and (List.get(skip_ok, s.to_u64()) ?? 0) == 1 and !Bset.member(skip_lo, s.to_u64(), b0) {
+                    pos =
+                        match Bset.find(hay, skip_lo, s.to_u64(), pos + 1) {
+                            Ok(p) => p
+                            Err(_) => n - 1
+                        }
+                }
+                k = List.get(nks, s.to_u64()) ?? Dfa.nk_notnull
+                if k == Dfa.nk_current {
+                    best = Ok(pos)
+                } else if k == Dfa.nk_prev {
+                    best = Ok(Utf8.retreat(hay, pos, 1))
+                } else if k != Dfa.nk_notnull {
+                    best = Dfa.null_fallback_fast(e, s, hay, pos, best)
                 }
                 b = List.get(hay, pos) ?? 0
                 if b < 0x80 {
-                    s = List.get(e.atable, s.to_u64() * 128 + b.to_u64()) ?? Dfa.dead
+                    s = List.get(at, s.to_u64() * 128 + b.to_u64()) ?? Dfa.dead
                     pos = pos + 1
                 } else {
                     d = Utf8.decode(hay, pos)
                     cls = if d.ok { Trie.class_of(t, d.cp) } else { t.invalid }
-                    s = List.get(e.table, s.to_u64() * e.nmt.to_u64() + cls.to_u64()) ?? Dfa.dead
+                    s = List.get(table, s.to_u64() * nmt + cls.to_u64()) ?? Dfa.dead
                     pos = pos + d.len
                 }
                 if pos >= n {
