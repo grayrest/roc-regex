@@ -270,6 +270,18 @@ divergences are now understood; both are RE# bugs to report upstream.
   with a generic `step` on a threaded record, no fused ASCII table, no
   accelerators. M4's job.
 
+- **Unknown 3 (the engine is DCE'd from a complete-fold binary):** yes,
+  once the fast path exists (M4 step 0): a complete fold's binary is 410 KB
+  (`Holmes`) to 1.25 MB (`\bthe\b`, Unicode `\w` tables) against 1.73 MB for
+  the incomplete `a(?=.*b)`, which keeps the threaded scan, the derivative
+  code and the arena constructors. Before M4 step 0 every binary carried them
+  (1.29–1.78 MB above).
+- **Unknown 5 (a right-to-left SIMD kernel):** works — `Rlit.rfind_byte`
+  (one `eq_lanes`/`to_bitmask` per 16-byte window, highest lane by
+  `count_leading_zero_bits`) finds all 1157 `@` in 256 KB in 22 µs;
+  `Bset.rfind` does the same for byte sets with two `table_lookup`s per
+  window. Both measured under M4 stages 1 and 2.
+
 ### Owed upstream
 
 - `roc build` exits non-zero on warnings; `tools/sharp-size/probe.sh` judges
