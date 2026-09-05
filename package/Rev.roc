@@ -31,7 +31,11 @@ Rev := [].{
     ## for <=64-state DFAs, so the scan tests acceptance with a register shift-mask
     ## instead of a list load; `accept_bits_invalid` marks a DFA too large for it
     ## (the scan then reads `accept_eoi`). Valid exactly when `atable` is non-empty.
-    D : { table : List(U32), atable : List(U32), accept_bits : U64, accept_on : List(U8), accept_eoi : List(U8), nc : U32, eoi_only : Bool, anchored : Bool }
+    ## `inline_start` (forward D only): the pattern is a single-class run, so the
+    ## forward scan can recover the match start itself (last exit from the start
+    ## state) and the reverse start-scan is skipped. Set from `Comp` in `build`;
+    ## the determinizers default it False.
+    D : { table : List(U32), atable : List(U32), accept_bits : U64, accept_on : List(U8), accept_eoi : List(U8), nc : U32, eoi_only : Bool, anchored : Bool, inline_start : Bool }
 
     ## Build both DFAs at compile time (folds when the pattern is constant), or
     ## say why not. `HasLook` -> `^`/`$` assertions (still PikeVM); `TooBig` ->
@@ -94,7 +98,7 @@ Rev := [].{
                     # the outermost-anchor constraints ride on the forward D only
                     match det(c.rprog, c.rsplits) {
                         Err(_) => Err(TooBig)
-                        Ok(rev) => Ok({ fwd: { ..fwd0, eoi_only: c.accept_eoi_only, anchored: c.anchored_start }, rev, averify, inner })
+                        Ok(rev) => Ok({ fwd: { ..fwd0, eoi_only: c.accept_eoi_only, anchored: c.anchored_start, inline_start: c.inline_start }, rev, averify, inner })
                     }
             }
         }
@@ -136,6 +140,12 @@ Rev := [].{
                     Ok(start) => if d.fwd.anchored and start != 0 { Err(NoMatch) } else { Ok({ start, end: len }) }
                 }
             }
+        } else if d.fwd.inline_start and !(List.is_empty(d.fwd.atable)) {
+            # single-class run: the forward pass recovers the start (last exit from
+            # the start state), so no reverse scan. Sound only for this pattern
+            # shape (see Comp.inline_start_ok). Requires the fused table (thus a
+            # valid accept bitset), which a class run always has.
+            Rev.run_fwd_span(d.fwd, classes, hay, at)
         } else {
             match Rev.run_fwd_from(d.fwd, classes, hay, at) {
                 Err(_) => Err(NoMatch)
@@ -164,7 +174,7 @@ Rev := [].{
                 # and the accept bitset are valid together (a match state's id
                 # must fit in the U64). Larger DFAs fall back to the class path.
                 atable = if n_states <= 64 { Rev.fuse_ascii(st.table, classes.ascii, nc.to_u64(), n_states) } else { [] }
-                Ok({ table: st.table, atable, accept_bits: Rev.accept_bitset(st.hit, n_states), accept_on: [], accept_eoi: st.hit, nc, eoi_only: False, anchored: False })
+                Ok({ table: st.table, atable, accept_bits: Rev.accept_bitset(st.hit, n_states), accept_on: [], accept_eoi: st.hit, nc, eoi_only: False, anchored: False, inline_start: False })
             }
         }
     }
@@ -245,7 +255,7 @@ Rev := [].{
         ciw = List.map(Rev.upto(nc.to_u64()), |a| Trie.accepts_atom(classes, word_set.to_u32_wrap(), a.to_u32_wrap()))
         match Rev.explore_wb(prog, splits, classes, nc, ciw, max_states, [s0f, s0t], { table: [], acc_on: [], acc_eoi: [], smap: [s0f, s0t], next: 2 }) {
             Err(e) => Err(e)
-            Ok(st) => Ok({ table: st.table, atable: [], accept_bits: Rev.accept_bits_invalid, accept_on: st.acc_on, accept_eoi: st.acc_eoi, nc, eoi_only: False, anchored: False })
+            Ok(st) => Ok({ table: st.table, atable: [], accept_bits: Rev.accept_bits_invalid, accept_on: st.acc_on, accept_eoi: st.acc_eoi, nc, eoi_only: False, anchored: False, inline_start: False })
         }
     }
 
@@ -426,6 +436,50 @@ Rev := [].{
     run_fwd : Rev.D, Trie.T, List(U8) -> Try(U64, [NoMatch])
     run_fwd = |d, classes, hay|
         if Rev.is_wb(d) { Rev.fwd_wb(d, classes, hay, 0, 0, Err(NoMatch)) } else { Rev.fwd(d, classes, hay, 0, 0, Err(NoMatch)) }
+
+    # Forward scan that yields BOTH ends of the leftmost match in one pass, so no
+    # reverse start-scan is needed. `mstart` tracks the start of the current match
+    # attempt: it is (re)armed to the current position on every transition OUT of
+    # the start state (0), which is where an attempt commits; a failing attempt
+    # falls back to state 0 and the next exit re-arms it. Sound ONLY for the
+    # single-class-run shape gated in `find_from` — there, a byte either extends
+    # the run or ends it cleanly back to state 0, so there is no mid-run restart at
+    # a later offset (the case that breaks this for alternations). Fused path only
+    # (atable + accept_bits), which a class run always has.
+    run_fwd_span : Rev.D, Trie.T, List(U8), U64 -> Try({ start : U64, end : U64 }, [NoMatch])
+    run_fwd_span = |d, classes, hay, at|
+        Rev.fwd_span(d, classes, hay, at, at, 0, Err(NoMatch))
+
+    fwd_span : Rev.D, Trie.T, List(U8), U64, U64, U32, Try({ start : U64, end : U64 }, [NoMatch]) -> Try({ start : U64, end : U64 }, [NoMatch])
+    fwd_span = |d, classes, hay, pos, mstart, state, best| {
+        best2 = if d.accept_bits.shr_wrap(state.to_u8_wrap()).bitwise_and(1) == 1 { Ok({ start: mstart, end: pos }) } else { best }
+        if pos >= List.len(hay) {
+            best2
+        } else {
+            b0 = List.get(hay, pos) ?? 0
+            if b0 < 0x80 {
+                nxt = List.get(d.atable, state.to_u64() * 128 + b0.to_u64()) ?? 0
+                if nxt == 0 {
+                    best2
+                } else {
+                    ns = nxt - 1
+                    ms = if state == 0 and ns != 0 { pos } else { mstart }
+                    Rev.fwd_span(d, classes, hay, pos + 1, ms, ns, best2)
+                }
+            } else {
+                dec = Comp.decode(hay, pos)
+                cls = Trie.class_of(classes, dec.cp)
+                nxt = List.get(d.table, state.to_u64() * d.nc.to_u64() + cls.to_u64()) ?? 0
+                if nxt == 0 {
+                    best2
+                } else {
+                    ns = nxt - 1
+                    ms = if state == 0 and ns != 0 { pos } else { mstart }
+                    Rev.fwd_span(d, classes, hay, pos + dec.len, ms, ns, best2)
+                }
+            }
+        }
+    }
 
     # forward end-scan starting at `at`. Terminates at the leftmost match's end:
     # the leftmost-first determinizer truncates the lazy dot-star closure at the

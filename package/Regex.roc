@@ -171,7 +171,7 @@ Regex := [].{
     # `anchored_start`/`accept_eoi_only` matter only to the DFA build (they are
     # baked into the engine there); the PikeVM view keeps the anchors in `prog`,
     # so they default to False here.
-    base = |re| { prog: re.prog, splits: re.splits, classes: re.classes, n_groups: re.n_groups, prefix: re.prefix, rprog: re.rprog, rsplits: re.rsplits, uprog: re.uprog, usplits: re.usplits, fbytes: re.fbytes, frange: re.frange, exact: re.exact, tlits: re.tlits, word_set: re.word_set, anchored_start: False, accept_eoi_only: False, inner: NoInner }
+    base = |re| { prog: re.prog, splits: re.splits, classes: re.classes, n_groups: re.n_groups, prefix: re.prefix, rprog: re.rprog, rsplits: re.rsplits, uprog: re.uprog, usplits: re.usplits, fbytes: re.fbytes, frange: re.frange, exact: re.exact, inline_start: False, tlits: re.tlits, word_set: re.word_set, anchored_start: False, accept_eoi_only: False, inner: NoInner }
 
 
     ## --- iteration and rewriting (D15, D14) ---------------------------------
