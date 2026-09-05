@@ -245,6 +245,23 @@ Regex := [].{
     inner_prefilter_k : U64
     inner_prefilter_k = 4
 
+    # Candidate scan for a required literal prefix. A multi-byte prefix uses a
+    # Teddy fingerprint (m<=3 bytes) so candidates ~= actual literal occurrences
+    # rather than every position of a common first byte — e.g. `\bthe\b` (prefix
+    # "the") scans the "the" fingerprint (~2.4k) instead of every `t` (~18k). A
+    # single-byte prefix, or an unsuitable Teddy, keeps the leaner first-byte
+    # memchr.
+    prefix_candidates : List(U8), List(U8), U64 -> Try(List(U64), [TooMany])
+    prefix_candidates = |prefix, hay, cap|
+        if List.len(prefix) >= 2 {
+            match Teddy.build([prefix]) {
+                Ok(t) => Teddy.candidates_capped(t, hay, cap)
+                Err(_) => Teddy.byte_candidates_capped(List.get(prefix, 0) ?? 0, hay, cap)
+            }
+        } else {
+            Teddy.byte_candidates_capped(List.get(prefix, 0) ?? 0, hay, cap)
+        }
+
     find_all : Regex.T, List(U8) -> List(Regex.Span)
     find_all = |re, hay|
         # With a required literal prefix, SIMD-scan for candidates and verify each
@@ -277,7 +294,7 @@ Regex := [].{
                     Verify(_) => Regex.inner_prefilter_k
                     NoVerify => Regex.prefilter_k
                 }
-                match Teddy.byte_candidates_capped(fb, hay, List.len(hay) // k) {
+                match Regex.prefix_candidates(re.prefix, hay, List.len(hay) // k) {
                     Ok(cands) =>
                         match verify {
                             Verify(av) => Regex.find_all_teddy_dfa(av, re.classes, hay, cands)

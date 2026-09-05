@@ -982,14 +982,29 @@ Comp := [
     prefix_cat = |xs, acc|
         match List.first(xs) {
             Err(_) => acc
-            Ok(x) => {
-                b = Comp.lit_prefix_node(x)
-                if List.is_empty(b) {
-                    acc
+            Ok(x) =>
+                # A leading `\b`/`\B` is zero-width and does not move the match
+                # start, so skip it and keep gathering the literal — `\bthe\b` then
+                # yields prefix "the", which the prefilter scans and the anchored
+                # wb verify DFA confirms (checking the boundary). `^`/`$` are NOT
+                # skipped: they constrain where a match may begin.
+                if List.is_empty(acc) and Comp.is_wb_look(x) {
+                    Comp.prefix_cat(List.drop_first(xs, 1), acc)
                 } else {
-                    Comp.prefix_cat(List.drop_first(xs, 1), List.concat(acc, b))
+                    b = Comp.lit_prefix_node(x)
+                    if List.is_empty(b) {
+                        acc
+                    } else {
+                        Comp.prefix_cat(List.drop_first(xs, 1), List.concat(acc, b))
+                    }
                 }
-            }
+        }
+
+    is_wb_look : Comp -> Bool
+    is_wb_look = |x|
+        match x {
+            Look(k) => k == Comp.look_wordb or k == Comp.look_nwordb
+            _ => False
         }
 
     # bytes contributed by a node if it is an exact literal, else []
