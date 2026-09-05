@@ -494,7 +494,10 @@ Build := [].{
                 if List.len(grp) == 1 {
                     { a: acc.a, derivs: List.append(acc.derivs, List.get(grp, 0) ?? Arena.bot) }
                 } else {
-                    nulls = Arena.rs_rel_union_min(acc.a, min_rel, List.map(grp, |d| (Arena.look_rel(a, d), Arena.look_pend(a, d))))
+                    # an empty pending set means "one candidate end, `rel` back":
+                    # RE# unions the sets as-is and loses that candidate (log,
+                    # "RE# divergences"); read it as {(0,0)}.
+                    nulls = Arena.rs_rel_union_min(acc.a, min_rel, List.map(grp, |d| (Arena.look_rel(a, d), if Arena.look_pend(a, d) == Arena.rs_empty { Arena.rs_zero } else { Arena.look_pend(a, d) })))
                     m = Build.mk_lookaround(nulls.a, body, False, min_rel, nulls.id)
                     { a: m.a, derivs: List.append(acc.derivs, m.id) }
                 }

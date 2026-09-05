@@ -7,13 +7,14 @@
 ## `unwrap` fails the BUILD with the rendered message; a runtime pattern returns
 ## an ordinary `Err`.
 ##
-## M1: every search runs on the brute-force reference (`Ref`). M2 replaces the
-## search paths with the derivative DFA; the compile pipeline stays.
+## Searches run on the derivative automaton (`Dfa`); the brute-force reference
+## (`Ref`) stays reachable as `find_all_ref` for the differential.
 import Arena
 import Ast
 import Build
 import Conv
 import Deriv
+import Dfa
 import Err
 import Ref
 import Show
@@ -25,7 +26,21 @@ Sharp := [].{
     ## The compiled pattern. `root` is the raw pattern node, `rev` its reversal,
     ## `rev_ts` `_*·rev` (the reverse search start), `noprefix` the pattern with
     ## its lookbehind prefix stripped (the forward end pass). Documented-unstable.
-    T : { a : Arena.A, trie : Trie.T, root : U32, rev : U32, rev_ts : U32, ts : U32, noprefix : U32 }
+    T : { a : Arena.A, trie : Trie.T, root : U32, rev : U32, rev_ts : U32, ts : U32, noprefix : U32, e : Dfa.E }
+
+    ## D13 budget 4: states the fold may explore — the artifact budget (256 KB
+    ## provisional) over the table stride, capped at `fold_state_cap`. The cap is
+    ## for patterns whose state space is input-dependent (an unbounded
+    ## lookahead): exploring 13k such states cost 10 s and 4 GB of compiler RSS
+    ## for nothing (log, "M2 findings"); the scan extends the table at runtime.
+    max_states : U32 -> U64
+    max_states = |nmt| {
+        by_bytes = 262144 // (nmt.to_u64() * 4)
+        if by_bytes < Sharp.fold_state_cap { by_bytes } else { Sharp.fold_state_cap }
+    }
+
+    fold_state_cap : U64
+    fold_state_cap = 1024
 
     ## A match, as half-open byte offsets into the haystack.
     Span : { start : U64, end : U64 }
@@ -70,7 +85,10 @@ Sharp := [].{
                         np = Deriv.without_lookback_prefix(ts.a, root.id)
                         match np.a.err {
                             Unsup(msg) => Err(Err.whole(src, Unsupported(msg)))
-                            NoErr => Ok({ a: np.a, trie, root: root.id, rev: rv.id, rev_ts: rts.id, ts: ts.id, noprefix: np.id })
+                            NoErr => {
+                                e = Dfa.explore(Dfa.init(np.a, rts.id, np.id, Sharp.max_states(trie.n_classes)))
+                                Ok({ a: e.a, trie, root: root.id, rev: rv.id, rev_ts: rts.id, ts: ts.id, noprefix: np.id, e })
+                            }
                         }
                     }
                 }
@@ -96,7 +114,31 @@ Sharp := [].{
 
     ## All non-overlapping leftmost-longest matches.
     find_all : Sharp.T, List(U8) -> List(Sharp.Span)
-    find_all = |re, hay| Ref.find_all(re.a, re.trie, re.root, hay)
+    find_all = |re, hay| {
+        h = Ref.prepare(re.trie, hay)
+        r = Dfa.find_all(re.e, h)
+        List.map(r.spans, |sp| { start: List.get(h.pos, sp.start) ?? 0, end: List.get(h.pos, sp.end) ?? 0 })
+    }
+
+    ## The same, on the brute-force reference (S2.2) — the differential's oracle.
+    find_all_ref : Sharp.T, List(U8) -> List(Sharp.Span)
+    find_all_ref = |re, hay| Ref.find_all(re.a, re.trie, re.root, hay)
+
+    ## The reverse sweep's match-start positions as byte offsets, in the order
+    ## recorded (RE#'s `nullable_positions` tests).
+    match_starts : Sharp.T, List(U8) -> List(U64)
+    match_starts = |re, hay| {
+        h = Ref.prepare(re.trie, hay)
+        r = Dfa.starts(re.e, h)
+        List.map(r.acc, |p| List.get(h.pos, p) ?? 0)
+    }
+
+    ## Did the fold explore every reachable state?
+    is_complete : Sharp.T -> Bool
+    is_complete = |re| re.e.complete
+
+    n_states : Sharp.T -> U64
+    n_states = |re| Dfa.n_states(re.e)
 
     ## The first match. Documented as a full sweep: the reverse pass has to reach
     ## the haystack start before the leftmost start is known (S11).
@@ -251,8 +293,8 @@ Sharp := [].{
     ## the derivative of the raw pattern at position `pos` (codepoint index) of `s`, Begin location as RE#'s `der1RPos`
     der1_at : Sharp.T, Str, U64 -> Str
     der1_at = |re, s, pos| {
-        cps = Sharp.cps(Str.to_utf8(s), 0, [])
-        Sharp.derive_show(re, re.root, Deriv.loc_begin, List.get(cps, pos) ?? 0)
+        cpl = Sharp.cps(Str.to_utf8(s), 0, [])
+        Sharp.derive_show(re, re.root, Deriv.loc_begin, List.get(cpl, pos) ?? 0)
     }
 
     cps : List(U8), U64, List(U32) -> List(U32)
@@ -261,6 +303,45 @@ Sharp := [].{
             d = Utf8.decode(b, i)
             Sharp.cps(b, i + d.len, List.append(acc, d.cp))
         }
+
+    ## the derivative chain of the prefix-free pattern through `s` (Center
+    ## location), each node printed with its nullability and pending set
+    derive_chain : Sharp.T, Str -> List(Str)
+    derive_chain = |re, s| {
+        cpl = Sharp.cps(Str.to_utf8(s), 0, [])
+        st = List.fold(cpl, { a: re.a, id: re.noprefix, out: [Sharp.describe(re.a, re.trie, re.noprefix)] }, |acc, cp| {
+            mt = TSet.bit(Trie.class_of(re.trie, cp))
+            d = Deriv.derivative(acc.a, Deriv.loc_center, mt, acc.id)
+            { a: d.a, id: d.id, out: List.append(acc.out, Sharp.describe(d.a, re.trie, d.id)) }
+        })
+        st.out
+    }
+
+    ## the derivative chain of `node` reading the haystack LEFTWARD from byte
+    ## `from` for `count` symbols (Center location), for tracing the reverse sweep
+    derive_chain_rev : Sharp.T, U32, List(U8), U64, U64 -> List(Str)
+    derive_chain_rev = |re, node, hay, from, n_steps| {
+        h = Ref.prepare(re.trie, hay)
+        # symbol index of byte `from`
+        si = List.fold_with_index(h.pos, 0, |acc, p, i| if p == from { i } else { acc })
+        st = List.fold(Arena.upto(n_steps), { a: re.a, id: node, i: si, out: [Sharp.describe(re.a, re.trie, node)] }, |acc, _|
+            if acc.i == 0 { acc } else {
+                cls = List.get(h.cls, acc.i - 1) ?? 0
+                d = Deriv.derivative(acc.a, Deriv.loc_center, TSet.bit(cls), acc.id)
+                { a: d.a, id: d.id, i: acc.i - 1, out: List.append(acc.out, "@${(List.get(h.pos, acc.i - 1) ?? 0).to_str()} ${Sharp.describe(d.a, re.trie, d.id)}") }
+            })
+        st.out
+    }
+
+    rev_node : Sharp.T -> U32
+    rev_node = |re| re.rev
+
+    describe : Arena.A, Trie.T, U32 -> Str
+    describe = |a, t, id| {
+        pend = Arena.rs_get(a, Arena.pend(a, id)) |> List.map(|p| "(${Arena.ps(p).to_str()},${Arena.pe(p).to_str()})") |> Str.join_with(" ")
+        looks = if Arena.is_lookahead(a, id) { " rel=${Arena.look_rel(a, id).to_str()} lpend=${Arena.rs_get(a, Arena.look_pend(a, id)) |> List.map(|p| "(${Arena.ps(p).to_str()},${Arena.pe(p).to_str()})") |> Str.join_with(" ")}" } else { "" }
+        "${Show.show(a, t, id)}  [null=${if Arena.is_always_null(a, id) { "always" } else if Arena.can_be_null(a, id) { "can" } else { "no" }} pend={${pend}}${looks} id=${id.to_str()}]"
+    }
 
     ## nullability of the raw pattern at a location (0 begin, 1 center, 2 end)
     nullable_at : Sharp.T, U32 -> Bool

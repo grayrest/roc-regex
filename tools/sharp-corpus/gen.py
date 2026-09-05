@@ -85,6 +85,30 @@ spans_str = |re, hay|
 	|> List.map(|s| "${s.start.to_str()}-${s.end.to_str()}")
 	|> Str.join_with(",")
 
+ref_str : Sharp.T, Str -> Str
+ref_str = |re, hay|
+	Sharp.find_all_ref(re, Str.to_utf8(hay))
+	|> List.map(|s| "${s.start.to_str()}-${s.end.to_str()}")
+	|> Str.join_with(",")
+
+# match-start positions, sorted descending (RE# records them right to left)
+starts_str : Sharp.T, Str -> Str
+starts_str = |re, hay|
+	Sharp.match_starts(re, Str.to_utf8(hay))
+	|> List.sort_with(|x, y| U64.order_relative_to(y, x))
+	|> List.map(|p| p.to_str())
+	|> Str.join_with(",")
+
+sort_desc_csv : Str -> Str
+sort_desc_csv = |s|
+	if s == "" { "" } else {
+		Str.split_on(s, ",")
+		|> List.map(|w| U64.from_str(w) ?? 0)
+		|> List.sort_with(|x, y| U64.order_relative_to(y, x))
+		|> List.map(|p| p.to_str())
+		|> Str.join_with(",")
+	}
+
 ends_ok : Sharp.T, Str, Str -> Bool
 ends_ok = |re, hay, want| {
 	ends = Sharp.find_all(re, Str.to_utf8(hay)) |> List.map(|s| s.end.to_str())
@@ -101,25 +125,45 @@ run = |c0, filler| {
 		Ok(re) =>
 			if c.kind == "matches" {
 				got = spans_str(re, c.hay)
-				{ ok: got == c.want, got, skipped: False }
+				ref = ref_str(re, c.hay)
+				{ ok: got == c.want and ref == c.want, got: if ref == got { got } else { "dfa=[${got}] ref=[${ref}]" }, skipped: False }
 			} else if c.kind == "ends" {
-				{ ok: ends_ok(re, c.hay, c.want), got: spans_str(re, c.hay), skipped: False }
+				{ ok: ends_ok(re, c.hay, c.want) and spans_str(re, c.hay) == ref_str(re, c.hay), got: "dfa=[${spans_str(re, c.hay)}] ref=[${ref_str(re, c.hay)}]", skipped: False }
 			} else if c.kind == "unsupported" {
 				{ ok: False, got: "compiled: ${Sharp.show(re)}", skipped: False }
+			} else if c.kind == "starts" {
+				got = starts_str(re, c.hay)
+				{ ok: got == sort_desc_csv(c.want), got, skipped: False }
 			} else {
 				{ ok: True, got: "", skipped: True }
 			}
 	}
 }
 
+run_verbose! : List(Case), U64, Str => Try({}, _)
+run_verbose! = |cs, i, filler|
+	match List.get(cs, i) {
+		Err(_) => Ok({})
+		Ok(c) => {
+			Stdout.line!("case ${i.to_str()} ${c.file} [${c.kind}] /${c.pat}/")?
+			r = run(c, filler)
+			Stdout.line!(if r.ok { "  ok" } else { "  FAIL got=[${r.got}]" })?
+			run_verbose!(cs, i + 1, filler)
+		}
+	}
+
 main! = |args| {
 	filler = if List.len(args) > 99 { "x" } else { "" }
+	if List.len(args) > 1 {
+		run_verbose!(cases, 0, filler)?
+	}
 	results = List.map(cases, |c| { c, r: run(c, filler) })
 	fails = List.keep_if(results, |x| !x.r.ok)
 	skipped = List.count_if(results, |x| x.r.skipped)
 	lines = List.map(fails, |x| "FAIL ${x.c.file} [${x.c.kind}] /${x.c.pat}/ on \"${x.c.hay}\"\n     want=[${x.c.want}]\n     got =[${x.r.got}]")
 	total = List.len(results)
 	Stdout.line!(Str.join_with(lines, "\n"))?
-	Stdout.line!("\n${(total - List.len(fails)).to_str()}/${total.to_str()} pass (${skipped.to_str()} skipped: nullable_positions need M2)")
+	incomplete = List.count_if(cases, |c| match Sharp.compile(c.pat) { Ok(re) => !Sharp.is_complete(re), Err(_) => False })
+	Stdout.line!("\n${(total - List.len(fails)).to_str()}/${total.to_str()} pass (${skipped.to_str()} skipped; ${incomplete.to_str()} patterns over the fold budget)")
 }
 ''')

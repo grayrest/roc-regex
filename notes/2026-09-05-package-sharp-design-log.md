@@ -213,3 +213,63 @@ at build time in ~9 s, ~140 MB. The corpus runner threads an argv-derived
 filler into every haystack so its 331 cases evaluate at runtime (build 22 s,
 run 5.6 s under `--opt=dev`). A per-pattern fold-cost measurement waits for
 M2's tables, which are what the artifact will actually carry.
+
+## M2 findings (2026-09-05)
+
+Gate: corpus 331/331 with every case run on the derivative automaton AND the
+reference (agreement required), including the 46 `nullable_positions` cases
+against the reverse sweep. 57→59 patterns exceed the fold budget (unbounded
+lookaheads) and finish lazily at scan time.
+
+### RE# divergence 2, root cause
+
+The reverse sweep records match starts in RE#'s order: `574, 568, 587, 577,
+564, …` for the log-line pattern. A lookbehind alternative that resolves at
+once (`6`) records its position immediately; the `8\(.*` alternative resolves
+for every pending start when `8(` is finally read, appending larger positions
+AFTER smaller ones. RE#'s `llmatch_ends` walks the list from the end assuming
+it is sorted right-to-left, meets 577 before 568, and 568 is then skipped as
+"inside the previous match". `Dfa.find_all` sorts the starts first. Both
+divergences are now understood; both are RE# bugs to report upstream.
+
+### Unknowns, measured (`tools/sharp-size/probe.sh`, 256 KB haystack, `--opt=size`)
+
+| pattern | states | fold complete | build s | RSS GB | binary | `find_all` ns |
+|---|---|---|---|---|---|---|
+| `Holmes` | 29 | yes | 15.6 | 1.9 | 1.32 MB | 23 M |
+| `Sherlock\|Holmes\|…` | 69 | yes | 15.5 | 1.9 | 1.35 MB | 27 M |
+| `[A-Za-z]+` | 5 | yes | 15.5 | 1.9 | 1.29 MB | 59 M |
+| `\bthe\b` | 19 | yes | 15.7 | 1.9 | 1.78 MB | 24 M |
+| `\w+\s+\w+` | 10 | yes | 15.7 | 1.8 | 1.78 MB | 49 M |
+| `_*cat_*&_*dog_*` | 80 | yes | 15.4 | 1.8 | 1.35 MB | 66 M |
+| `~(_*\d\d_*)` | 7 | yes | 15.6 | 1.8 | 1.45 MB | 70 M |
+| `a(?=.*b)`, uncapped | 13108 | no | 25.8 | 6.1 | 5.08 MB | 30 M |
+| `a(?=.*b)`, cap 1024 | 1024 | no | 15.5 | 1.8 | 1.68 MB | 29 M |
+
+- **Unknown 4 (fold cost):** a no-fold baseline build (runtime pattern) is
+  20.5 s / 1.9 GB, so the ~15.5 s / 1.85 GB is the compiler compiling
+  `package-sharp`, not the fold; a complete pattern's fold costs nothing
+  measurable and strips the compiler from the binary. The exception is an
+  input-dependent state space: 13k states cost +10 s / +4.3 GB / +3.7 MB.
+  `Sharp.fold_state_cap = 1024` bounds that (S12 amended: the D13 formula, capped).
+  The compiler's 1.9 GB on this package is out of proportion to the old
+  package's ~140 MB and is itself an item to look at.
+- **Unknown 2 (extending a folded table at runtime):** works — the capped
+  `a(?=.*b)` completes its states during the scan at the same speed as the
+  uncapped one (29 vs 30 ms). Whether the first `List.set` copies the folded
+  table once per call is not yet isolated.
+- **Unknown 1 (linear threading):** the engine record threads through every
+  scan and the corpus is exact; the cost is visible in the run times below.
+- **Runtime:** 23–70 ms per 256 KB `find_all` is ~10–20× the existing
+  engine's DFA. Expected at M2: the scan runs over a precomputed class list
+  with a generic `step` on a threaded record, no fused ASCII table, no
+  accelerators. M4's job.
+
+### Owed upstream
+
+- `roc build` exits non-zero on warnings; `tools/sharp-size/probe.sh` judges
+  success by the produced binary.
+- Two crashes in debug-only helpers with a large lookaround pattern, repros in
+  `upstream/2026-09-05-sharp-debug-crashes/`: `Sharp.show_rev` faults in
+  `free` (heap corruption, dev backend), `Sharp.derive_chain_rev` overflows
+  the stack. The same pattern's `find_all` path is fine. Not reduced yet.
