@@ -39,7 +39,10 @@ def u16_to_bytes(s):
 # specification; the reference (and this engine) follow the specification.
 # Keyed by (file, pattern, input-prefix); value = the spec-correct spans.
 # See notes/2026-09-05-package-sharp-design-log.md, "RE# divergences".
+# "REJECT": RE# accepts the pattern and matches it wrongly (see the design log,
+# "Fuzz campaign"); we reject it, and the case expects the compile error.
 KNOWN_RESHARP_DIVERGENCES = {
+    ("tests04_anchors.toml", r"\s*\bts\b", "tests"): "REJECT",
     ("tests02_lookaround.toml", "(ab){1,3}(?=.*c)", "__ababab_c"): "2-8",
     ("tests08_semantics.toml", r"(?<=6|8\(.*).*&(?<=6|8\(|4|8|0\().*&~(.*\)\:.*)&\w.*&.*\w&.*(?=.*\)\:)&.*(?=\)\:|\)\:)", "\nJan 12 06:26:19"): "48-137,156-179,359-396,451-565,568-604",
 }
@@ -57,7 +60,7 @@ for path in sorted(glob.glob(os.path.join(RESHARP, "data", "tests", "*.toml"))):
             for (kf, kp, ki), spec in KNOWN_RESHARP_DIVERGENCES.items():
                 if kf == name and kp == pat and inp.startswith(ki):
                     want = spec
-            cases.append(("matches", name, pat, inp, want))
+            cases.append(("unsupported" if want == "REJECT" else "matches", name, pat, inp, want))
         elif "end_positions" in t:
             want = ",".join(str(m[e]) for e in t["end_positions"])
             cases.append(("ends", name, pat, inp, want))

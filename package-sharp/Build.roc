@@ -219,6 +219,13 @@ Build := [].{
     or2_rules = |a, n1, n2, key|
         if Arena.is_singleton(a, n1) and Arena.is_singleton(a, n2) {
             Build.one(a, (Arena.tset(a, n1)).bitwise_or(Arena.tset(a, n2)))
+        } else if (n1 == Arena.eps and Arena.contains_look(a, n2)) or (n2 == Arena.eps and Arena.contains_look(a, n1)) {
+            # Deviation from RE#: `ε | X` is not folded when X carries a lookaround.
+            # A lookaround node's nullability is transient (its body keeps being
+            # derived to verify the text ahead), so `X? -> X` / `-> ε` folds that are
+            # sound for ordinary regexes drop a running check: `.[^a]{1,2}[ab]*(?!R)`
+            # lost its leftmost start once `LB·rest | rest` became `rest`.
+            Build.or_register(a, Arena.sort_ids([n1, n2]))
         } else if n1 == Arena.eps {
             Build.mk_loop(a, n2, 0, 1)
         } else if n2 == Arena.eps {
@@ -353,8 +360,9 @@ Build := [].{
                             Ok(p) => List.drop_if(ds, |d| d != star and TSet.subset(Arena.sub(a, d), p))
                             Err(_) => ds
                         })
-                    # add epsilon only if no nullables yet
-                    d2 = if sc.eps and !List.any(d1, |d| Arena.is_always_null(a, d)) { List.append(d1, Arena.eps) } else { d1 }
+                    # add epsilon only if no nullables yet (a lookaround's nullability is
+                    # transient and does not absorb ε — see `mk_or2`)
+                    d2 = if sc.eps and !List.any(d1, |d| Arena.is_always_null(a, d) and !Arena.contains_look(a, d)) { List.append(d1, Arena.eps) } else { d1 }
                     # merge singletons
                     m = Build.merge_singletons(a, d2)
                     d4 = if sc.zeroloops > 0 { Build.merge_or_grouped_loops(m.a, m.derivs) } else { m.derivs }
@@ -623,10 +631,24 @@ Build := [].{
             { a, id: n2 }
         } else if n2 == Arena.top_star {
             { a, id: n1 }
-        } else if n1 == Arena.eps {
-            { a, id: if Arena.can_be_null(a, n2) { Arena.eps } else { Arena.bot } }
-        } else if n2 == Arena.eps {
-            { a, id: if Arena.can_be_null(a, n1) { Arena.eps } else { Arena.bot } }
+        } else if n1 == Arena.eps or n2 == Arena.eps {
+            # Deviation from RE#, which folds `ε & X` to ε whenever X CAN be nullable:
+            # an anchor-dependent X (`_*(\A|\n)`, i.e. `^` rewritten) is nullable
+            # only at some positions, and the fold made `b^ ?|.` match "b " on "b a".
+            # Only an always-nullable X folds; otherwise the intersection stays and
+            # the location decides.
+            x = if n1 == Arena.eps { n2 } else { n1 }
+            if Arena.is_always_null(a, x) {
+                { a, id: Arena.eps }
+            } else if !Arena.can_be_null(a, x) {
+                { a, id: Arena.bot }
+            } else {
+                key = Arena.key_and(Arena.sort_ids([n1, n2]))
+                match Arena.lookup(a, key) {
+                    Ok(id) => { a, id }
+                    Err(_) => Build.and_create_cached(a, List.drop_first(key, 2))
+                }
+            }
         } else {
             key = Arena.key_and(Arena.sort_ids([n1, n2]))
             match Arena.lookup(a, key) {
@@ -1402,13 +1424,21 @@ Build := [].{
         right = List.drop_first(nodes, i + 1)
         if Arena.is_lookbehind(a, curr) {
             body = Arena.head(a, curr)
-            if Arena.maxl(a, body) == 1 {
-                minleft = List.fold(left, 0, |acc, n| Build.add_len(acc, Arena.minl(a, n)))
+            # (nullability, not the min-length cache: a complement's length is unknown)
+            left_nullable = List.all(left, |n| Arena.can_be_null(a, n))
+            if Arena.maxl(a, body) == 1 and left_nullable {
+                # Deviation from RE#, which prepends `_*` to the left context here
+                # (`(_*X & _*R)Y`): when X can be empty the lookbehind may look at
+                # text before the match, and the `_*` then makes the match swallow
+                # that text — `a?\b\s` matched 0-9 on "a b  c,\n\nab". The correct
+                # rewrite needs a lookbehind inside a union, which RE#'s normal form
+                # excludes, so the pattern is rejected instead of matched wrongly.
+                { a: Arena.fail(a, "a lookbehind (or \\b, ^) after an expression that can be empty is unsupported; anchor it or make the expression non-empty"), id: Arena.bot }
+            } else if Arena.maxl(a, body) == 1 {
                 ls = Build.mk_concat_list(a, left)
-                ls2 = if minleft == 0 { Build.mk_concat2(ls.a, Arena.top_star, ls.id) } else { ls }
-                look = Build.mk_concat2(ls2.a, Arena.top_star, body)
+                look = Build.mk_concat2(ls.a, Arena.top_star, body)
                 rem = Build.mk_concat_checked(look.a, right)
-                an = Build.mk_and_seq(rem.a, [ls2.id, look.id])
+                an = Build.mk_and_seq(rem.a, [ls.id, look.id])
                 Build.mk_concat2(an.a, an.id, rem.id)
             } else {
                 { a: Arena.fail(a, Build.unsupported_look), id: Arena.bot }

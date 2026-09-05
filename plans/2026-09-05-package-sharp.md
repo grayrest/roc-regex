@@ -370,12 +370,14 @@ findings and measurements. Departures from the plan as written:
   first symbol and potential starts whose anchor is not clearly rarer than
   the first set are refused. Each is measured in the log.
 - **Fuzz campaign** ("against the brute-force reference with zero
-  divergences"): achieved for all constructs except anchors, `\b` and
-  lookarounds (18000 cases, 0 divergences). For those constructs the
-  reference's textbook semantics differ from RE#'s, and real RE# sides with
-  our DFA; they are fuzzed against RE# itself instead (ASCII), with every
-  divergence reduced to an RE# bug listed in the log. Deciding whether to
-  keep RE# parity on those bugs is open.
+  divergences"): achieved for every construct (9396 cases with anchors and
+  lookarounds, 18000 plain, 0 divergences) after the owner decided to drop
+  RE# parity on RE#'s confirmed bugs. Seven of them had been ported
+  faithfully; the fixes and the two constructs now rejected (a nullable
+  expression before a lookbehind/`\b`/`^`; a lookaround or `\b` nested in a
+  lookaround body) are in the log under "Dropping RE# parity". The RE#
+  differential and the corpus carry known-divergence lists; the RE# fuzz
+  tier classifies disagreements with the reference as the arbiter.
 - **Build order**: unchanged. **Budgets**: unchanged (fold cap 1024 states;
   `a(?=.*b)` hits it and runs threaded).
 - **Codegen findings** that shaped the scan loops (record arguments per

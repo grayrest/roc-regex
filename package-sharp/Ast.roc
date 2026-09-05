@@ -750,6 +750,20 @@ Ast := [
     has_line_anchor : Ast -> Bool
     has_line_anchor = |ast| Ast.has_look_kind(ast, |k| k == Ast.look_caret or k == Ast.look_dollar)
 
+    ## does the pattern contain a lookahead or lookbehind (at any depth)?
+    has_lookaround : Ast -> Bool
+    has_lookaround = |ast|
+        match ast {
+            LookAhead(_, _) => True
+            LookBehind(_, _) => True
+            Cat(xs) => List.any(xs, Ast.has_lookaround)
+            Alt(xs) => List.any(xs, Ast.has_lookaround)
+            And(xs) => List.any(xs, Ast.has_lookaround)
+            Not(x) => Ast.has_lookaround(x)
+            Loop(x, _, _) => Ast.has_lookaround(x)
+            _ => False
+        }
+
     has_look_kind : Ast, (U32 -> Bool) -> Bool
     has_look_kind = |ast, f|
         match ast {

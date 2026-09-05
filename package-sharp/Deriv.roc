@@ -212,10 +212,12 @@ Deriv := [].{
             t = Arena.tail(a, id)
             if Arena.is_lookbehind(a, h) {
                 Deriv.without_lookback_prefix(a, t)
-            } else if Arena.is_always_null(a, h) {
-                ct = Deriv.without_lookback_prefix(a, t)
-                Build.mk_concat2(ct.a, h, ct.id)
             } else {
+                # Deviation from RE#, which also strips through an always-nullable
+                # head (`x*(?<=a)b` -> `x*b`, `_*\A` -> `_*`): only a lookbehind or
+                # anchor at the very start is the one the reverse sweep verified;
+                # after a nullable head it must stay and be judged at its position
+                # (`_*\A` on "xa" ended at 2 instead of 0).
                 ch = Deriv.without_lookback_prefix(a, h)
                 if ch.id == Arena.eps { Deriv.without_lookback_prefix(ch.a, t) } else { Build.mk_concat2(ch.a, ch.id, t) }
             }

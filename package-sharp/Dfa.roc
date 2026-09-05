@@ -188,10 +188,16 @@ Dfa := [].{
             f2 = if initial { f1.bitwise_or(Dfa.fl_initial) } else { f1 }
             f3 = if can and Deriv.nullable(a, Deriv.loc_end, node) { f2.bitwise_or(Dfa.fl_end_null) } else { f2 }
             f4 = if can and Deriv.nullable(a, Deriv.loc_begin, node) { f3.bitwise_or(Dfa.fl_begin_null) } else { f3 }
-            pend = Arena.pend(a, node)
-            has_pend = Arena.contains_look(a, node) and can and !initial and pend != Arena.rs_empty
+            # Deviation from RE#, which takes the node's whole pending set when the
+            # node CAN be nullable: a lookahead whose body is nullable only at the
+            # input start (`~(a_*)\A`) then had its positions marked at every step
+            # (`(?<!a.)` on "abc" reported 2-2). Here the Center-location set drives
+            # the scan; `handle_input_start`/`at_eoi` recompute for Begin and End.
+            pairs = if Arena.contains_look(a, node) and can and !initial { Dfa.pend_at(a, node, Deriv.loc_center) } else { [] }
+            has_pend = !List.is_empty(pairs)
             f5 = if has_pend { f4.bitwise_or(Dfa.fl_pending) } else { f4 }
-            pairs = if has_pend { Arena.rs_get(a, pend) } else { [] }
+            rs = if has_pend { Arena.rs_intern(a, pairs) } else { { a, id: Arena.rs_empty } }
+            pend = rs.id
             minpend = match List.first(pairs) { Ok(p) => Arena.ps(p), Err(_) => 0 }
             nk =
                 if !always { Dfa.nk_notnull }
@@ -200,10 +206,11 @@ Dfa := [].{
                 else { Dfa.nk_pending }
             ns = Dfa.pad(e.node_state, node.to_u64() + 1)
             e1 = { ..e,
+                a: rs.a,
                 st_node: List.append(e.st_node, node),
                 st_flags: List.append(e.st_flags, f5),
                 st_nk: List.append(e.st_nk, nk),
-                st_pend: List.append(e.st_pend, if has_pend { pend } else { Arena.rs_empty }),
+                st_pend: List.append(e.st_pend, pend),
                 st_minpend: List.append(e.st_minpend, minpend),
                 node_state: List.set(ns, node.to_u64(), id) ?? ns,
                 table: List.concat(e.table, List.repeat(0.U32, e.nmt.to_u64())),
@@ -375,31 +382,38 @@ Dfa := [].{
     # `HandleInputStart`: what is nullable at position 0 with the Begin location
     handle_input_start : Dfa.E, U32, List(U64) -> Dfa.Acc
     handle_input_start = |e, s, acc| {
+        # Deviation from RE#'s `HandleInputStart`, which reads the state's NullKind
+        # (a Center-location notion) here: at the input start the matches are the
+        # pending positions of the branches nullable at Begin, plus 0 for a branch
+        # nullable there with nothing pending (`(?<!a.)` on "abc" lost 0-0).
         node = Dfa.st_node_of(e, s)
-        really = Dfa.flags(e, s).bitwise_and(Dfa.fl_always) != 0 or Deriv.nullable(e.a, Deriv.loc_begin, node)
-        if really and List.last(acc) != Ok(0) {
-            k = Dfa.nk(e, s)
-            if k == Dfa.nk_current or k == Dfa.nk_prev {
-                acc1 = if List.last(acc) == Ok(k.to_u64()) { acc } else { List.append(acc, k.to_u64()) }
-                fresh =
-                    Arena.is_or(e.a, node)
-                    and List.any(Arena.children(e.a, node), |c| Arena.pend(e.a, c) == Arena.rs_empty and Deriv.nullable(e.a, Deriv.loc_begin, c))
-                { e, acc: if k != 0 and fresh { List.append(acc1, 0) } else { acc1 } }
-            } else {
-                pairs = Arena.rs_get(e.a, List.get(e.st_pend, s.to_u64()) ?? 0)
-                if List.is_empty(pairs) {
-                    { e, acc: List.append(acc, 0) }
-                } else {
-                    fs = Arena.ps(List.get(pairs, 0) ?? 0).to_u64()
-                    if List.is_empty(acc) or List.last(acc) != Ok(fs) { { e, acc: Dfa.add_pairs(acc, pairs, 0) } } else { { e, acc } }
-                }
-            }
+        a = e.a
+        if Dfa.flags(e, s).bitwise_and(Dfa.fl_always) != 0 or Deriv.nullable(a, Deriv.loc_begin, node) {
+            tail = List.take_last(acc, 8)
+            fresh = List.keep_if(Dfa.add_pairs([], Dfa.pend_at(a, node, Deriv.loc_begin), 0), |p| !List.contains(tail, p))
+            acc1 = List.concat(acc, fresh)
+            { e, acc: if Dfa.fresh_at(a, node, Deriv.loc_begin) and !List.contains(tail, 0) and !List.contains(fresh, 0) { List.append(acc1, 0) } else { acc1 } }
         } else {
             { e, acc }
         }
     }
 
-    # `setNullFull`: record the position(s) a nullable state stands for
+    pend_at : Arena.A, U32, U32 -> List(U32)
+    pend_at = |a, node, loc| {
+        branches = if Arena.is_or(a, node) { Arena.children(a, node) } else { [node] }
+        List.fold(branches, [], |acc, c|
+            if Arena.pend(a, c) != Arena.rs_empty and Deriv.nullable(a, loc, c) { List.concat(acc, Arena.rs_get(a, Arena.pend(a, c))) } else { acc })
+        |> Arena.rs_normalize
+    }
+
+    ## `hasFreshBeginNullableBranch`, for any location: a branch nullable at `loc`
+    ## with nothing pending is a match at the current position in its own right
+    fresh_at : Arena.A, U32, U32 -> Bool
+    fresh_at = |a, node, loc| {
+        branches = if Arena.is_or(a, node) { Arena.children(a, node) } else { [node] }
+        List.any(branches, |c| Arena.pend(a, c) == Arena.rs_empty and Deriv.nullable(a, loc, c))
+    }
+
     set_null_full : Dfa.E, U32, List(U64), U64 -> List(U64)
     set_null_full = |e, s, acc, pos| {
         k = Dfa.nk(e, s)
@@ -433,7 +447,9 @@ Dfa := [].{
         if start == h.n {
             { e, end: Dfa.at_eoi(e, e.s_noprefix, start, Err(NoEnd)) }
         } else {
-            Dfa.end_loop(e, h, start, e.s_noprefix, Err(NoEnd))
+            # see `ends_fast`: an anchor behind a nullable head is nullable only at the input start
+            best0 = if start == 0 and Dfa.flags(e, e.s_noprefix).bitwise_and(Dfa.fl_anchor_null) != 0 and Deriv.nullable(e.a, Deriv.loc_begin, Dfa.st_node_of(e, e.s_noprefix)) { Ok(0) } else { Err(NoEnd) }
+            Dfa.end_loop(e, h, start, e.s_noprefix, best0)
         }
 
     end_loop : Dfa.E, Ref.Hay, U64, U32, Try(U64, [NoEnd]) -> Dfa.EndR
@@ -479,20 +495,19 @@ Dfa := [].{
     # `HandleInputEndFwd`: nullability at end of input (precise for anchors, log)
     at_eoi : Dfa.E, U32, U64, Try(U64, [NoEnd]) -> Try(U64, [NoEnd])
     at_eoi = |e, s, pos, best| {
-        f = Dfa.flags(e, s)
-        if f.bitwise_and(Dfa.fl_always) != 0 or f.bitwise_and(Dfa.fl_anchor_null) != 0 {
-            if f.bitwise_and(Dfa.fl_anchor_null) != 0 and f.bitwise_and(Dfa.fl_pending) == 0 {
-                if Deriv.nullable(e.a, Deriv.loc_end, Dfa.st_node_of(e, s)) { Ok(pos) } else { best }
-            } else {
-                k = Dfa.nk(e, s)
-                if k == Dfa.nk_current or k == Dfa.nk_prev {
-                    Ok(pos - k.to_u64())
-                } else {
-                    Dfa.max_end(best, pos - (List.get(e.st_minpend, s.to_u64()) ?? 0).to_u64())
-                }
-            }
-        } else {
+        # Deviation from RE#'s `HandleInputEndFwd` (NullKind first, End location
+        # only for anchor states without pending positions): at the end of input
+        # the candidates are the position itself, for a branch nullable at End with
+        # nothing pending, and `pos - offset` for the pending pairs of branches
+        # nullable at End; the largest wins (`b?(?!c&d)` on "b" ended at 0).
+        node = Dfa.st_node_of(e, s)
+        a = e.a
+        if !Arena.can_be_null(a, node) {
             best
+        } else {
+            loc = if pos == 0 { Deriv.loc_both } else { Deriv.loc_end }
+            b1 = if Dfa.fresh_at(a, node, loc) { Ok(pos) } else { best }
+            List.fold(Dfa.pend_at(a, node, loc), b1, |b, p| Dfa.max_end(b, pos - Arena.ps(p).to_u64()))
         }
     }
 
@@ -500,7 +515,6 @@ Dfa := [].{
 
     Spans : { e : Dfa.E, spans : List({ start : U64, end : U64 }) }
 
-    ## every leftmost-longest non-overlapping match, as symbol-index spans
     find_all : Dfa.E, Ref.Hay -> Dfa.Spans
     find_all = |e, h| {
         st = Dfa.starts(e, h)
@@ -709,7 +723,10 @@ Dfa := [].{
                 } else {
                     var pos = pos0
                     var s = s_start
-                    var best = Err(NoEnd)
+                    # an anchor that survived `without_lookback_prefix` behind a nullable
+                    # head (`_*\A`) is nullable only at the input start, which the
+                    # NullKind check inside the loop never sees
+                    var best = if pos0 == 0 and Dfa.flags(e, s_start).bitwise_and(Dfa.fl_anchor_null) != 0 and Deriv.nullable(e.a, Deriv.loc_begin, Dfa.st_node_of(e, s_start)) { Ok(0) } else { Err(NoEnd) }
                     while s != Dfa.dead {
                         b0 = List.get(hay, pos) ?? 0
                         # RE#'s forward `CanSkip`: the state loops on every byte up to the
@@ -1056,26 +1073,14 @@ Dfa := [].{
 
     start_fast : Dfa.E, U32, List(U64), List(U8) -> List(U64)
     start_fast = |e, s, acc, hay| {
+        # see `handle_input_start`
         node = Dfa.st_node_of(e, s)
-        really = Dfa.flags(e, s).bitwise_and(Dfa.fl_always) != 0 or Deriv.nullable(e.a, Deriv.loc_begin, node)
-        if really and List.last(acc) != Ok(0) {
-            k = Dfa.nk(e, s)
-            if k == Dfa.nk_current or k == Dfa.nk_prev {
-                p = Utf8.advance(hay, 0, k.to_u64())
-                acc1 = if List.last(acc) == Ok(p) { acc } else { List.append(acc, p) }
-                fresh =
-                    Arena.is_or(e.a, node)
-                    and List.any(Arena.children(e.a, node), |c| Arena.pend(e.a, c) == Arena.rs_empty and Deriv.nullable(e.a, Deriv.loc_begin, c))
-                if k != 0 and fresh { List.append(acc1, 0) } else { acc1 }
-            } else {
-                pairs = Arena.rs_get(e.a, List.get(e.st_pend, s.to_u64()) ?? 0)
-                if List.is_empty(pairs) {
-                    List.append(acc, 0)
-                } else {
-                    fs = Utf8.advance(hay, 0, Arena.ps(List.get(pairs, 0) ?? 0).to_u64())
-                    if List.is_empty(acc) or List.last(acc) != Ok(fs) { Dfa.add_pairs_fast(acc, pairs, hay, 0) } else { acc }
-                }
-            }
+        a = e.a
+        if Dfa.flags(e, s).bitwise_and(Dfa.fl_always) != 0 or Deriv.nullable(a, Deriv.loc_begin, node) {
+            tail = List.take_last(acc, 8)
+            fresh = List.keep_if(Dfa.add_pairs_fast([], Dfa.pend_at(a, node, Deriv.loc_begin), hay, 0), |p| !List.contains(tail, p))
+            acc1 = List.concat(acc, fresh)
+            if Dfa.fresh_at(a, node, Deriv.loc_begin) and !List.contains(tail, 0) and !List.contains(fresh, 0) { List.append(acc1, 0) } else { acc1 }
         } else {
             acc
         }
@@ -1176,18 +1181,16 @@ Dfa := [].{
 
     at_eoi_fast : Dfa.E, U32, List(U8), U64, Try(U64, [NoEnd]) -> Try(U64, [NoEnd])
     at_eoi_fast = |e, s, hay, pos, best| {
-        f = Dfa.flags(e, s)
-        if f.bitwise_and(Dfa.fl_always) != 0 or f.bitwise_and(Dfa.fl_anchor_null) != 0 {
-            if f.bitwise_and(Dfa.fl_anchor_null) != 0 and f.bitwise_and(Dfa.fl_pending) == 0 {
-                if Deriv.nullable(e.a, Deriv.loc_end, Dfa.st_node_of(e, s)) { Ok(pos) } else { best }
-            } else {
-                k = Dfa.nk(e, s)
-                if k == Dfa.nk_current { Ok(pos) }
-                else if k == Dfa.nk_prev { Ok(Utf8.retreat(hay, pos, 1)) }
-                else { Dfa.max_end(best, Utf8.retreat(hay, pos, (List.get(e.st_minpend, s.to_u64()) ?? 0).to_u64())) }
-            }
-        } else {
+        # see `at_eoi`
+        node = Dfa.st_node_of(e, s)
+        a = e.a
+        if !Arena.can_be_null(a, node) {
             best
+        } else {
+            loc = if pos == 0 { Deriv.loc_both } else { Deriv.loc_end }
+            b1 = if Dfa.fresh_at(a, node, loc) { Ok(pos) } else { best }
+            List.fold(Dfa.pend_at(a, node, loc), b1, |b, p| Dfa.max_end(b, Utf8.retreat(hay, pos, Arena.ps(p).to_u64())))
         }
     }
+
 }

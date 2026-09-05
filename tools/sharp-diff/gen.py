@@ -69,6 +69,29 @@ def u16_to_bytes(s):
     return m
 
 
+# Confirmed RE# bugs (design log, "Fuzz campaign"): for these the runner checks
+# our answer against the textbook one, not RE#'s. "REJECT" means we refuse the
+# pattern because no rewrite in RE#'s normal form gives the right matches.
+KNOWN_RESHARP_BUGS = [
+    ("b?^", "b", "REJECT"),                # RE#: 0-1 — `^` cannot hold after a consumed char; nullable before a line anchor
+    ("a*^", "xa", "REJECT"),               # RE#: 0-2 — nullable expression before a line anchor
+    ("~(b)^", "a", "REJECT"),              # RE#: 0-1
+    ("b{0,2}^", "bbc", "REJECT"),          # RE#: 0-3
+    ("b_{1,2}", "aab ba", "2-5"),          # RE#: 2-4,4-6 — not leftmost-longest
+    ("[^a]&.\\s|\\W*", "abxb a", "0-0,1-1,2-2,3-3,4-5,5-5,6-6"),  # RE#: drops the \s
+    ("(?=a&b|c)", "abc", "2-2"),           # RE#: 0-0,2-2
+    ("(?<!a.)", "abc", "0-0,1-1,3-3"),     # RE#: 1-1,2-2,3-3
+    ("(?<!a.,)", "ab,c", "0-0,1-1,2-2,4-4"),  # RE#: includes 3-3
+    ("(\\n?)+(?<! )b+", "a\nbb", "REJECT"),  # RE#: 0-4 — `(\n?)+` cannot match "a"; nullable before a lookbehind
+    ("a?\\b\\s", "a b  c,\n\nab", "REJECT"),  # RE#: 0-9
+    ("\\s*\\bts\\b", "x ts", "REJECT"),      # RE#: 0-4 (swallows the prefix)
+    ("(?<=[ab]\\b)", "aab ba", "REJECT"),     # RE#: 4-4,6-6 — one symbol off
+    ("(?=(?<=\\n))", "ca,b\nab", "REJECT"),  # RE#: 4-4 — one symbol off
+    ("b?(?!c&d)", "b", "0-1,1-1"),         # RE#: 0-0,1-1
+    ("[^a]^ ?|.", "aab ba", "0-1,1-2,2-3,3-4,4-5,5-6"),  # RE#: 2-4
+    (".[^a]{1,2}[ab]*(?!\\w.{2}cb?)", "abxb a", "0-4"),  # RE#: 2-5
+]
+
 cases = [{"pat": p, "hay": h} for p in PATS for h in HAYS]
 with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
     json.dump(cases, f)
@@ -83,13 +106,15 @@ print(f'\tre: "{PKG}",')
 print("}")
 print("import pf.Stdout")
 print("import re.Sharp\n")
-print("Case : { pat : Str, hay : Str, ok : Bool, want : Str }\n")
+print("Case : { pat : Str, hay : Str, ok : Bool, want : Str, known : Bool }\n")
 print("cases : List(Case)")
 print("cases = [")
 for r in results:
     m = u16_to_bytes(r["hay"])
     want = ",".join(f"{m[s]}-{m[e]}" for s, e in r["matches"]) if r["ok"] else r["err"].split(":")[0]
-    print(f'\t{{ pat: "{roc_str(r["pat"])}", hay: "{roc_str(r["hay"])}", ok: {"True" if r["ok"] else "False"}, want: "{roc_str(want)}" }},')
+    print(f'\t{{ pat: "{roc_str(r["pat"])}", hay: "{roc_str(r["hay"])}", ok: {"True" if r["ok"] else "False"}, want: "{roc_str(want)}", known: False }},')
+for pat, hay, want in KNOWN_RESHARP_BUGS:
+    print(f'\t{{ pat: "{roc_str(pat)}", hay: "{roc_str(hay)}", ok: {"False" if want == "REJECT" else "True"}, want: "{roc_str(want)}", known: True }},')
 print("]\n")
 print(r'''spans_str : Sharp.T, Str -> Str
 spans_str = |re, hay|
@@ -103,6 +128,16 @@ spans_str = |re, hay|
 run : Case, Str -> { kind : Str, got : Str }
 run = |c0, filler| {
 	c = { ..c0, hay: Str.concat(c0.hay, filler), pat: Str.concat(c0.pat, filler) }
+	if c.known {
+		# a confirmed RE# bug: `want` is the textbook answer ("REJECT" = we refuse)
+		match Sharp.compile(c.pat) {
+			Err(e) => { kind: if c.want == "REJECT" { "KnownBug" } else { "Differ" }, got: Sharp.err_str(e) }
+			Ok(re) => {
+				got = spans_str(re, c.hay)
+				{ kind: if c.want != "REJECT" and got == c.want { "KnownBug" } else { "Differ" }, got }
+			}
+		}
+	} else
 	match Sharp.compile(c.pat) {
 		Err(e) => { kind: if c.ok { "WeReject" } else { "RejectBoth" }, got: Sharp.err_str(e) }
 		Ok(re) =>
@@ -124,6 +159,6 @@ main! = |args| {
 	Stdout.line!(Str.join_with(lines, "\n"))?
 	accepts = List.keep_if(results, |x| x.r.kind == "WeAccept") |> List.map(|x| x.c.pat) |> List.fold([], |acc, p| if List.contains(acc, p) { acc } else { List.append(acc, p) })
 	Stdout.line!("we accept, RE# rejects: ${Str.join_with(accepts, "  ")}")?
-	Stdout.line!("\nagree=${count("Agree").to_str()} differ=${count("Differ").to_str()} reject_both=${count("RejectBoth").to_str()} we_accept=${count("WeAccept").to_str()} we_reject=${count("WeReject").to_str()} of ${List.len(results).to_str()}")
+	Stdout.line!("\nagree=${count("Agree").to_str()} differ=${count("Differ").to_str()} reject_both=${count("RejectBoth").to_str()} we_accept=${count("WeAccept").to_str()} we_reject=${count("WeReject").to_str()} known_resharp_bugs=${count("KnownBug").to_str()} of ${List.len(results).to_str()}")
 }
 ''')

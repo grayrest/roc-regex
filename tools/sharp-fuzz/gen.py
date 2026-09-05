@@ -151,7 +151,7 @@ if not RESHARP:
 print(r'''spans : List(Sharp.Span) -> Str
 spans = |sp| sp |> List.map(|s| "${s.start.to_str()}-${s.end.to_str()}") |> Str.join_with(",")
 
-Outcome : { rejected : U64, incomplete : U64, cases : U64, fails : List(Str) }
+Outcome : { rejected : U64, incomplete : U64, cases : U64, fails : List(Str), known : List(Str) }
 
 check : Sharp.T, Str, List(U8), Outcome -> Outcome
 check = |re, pat, hay, o| {
@@ -192,7 +192,15 @@ run_resharp = |pat, ws, o|
 				} else {
 					got = spans(Sharp.find_all(re, hay))
 					acc2 = { ..acc, cases: acc.cases + 1 }
-					if got == w { acc2 } else { { ..acc2, fails: List.append(acc2.fails, "/${pat}/ on \"${Str.from_utf8_lossy(hay)}\": sharp=[${got}] resharp=[${w}]") } }
+					if got == w {
+						acc2
+					} else {
+						# RE# disagrees: when the brute-force reference sides with us, RE# is wrong
+						# (a known-bug family, reported separately); otherwise a real divergence
+						ref = spans(Sharp.find_all_ref(re, hay))
+						line = "/${pat}/ on \"${Str.from_utf8_lossy(hay)}\": sharp=[${got}] resharp=[${w}] ref=[${ref}]"
+						if got == ref { { ..acc2, known: List.append(acc2.known, line) } } else { { ..acc2, fails: List.append(acc2.fails, line) } }
+					}
 				}
 			})
 		}
@@ -200,8 +208,9 @@ run_resharp = |pat, ws, o|
 
 main! = |args| {
 	filler = if List.len(args) > 99 { "x" } else { "" }
-	o = List.fold_with_index(pats, { rejected: 0, incomplete: 0, cases: 0, fails: [] }, |acc, p, i| if List.is_empty(wants) { run(Str.concat(p, filler), acc) } else { run_resharp(Str.concat(p, filler), List.get(wants, i) ?? [], acc) })
+	o = List.fold_with_index(pats, { rejected: 0, incomplete: 0, cases: 0, fails: [], known: [] }, |acc, p, i| if List.is_empty(wants) { run(Str.concat(p, filler), acc) } else { run_resharp(Str.concat(p, filler), List.get(wants, i) ?? [], acc) })
 	Stdout.line!(Str.join_with(List.take_first(o.fails, 40), "\n"))?
-	Stdout.line!("patterns=${List.len(pats).to_str()} rejected=${o.rejected.to_str()} incomplete=${o.incomplete.to_str()} cases=${o.cases.to_str()} divergences=${List.len(o.fails).to_str()}")
+	if List.is_empty(o.known) { {} } else { Stdout.line!("RE# bugs (reference agrees with sharp):\n${Str.join_with(o.known, "\n")}")? }
+	Stdout.line!("patterns=${List.len(pats).to_str()} rejected=${o.rejected.to_str()} incomplete=${o.incomplete.to_str()} cases=${o.cases.to_str()} divergences=${List.len(o.fails).to_str()} resharp_bugs=${List.len(o.known).to_str()}")
 }
 ''')

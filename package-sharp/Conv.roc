@@ -10,6 +10,9 @@ import Build
 import TSet
 
 Conv := [].{
+    nested_look_msg : Str
+    nested_look_msg = "sharp: a lookaround or \\b inside a lookaround body is unsupported (RE# accepts it and matches one symbol off)"
+
     ## the compiled alphabet: the pattern's sets (as collected) and their tsets,
     ## plus the `\w` and `\s` tsets for the word-border heuristic
     Ctx : { sets : List(Ast.Set), tsets : List(U64), wordc : U64, spacec : U64 }
@@ -79,6 +82,14 @@ Conv := [].{
                 } else {
                     { a: Arena.fail(a, "Failed to parse word non-boundary"), ids: [Arena.bot] }
                 }
+            # Deviation from RE#: a lookaround or `\b` nested inside a lookaround body
+            # is rejected. RE# accepts `(?<=[ab]\b)` and `(?=(?<=\n))` and reports the
+            # positions one symbol off (the inner lookaround's pending positions are
+            # counted from the wrong side); the reference and textbook semantics agree
+            # against it, and no rewrite in RE#'s normal form expresses these.
+            LookAhead(x, _) | LookBehind(x, _) if Ast.has_lookaround(x) or Ast.has_wordb(x) => {
+                { a: Arena.fail(a, Conv.nested_look_msg), ids: [Arena.bot] }
+            }
             LookAhead(x, neg) => {
                 body = Conv.convert(a, ctx, x)
                 r = if neg { Build.rewrite_negative_lookaround(body.a, False, body.id) } else { Build.mk_lookaround(body.a, body.id, False, 0, Arena.rs_empty) }

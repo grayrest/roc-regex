@@ -685,3 +685,44 @@ graph and derivative semantics) and disagrees with RE# on the `{1,2}` and
 `(\n?)+` ones, where it gives the expected answer. Whether to depart from
 RE# on the reproduced ones is a decision for the owner: the RE# differential
 would then need a known-divergence list, as the corpus already has.
+
+## Dropping RE# parity on its confirmed bugs (2026-09-05)
+
+Owner's decision after the fuzz campaign: the engine gives the textbook
+answer where RE# is demonstrably wrong, and the RE# differential carries a
+known-divergence list. Every fix below was located by tracing the engine's
+own reverse sweep state by state (`trace2.roc`: `Dfa.step_end`/`Dfa.step`
+with the node dumped structurally, Show being unreliable) and is marked
+"Deviation from RE#" in the code. The brute-force reference is now the
+arbiter for lookarounds and anchors too: **every construct, 9396 cases, 0
+divergences** against it; plain constructs 18000 / 0; corpus 331/331; the
+curated RE# differential 3430 agree / 0 differ / 16 known bugs; the RE# fuzz
+tier 9480 cases / 0 unexplained / 149 RE# bugs (classified automatically:
+RE# disagrees, the reference sides with us).
+
+| # | RE#'s behaviour | root cause | fix |
+|---|---|---|---|
+| 1 | `a?\b\s` → 0-9, `\s*\bts\b` on "x ts" → 0-4: a mid-pattern lookbehind after a nullable expression swallows the text before the match | `mkConcatChecked` prepends `_*` to a left context of min length 0 before intersecting it with `_*R` | `Build.rewrite_at` rejects a nullable left context before a lookbehind, `\b` or `^`: the correct rewrite needs a lookbehind inside a union, which the forward pass cannot verify (RE#'s own reason for forbidding lookarounds in unions) |
+| 2 | `_*\A` → 0-2, `x*(?<=a)b` accepts "xb" | `mkNodeWithoutLookbackPrefix` strips a lookbehind/anchor through an always-nullable head | `Deriv.without_lookback_prefix` strips only at the very start; the end pass checks Begin-nullability at position 0 (`ends_fast`, `ends_from`) |
+| 3 | `b?(?!c&d)` on "b" → 0-0 | `HandleInputEndFwd` consults the End location only for anchor states without pending positions | `at_eoi`: End-nullable branches with nothing pending give the position itself; pending pairs of End-nullable branches give `pos - offset`; empty input uses the Begin+End location |
+| 4 | `(?<!a.)` on "abc" → 1-1, 2-2, 3-3 (no 0-0, spurious 2-2) | pending positions materialize when a lookahead's body CAN be nullable (anchor-dependent bodies included) and are marked at every step; `HandleInputStart` reads the Center-location NullKind | `Dfa.pend_at`/`fresh_at`: pending pairs count only for branches nullable at the current location; state creation uses Center, input start Begin, input end End |
+| 5 | `b^ ?\|.` on "b a" → 0-2 | `mkAnd2` folds `ε & X` to ε whenever X CAN be nullable | folds only for always-nullable X; otherwise the intersection stays and the location decides |
+| 6 | `.[^a]{1,2}[ab]*(?!\w.{2}cb?)` on "abxb a" → 2-5, not 0-4 | `Or(LB·rest, rest)` → `(LB\|ε)·rest` → `LB{0,1}` → ε: a lookbehind whose body is nullable now (the reversed lookahead's running check) is treated as an optional assertion and dropped | `mk_or2`/`mk_or`: ε is not folded into a branch that carries a lookaround (its nullability is transient) |
+| 7 | `(?<=[ab]\b)` → 4-4, 6-6 (should be 3-3, 6-6); `(?=(?<=\n))` one symbol off | a lookaround or `\b` nested in a lookaround body | rejected (`Conv.nested_look_msg`); no rewrite in RE#'s normal form expresses it |
+
+RE# bugs we never reproduced (already the textbook answer): `b_{1,2}` not
+extended to 2-5; `[^a]&.\s\|\W*` losing the `\s`; `(\n?)+(?<! )b+` → 0-4;
+duplicate positions from `(?<![^a][ab][ab]\d{0,2})`.
+
+Cost: `\s*\bword\b`-style patterns are now rejected (RE# accepts them and,
+for a non-empty prefix, returns a match that swallows it). The corpus's one
+such case expects the rejection (`KNOWN_RESHARP_DIVERGENCES` "REJECT").
+
+Known-divergence lists: `tools/sharp-diff/gen.py` `KNOWN_RESHARP_BUGS`
+(pattern, haystack, textbook answer or REJECT; outcome `KnownBug` when we
+match it); `tools/sharp-corpus/gen.py` `KNOWN_RESHARP_DIVERGENCES` (now also
+"REJECT"); the fuzz `resharp` tier classifies each RE# disagreement by asking
+the reference and fails only when both disagree with us.
+
+Performance is unchanged within noise (A/B after the changes: class_plus
+2.17 ms, two_words 1.89, compl 1.49, bounded_num 0.40, caps_email 0.09).
