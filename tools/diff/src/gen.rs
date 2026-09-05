@@ -44,6 +44,56 @@ fn main() {
             println!("\t{{ pat: \"{}\", hay: \"{}\", want: \"{}\" }},", pe, he, want);
         }
     }
+    // Specific (pattern, haystack) pairs from the 2026-09-05 code review. The
+    // cross product above never pairs a pattern with the haystack that breaks
+    // it, so each fix gets its own case here. A pattern the Rust crate REJECTS
+    // is expected to be rejected by this engine too ("COMPILE_ERR").
+    let pairs: &[(&str, &str)] = &[
+        // reverse DFA must use all-matches semantics (leftmost start)
+        ("a*?b", "aab"),
+        ("\\w+?@\\w+", "ab@cd"),
+        ("(|a)b", "ab"),
+        ("(?:|a)b", "ab"),
+        ("(?:b|ab)c", "abc"),
+        ("(?:a|ba)c", "bac"),
+        ("x(a|)y", "xay"),
+        // inline-start: every boundary must accept the same byte set
+        ("[ax][ab]?[axc]+[de]", "aabcd"),
+        ("[ax][ab]?[axc]+[de]", "xxabcd aabcd"),
+        // ... while the shapes the optimization exists for still work
+        ("[A-Za-z]+", "  Hello99  "),
+        ("\\w+\\s+\\w+", "foo bar baz"),
+        ("\\d{2,4}", "192.168.1.100"),
+        // reverse-inner literal prefilter: LEFT must be able to stop at the
+        // first occurrence of the literal (hard separator, or a single class)
+        ("(?:xab)*ab", "xabab"),
+        ("(?:[ab][ab]@c)?[bB]@", "ab@cb@"),
+        ("\\w+@\\w+", "the@host now"),
+        (".*cat", "cat cats scatter"),
+        (".*b", "abcb"),
+        ("[a-z]*b", "aabxb"),
+        ("(?:ab)*ab", "ababab"),
+        // required-prefix extraction must stop at a partially-literal group
+        ("(ab?)c", "abc"),
+        ("x(ab?)c", "xabc"),
+        ("(ab?)c|xyz", "abc"),
+        ("(a|ab)c", "abc"),
+        ("(ab)?c", "c"),
+        // repetition bounds are validated, not wrapped
+        ("a{2,1}", "aa"),
+        ("a{99999999999}", "aa"),
+        // unsupported escapes are rejected instead of silently mis-parsed
+        ("[\\b]", "b"),
+        ("\\0", "a"),
+        ("\\1", "1"),
+    ];
+    for (p, h) in pairs {
+        let want = match Regex::new(p) {
+            Ok(re) => re.find_iter(h).map(|m| format!("{}-{}", m.start(), m.end())).collect::<Vec<_>>().join(","),
+            Err(_) => "COMPILE_ERR".to_string(),
+        };
+        println!("\t{{ pat: \"{}\", hay: \"{}\", want: \"{}\" }},", roc_str(p), roc_str(h), want);
+    }
     println!("]\n");
     println!("{}", RUNNER);
 }
