@@ -71,7 +71,7 @@ Rev := [].{
                 NoRange => False
             }
             averify =
-                if (!List.is_empty(c.prefix) or has_frange) and !c.anchored_start and !c.accept_eoi_only {
+                if (!List.is_empty(c.prefix) or has_frange or !List.is_empty(c.tlits)) and !c.anchored_start and !c.accept_eoi_only {
                     match det(c.prog, c.splits) {
                         Ok(av) => Verify(av)
                         Err(_) => NoVerify
