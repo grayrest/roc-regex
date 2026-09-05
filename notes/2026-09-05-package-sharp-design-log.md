@@ -1,0 +1,159 @@
+# package-sharp — design log
+
+**Date:** 2026-09-05
+**Branch:** `claude/resharp-regex-design-review-60cff0`
+**Scope:** a second Roc regex engine porting RE# (`~/Repositories/resharp-dotnet`) —
+Brzozowski derivatives, leftmost-longest, `&`/`~`/`_`, normal-form lookarounds —
+as a companion package beside `Regex`. Plan: `plans/2026-09-05-package-sharp.md`.
+
+## Goal
+
+Ship RE#'s semantics and syntax in pure Roc with the project's fold thesis
+intact: a literal pattern compiles at build time to a flat table; a runtime
+pattern compiles at runtime; one function, one code path. Measured against
+RE#'s own corpus, a brute-force reference, and RE# itself.
+
+## Constraints
+
+- Purity: no mutable matcher object, so RE#'s lazy DFA becomes "folded prefix +
+  runtime extension of a linearly threaded record".
+- D12: everything folded is flat `List(U32)`/`List(U64)`; construction is
+  append-only on large lists; `List.set` only on small ones (interning index,
+  transition rows).
+- D3/D8: codepoint alphabet with an `Invalid` symbol class; RE# is UTF-16 with
+  .NET Unicode tables, so Unicode disagreements with the oracle are expected and
+  excluded from the differential.
+- No `dotnet` on the machine today; the RE# TOML corpus (331 cases) is the only
+  oracle available until M3 installs the SDK.
+
+## Q1 — What is package-sharp relative to `Regex`?
+
+Options: companion engine; replacement candidate; perf experiment only.
+Leftmost-longest set semantics, no captures, no lazy quantifiers, multiline
+anchors and empty-match-after-match reporting are all user-visible differences
+from the Rust-compatible engine; the 1512-case Rust differential cannot judge
+it. **Choice: companion engine (S1).**
+
+## Q2 — Oracle
+
+Options: TOML corpus + brute-force reference + dotnet diff; corpus + reference;
+corpus + dotnet. The reference is the only oracle that speaks our alphabet
+(`_`/`~` over `Invalid`); real RE# is the only check that our reading of
+`llmatch`'s details matches the authors'. **Choice: all three (S2).**
+
+The reference is a structural interpreter over the rewritten node DAG
+(`ends(node, s)` = the set of match ends from `s`, with `\A`/`\z`/lookarounds
+resolved against the whole haystack), not a derivative re-run — an independent
+mechanism catches derivative bugs; a derivative-based reference would share
+them. Same intent as the plan's S2.2 (no automaton, exercises the rewrite
+layer); noted here because the plan text said "nullability of derivatives".
+
+## Q3 — Eager vs lazy
+
+Options: eager only with unbounded lookahead a compile error (recommended);
+eager plus a lazy runtime fallback; lazy only. The user chose completeness:
+RE#'s `a(?=.*b)` "infinite automaton" story is part of what is ported.
+**Choice: eager plus lazy (S3).**
+
+## Q4 — Fallback shape
+
+Options: one engine (folded prefix + runtime extension, RE#'s own
+`DfaThreshold` structure); two engines; lazy only for unbounded lookahead.
+**Choice: one engine (S3).** Replaces D10's "downgrade to PikeVM" with
+"continue lazily".
+
+## Q5 — Alphabet: `_` and `~` over `Invalid`
+
+Options: `_` includes `Invalid` (true complement); `_` excludes it. **Choice:
+includes (S6).** De Morgan holds; `.`/`[^a]` still exclude `Invalid` per D8.
+
+## Q6 — Anchors
+
+Options: RE#'s always-multiline `^`/`$`; Rust's text anchors. **Choice: RE#'s
+(S7).** Matches the oracle and 73 anchor corpus cases; costs nothing in the
+engine.
+
+## Q7 — Parser
+
+Options: new parser copying `Comp`'s lexer/class/escape code; mode flag on
+`Comp`. **Choice: new parser (S8).** The AST differs in kind (And/Not/Any, no
+Save/lazy).
+
+## Q8 — Layout
+
+Options: copy Trie/Uni/Teddy/Lit/Err now, consolidate later; extract
+`package-core` first; cross-package imports. **Choice: copy now (S8).**
+
+## Q9 — Rewrite tiers in v1
+
+Options: tiers 1+3 now, tier 2 measured in (recommended); all three; tier 1
+only. **User's choice: all three (S10).** Each tier-2 rule still gets a
+state-count number so its effect on our alphabet is known.
+
+## Q10 — API surface
+
+Options: `is_match, find_all, count, find, replace_all, split, first_end,
+longest_end`; RE#'s exact surface; early-exit `find`. **Choice: the first
+(S11).** `find` is a documented full sweep.
+
+## Q11 — Arena representation
+
+Options: flat `List(U32)` cells + hand-rolled open-addressing index; Roc
+`Dict`. **Choice: flat (S9).** `Dict` fold and in-place behaviour are
+unmeasured.
+
+## Q12 — Runtime state cap
+
+Options: evict to the folded prefix and continue; `Try` error arm; crash.
+**Choice: evict (S4).**
+
+## Q13 — Accelerators
+
+Options: derivative-driven, staged by measurement; everything in v1; reuse
+`Comp`'s AST extraction. **Choice: derivative-driven, staged (S13).** Requires
+a right-to-left SIMD kernel that does not exist yet.
+
+## Q14 — Spike gates
+
+Options: gate on unknowns 1, 2, 4 (recommended); gate on all five; none.
+**User's choice: none (S14).** Unknowns are measured as the work lands and
+recorded in `notes/` with the fail consequence the plan lists.
+
+## Q15 — Cache lifetime
+
+Options: per-call plus a threaded `find_all_grow`; per-call only; threaded
+only. **Choice: per-call plus threaded (S5).**
+
+## Q16 — Build order
+
+Options: reference-first; automaton-first; lazy-first. **Choice: reference-first
+(S15).** M1 passes the corpus through the reference alone.
+
+## What's deferred
+
+| item | reason | where |
+|---|---|---|
+| shared `package-core` | after both engines are stable | S8 |
+| pruning tier-2 rewrites | all ship; dropping is a later measurement | S10 |
+| forward leftmost-longest `find` | not an RE# algorithm | S11 |
+| captures | RE# has none; `Regex` exists | plan "Deferred" |
+| lookarounds inside `~`, unions of lookarounds, unrewritable mid-pattern lookarounds | RE#'s own unsupported set | plan "Deferred" |
+| more than 64 minterms | RE# uses a BitVector solver past 64; v1 returns a compile error naming the count | this log (M1 finding) |
+
+## Conventions established
+
+- Minterms are true equivalence classes: the copied `Trie`'s cut-point atoms
+  are grouped by their membership signature over the pattern's sets, and the
+  trie's leaves are remapped atom → minterm. A tset is a `U64` bitset over
+  minterms (RE#'s `UInt64Solver`).
+- Node ids 0–6 are fixed as in RE# (`BOT, EPS, TOP, TOP_STAR, TOP_PLUS,
+  END_ANCHOR, BEGIN_ANCHOR`) so ported rewrite rules read the same.
+- Node cells: `[kind, a, b, children…]` in one `List(U32)`; node id = cell
+  offset. Per-node info in parallel flat lists indexed by node id.
+- The engine state (arena + index + tables) is one record threaded linearly:
+  moved into each constructor/derivative call and returned, never held by a
+  `var` during the call.
+- Intra-module calls are module-qualified (`Node.mk_or`) as in `package/`;
+  recursive nominal types are destructured only with `match`.
+- Every RE# rewrite rule ported keeps RE#'s comment tag (`sub 01` … `sub 07`,
+  `merge loops 2/3`) so the two codebases can be diffed rule by rule.
