@@ -53,6 +53,8 @@ Dfa := [].{
         # `skip_lo` holds its `Bset` table at `s * 16`
         skip_ok : List(U8),
         skip_lo : List(U8),
+        # does any state skip? (the per-step skip check costs ~0.6 ns; off when useless)
+        any_skip : Bool,
     }
 
     dead : U32
@@ -92,7 +94,7 @@ Dfa := [].{
             st_node: [0], st_flags: [0], st_nk: [Dfa.nk_notnull], st_pend: [0], st_minpend: [0],
             node_state: [], table: List.repeat(0.U32, a.nmt.to_u64()), end_table: List.repeat(0.U32, a.nmt.to_u64()),
             s_rev_ts: 0, s_noprefix: 0, max_states, complete: True,
-            fold_states: 0, fold_marks: Arena.marks(a), runtime_cap: Dfa.default_runtime_cap, atable: [], skip_ok: [], skip_lo: [],
+            fold_states: 0, fold_marks: Arena.marks(a), runtime_cap: Dfa.default_runtime_cap, atable: [], skip_ok: [], skip_lo: [], any_skip: False,
         }
         d = Dfa.get_state(e0, Arena.bot, False)
         r1 = Dfa.get_state(d.e, rev_ts, True)
@@ -122,7 +124,7 @@ Dfa := [].{
                 []
             }
         sk = if e.complete { Dfa.skip_sets(e, ascii, n) } else { { ok: [], lo: [] } }
-        { ..e, fold_states: n, fold_marks: Arena.marks(e.a), atable, skip_ok: sk.ok, skip_lo: sk.lo }
+        { ..e, fold_states: n, fold_marks: Arena.marks(e.a), atable, skip_ok: sk.ok, skip_lo: sk.lo, any_skip: List.any(sk.ok, |x| x == 1) }
     }
 
     # RE#'s `_createStartset` for every state of a complete fold: the minterms
@@ -573,8 +575,9 @@ Dfa := [].{
         match ac.override {
             Literal(lit) => Dfa.find_all_literal(hay, lit)
             NoOverride => {
-                sts = Dfa.starts_fast_opts(e, t, ac.init, hay, skip) |> Dfa.ascending
-                Dfa.ends_fast(e, t, ac.len, hay, sts, skip)
+                sk = skip and e.any_skip
+                sts = Dfa.starts_fast_opts(e, t, ac.init, hay, sk) |> Dfa.ascending
+                Dfa.ends_fast(e, t, ac.len, hay, sts, sk)
             }
         }
 
@@ -589,7 +592,9 @@ Dfa := [].{
         n = List.len(hay)
         at = e.atable
         nks = e.st_nk
-        skip_ok = e.skip_ok
+        # an empty table when skipping is off: `List.get ?? 0` then never says 1, and
+        # the loop carries no Bool (a runtime `skip and …` per step cost ~1.5 ns)
+        skip_ok = if skip { e.skip_ok } else { [] }
         skip_lo = e.skip_lo
         table = e.table
         nmt = e.nmt.to_u64()
@@ -627,7 +632,7 @@ Dfa := [].{
                     # nearest member; the last such position is the best end, so jump
                     # there (never past the last byte: the regular step then reaches
                     # the end-of-input handling)
-                    if skip and (List.get(skip_ok, s.to_u64()) ?? 0) == 1 and !Bset.member(skip_lo, s.to_u64(), b0) {
+                    if (List.get(skip_ok, s.to_u64()) ?? 0) == 1 and !Bset.member(skip_lo, s.to_u64(), b0) {
                         pos =
                             match Bset.find(hay, skip_lo, s.to_u64(), pos + 1) {
                                 Ok(p) => p
@@ -772,7 +777,9 @@ Dfa := [].{
         # miscompile, see upstream/2026-09-05-sharp-var-list-append).
         at = e.atable
         nks = e.st_nk
-        skip_ok = e.skip_ok
+        # an empty table when skipping is off: `List.get ?? 0` then never says 1, and
+        # the loop carries no Bool (a runtime `skip and …` per step cost ~1.5 ns)
+        skip_ok = if skip { e.skip_ok } else { [] }
         skip_lo = e.skip_lo
         table = e.table
         nmt = e.nmt.to_u64()
@@ -781,7 +788,7 @@ Dfa := [].{
         var acc = acc0
         while pos > 0 {
             b = List.get(hay, pos - 1) ?? 0
-            if skip and (List.get(skip_ok, s.to_u64()) ?? 0) == 1 and !Bset.member(skip_lo, s.to_u64(), b) {
+            if (List.get(skip_ok, s.to_u64()) ?? 0) == 1 and !Bset.member(skip_lo, s.to_u64(), b) {
                 # RE#'s `skip_active_rev`: the state loops on every byte back to
                 # the nearest member, so each skipped position (all ASCII, one
                 # byte per symbol) is a match start when the state is nullable
@@ -842,7 +849,9 @@ Dfa := [].{
     collect_prefix = |e, t, pf, hay, pos0, s0, acc0, skip| {
         at = e.atable
         nks = e.st_nk
-        skip_ok = e.skip_ok
+        # an empty table when skipping is off: `List.get ?? 0` then never says 1, and
+        # the loop carries no Bool (a runtime `skip and …` per step cost ~1.5 ns)
+        skip_ok = if skip { e.skip_ok } else { [] }
         skip_lo = e.skip_lo
         table = e.table
         nmt = e.nmt.to_u64()
@@ -877,7 +886,7 @@ Dfa := [].{
                 }
             } else {
                 b = List.get(hay, pos - 1) ?? 0
-                if skip and (List.get(skip_ok, s.to_u64()) ?? 0) == 1 and !Bset.member(skip_lo, s.to_u64(), b) {
+                if (List.get(skip_ok, s.to_u64()) ?? 0) == 1 and !Bset.member(skip_lo, s.to_u64(), b) {
                     # RE#'s `skip_active_rev`: the state loops on every byte back to
                     # the nearest member, so each skipped position (all ASCII, one
                     # byte per symbol) is a match start when the state is nullable
@@ -1003,7 +1012,9 @@ Dfa := [].{
         } else {
             at = e.atable
             nks = e.st_nk
-            skip_ok = e.skip_ok
+            # an empty table when skipping is off: `List.get ?? 0` then never says 1, and
+            # the loop carries no Bool (a runtime `skip and …` per step cost ~1.5 ns)
+            skip_ok = if skip { e.skip_ok } else { [] }
             skip_lo = e.skip_lo
             table = e.table
             nmt = e.nmt.to_u64()
@@ -1016,7 +1027,7 @@ Dfa := [].{
                 # nearest member; the last such position is the best end, so jump
                 # there (never past the last byte: the regular step then reaches
                 # the end-of-input handling)
-                if skip and (List.get(skip_ok, s.to_u64()) ?? 0) == 1 and !Bset.member(skip_lo, s.to_u64(), b0) {
+                if (List.get(skip_ok, s.to_u64()) ?? 0) == 1 and !Bset.member(skip_lo, s.to_u64(), b0) {
                     pos =
                         match Bset.find(hay, skip_lo, s.to_u64(), pos + 1) {
                             Ok(p) => p

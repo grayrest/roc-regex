@@ -23,27 +23,33 @@ echo "generating ${BYTES}-byte haystack..."
 ./tools/bench/target/release/gen "$HAY" "$BYTES" >/dev/null
 HAYLEN=$(wc -c < "$HAY")
 
-echo "building roc bench..."
+echo "building roc bench (Regex)..."
 roc build examples/bench.roc --no-cache >/dev/null 2>&1
+echo "building roc bench (Sharp)..."
+roc build examples/bench_sharp.roc --no-cache >/dev/null 2>&1
 
 TMP="$(mktemp -d)"
-echo "running roc  (${ROC_ITERS} iters)..."
+echo "running roc Regex (${ROC_ITERS} iters)..."
 ./bench "$HAY" > "$TMP/roc.csv"
+echo "running roc Sharp (${ROC_ITERS} iters)..."
+./bench_sharp "$HAY" > "$TMP/sharp.csv"
 echo "running rust (${RUST_ITERS} iters)..."
 ./tools/bench/target/release/bench "$HAY" "$RUST_ITERS" > "$TMP/rust.csv"
 
 echo
 echo "haystack: ${HAYLEN} bytes   |   ns = nanoseconds per find_all over the whole haystack"
-echo "roc = Roc PikeVM; rustPV = Rust regex-automata PikeVM (same algorithm);"
-echo "rustMeta = Rust meta engine (lazy DFA + prefilters). vsPV is the engine-matched ratio."
+echo "roc = Roc Regex (DFA + PikeVM); sharp = Roc package-sharp (RE# derivatives, leftmost-longest);"
+echo "rustMeta = Rust meta engine (lazy DFA + prefilters); rustPV = Rust PikeVM."
+echo "cnt checks match-count parity of roc and sharp against Rust (a DIFF invalidates the row)."
 awk -F, '
-BEGIN{ printf "%-13s %11s %11s %11s %8s %8s %5s\n","pattern","roc_ns","rustPV_ns","rustMeta_ns","vsPV","vsMeta","cnt" }
-FNR==NR { if($1!="id"){roc[$1]=$3; rcnt[$1]=$4} next }
+BEGIN{ printf "%-13s %11s %11s %11s %11s %8s %8s %5s\n","pattern","roc_ns","sharp_ns","rustMeta_ns","rustPV_ns","roc/M","sharp/M","cnt" }
+FILENAME==ARGV[1] { if($1!="id"){roc[$1]=$3; rcnt[$1]=$4} next }
+FILENAME==ARGV[2] { if($1!="id"){ id=$1; sub(/^sharp_/,"",id); sharp[id]=$3; scnt[id]=$4 } next }
 # rust.csv: id,compile,meta_ns,pikevm_ns,count,checksum
-{ id=$1; rn=roc[id]+0; meta=$3+0; pv=$4+0;
-  par=(rcnt[id]==$5)?"ok":"DIFF";
-  printf "%-13s %11d %11d %11d %6.1fx %6.0fx %5s\n", id, rn, pv, meta, rn/pv, rn/meta, par }
-' "$TMP/roc.csv" "$TMP/rust.csv"
+{ id=$1; rn=roc[id]+0; sn=sharp[id]+0; meta=$3+0; pv=$4+0;
+  par=(rcnt[id]==$5 && scnt[id]==$5)?"ok":"DIFF";
+  printf "%-13s %11d %11d %11d %11d %7.2fx %7.2fx %5s\n", id, rn, sn, meta, pv, rn/meta, sn/meta, par }
+' "$TMP/roc.csv" "$TMP/sharp.csv" "$TMP/rust.csv"
 
 echo
 echo "compile latency (Rust Regex::new, ns/pattern; Roc = 0, folded at build time):"
