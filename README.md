@@ -39,6 +39,16 @@ Unicode class data (~180 KB for `\w`, needed by both the DFA and the PikeVM) —
 the D3 shared-vs-per-pattern-trie question, not the engine. This sets stop
 rule 1's threshold and D10's default budget.
 
+## A second engine: `package-sharp`
+
+[`package-sharp/`](package-sharp/README.md) is a port of RE#'s design —
+derivatives, leftmost-longest, `&`/`~`/`_`, lookarounds — sharing `Uni`,
+`Trie`, `Teddy` and `Lit` with `Regex`. Plan:
+[`plans/2026-09-05-package-sharp.md`](plans/2026-09-05-package-sharp.md);
+decisions and measurements:
+[`notes/2026-09-05-package-sharp-design-log.md`](notes/2026-09-05-package-sharp-design-log.md).
+`tools/bench/run.sh` prints both engines next to Rust.
+
 ## Status: M1 complete
 
 The M1 vertical slice runs end to end — parser (literals, `.`, classes, `\w \d
