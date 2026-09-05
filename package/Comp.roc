@@ -191,25 +191,65 @@ Comp := [
                 Group(x, _) => Comp.flatten_cat(x)
                 _ => Comp.flatten_cat(ast)
             }
-        atoms = List.map(xs, Comp.class_atom)
-        any_non_class = List.any(atoms, |r| match r { Err(_) => True Ok(_) => False })
-        if List.is_empty(atoms) or any_non_class {
+        infos = List.map(xs, Comp.class_atom)
+        # every atom must be a single class; the first non-nullable (clean, non-
+        # empty start); the first set F non-negated (so subset checks are simple).
+        ok_atoms = !(List.is_empty(infos)) and !(List.any(infos, |r| match r { Err(_) => True Ok(_) => False }))
+        if !ok_atoms {
             False
         } else {
-            first_non_null =
-                match List.get(atoms, 0) {
-                    Ok(Ok(a)) => !(a.nullable)
-                    _ => False
-                }
-            cls0 =
-                match List.get(atoms, 0) {
-                    Ok(Ok(a)) => a.class
-                    _ => { neg: False, ranges: [] }
-                }
-            same = List.all(atoms, |r| match r { Ok(a) => a.class == cls0 Err(_) => False })
-            first_non_null and same
+            dummy = { class: { neg: False, ranges: [] }, nullable: True, repeatable: False }
+            atoms = List.map(infos, |r| match r { Ok(a) => a Err(_) => dummy })
+            a1 = List.get(atoms, 0) ?? dummy
+            f = a1.class
+            if a1.nullable or f.neg {
+                False
+            } else {
+                Comp.boundaries_absorb(atoms, f.ranges, 0, List.len(atoms))
+            }
         }
     }
+
+    # For each NON-LAST atom Ai, the first set F must be "absorbed": an F-byte read
+    # while in Ai must extend Ai (F ⊆ class(Ai), only if Ai repeats) or start the
+    # continuation (F ⊆ first-set of Ai+1..). Otherwise an F-byte would kill the
+    # attempt and restart a fresh one at a later offset without returning to the
+    # start state — which is what breaks inline-start (`\w+\s+\d+`). The last atom
+    # needs no check: the leftmost-first DFA truncates at the match, so no restart
+    # happens inside the scan.
+    ClassInfo : { class : { neg : Bool, ranges : List(Comp.Rng) }, nullable : Bool, repeatable : Bool }
+    boundaries_absorb : List(Comp.ClassInfo), List(Comp.Rng), U64, U64 -> Bool
+    boundaries_absorb = |atoms, f, i, n|
+        if i + 1 >= n {
+            True
+        } else {
+            dummy = { class: { neg: False, ranges: [] }, nullable: True, repeatable: False }
+            ai = List.get(atoms, i) ?? dummy
+            extend_ok = ai.repeatable and !(ai.class.neg) and Comp.ranges_subset(f, ai.class.ranges)
+            advance_ok = Comp.ranges_subset(f, Comp.suffix_first(atoms, i + 1, n))
+            if extend_ok or advance_ok {
+                Comp.boundaries_absorb(atoms, f, i + 1, n)
+            } else {
+                False
+            }
+        }
+
+    # first-set of atoms[j..]: class(Aj), plus class(Aj+1).. while nullable.
+    suffix_first : List(Comp.ClassInfo), U64, U64 -> List(Comp.Rng)
+    suffix_first = |atoms, j, n|
+        if j >= n {
+            []
+        } else {
+            dummy = { class: { neg: False, ranges: [] }, nullable: False, repeatable: False }
+            aj = List.get(atoms, j) ?? dummy
+            rest = if aj.nullable { Comp.suffix_first(atoms, j + 1, n) } else { [] }
+            if aj.class.neg { rest } else { List.concat(aj.class.ranges, rest) }
+        }
+
+    # every range of `a` is contained in some single range of `b`
+    ranges_subset : List(Comp.Rng), List(Comp.Rng) -> Bool
+    ranges_subset = |a, b|
+        List.all(a, |r| List.any(b, |s| s.lo <= r.lo and r.hi <= s.hi))
 
     flatten_cat : Comp -> List(Comp)
     flatten_cat = |ast|
@@ -221,13 +261,13 @@ Comp := [
     # a "class atom": a single character class with its nullability, unwrapping
     # quantifiers and groups. Anything else (literal-run atom stays a class of one
     # codepoint too, alternation, look, ...) that is not a class -> NotClassAtom.
-    class_atom : Comp -> Try({ class : { neg : Bool, ranges : List(Comp.Rng) }, nullable : Bool }, [NotClassAtom])
+    class_atom : Comp -> Try({ class : { neg : Bool, ranges : List(Comp.Rng) }, nullable : Bool, repeatable : Bool }, [NotClassAtom])
     class_atom = |x|
         match x {
-            Chars(c) => Ok({ class: c, nullable: False })
-            Plus(y, _) => match Comp.class_atom(y) { Ok(a) => Ok({ class: a.class, nullable: a.nullable }) Err(_) => Err(NotClassAtom) }
-            Star(y, _) => match Comp.class_atom(y) { Ok(a) => Ok({ class: a.class, nullable: True }) Err(_) => Err(NotClassAtom) }
-            Quest(y, _) => match Comp.class_atom(y) { Ok(a) => Ok({ class: a.class, nullable: True }) Err(_) => Err(NotClassAtom) }
+            Chars(c) => Ok({ class: c, nullable: False, repeatable: False })
+            Plus(y, _) => match Comp.class_atom(y) { Ok(a) => Ok({ class: a.class, nullable: a.nullable, repeatable: True }) Err(_) => Err(NotClassAtom) }
+            Star(y, _) => match Comp.class_atom(y) { Ok(a) => Ok({ class: a.class, nullable: True, repeatable: True }) Err(_) => Err(NotClassAtom) }
+            Quest(y, _) => match Comp.class_atom(y) { Ok(a) => Ok({ class: a.class, nullable: True, repeatable: a.repeatable }) Err(_) => Err(NotClassAtom) }
             Group(y, _) => Comp.class_atom(y)
             _ => Err(NotClassAtom)
         }
