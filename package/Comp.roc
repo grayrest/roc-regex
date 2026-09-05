@@ -61,6 +61,10 @@ Comp := [
         # first-byte candidate and emit a fixed-length span, skipping the anchored
         # DFA entirely. False for any pattern with structure after the literal.
         exact : Bool,
+        # The pattern is a single-class run (see `inline_start_ok`), so the DFA
+        # `find_all` can recover the match start from the forward pass and skip
+        # the reverse start-scan. False disables that (reverse scan used).
+        inline_start : Bool,
         tlits : List(List(U8)),
         # Set ordinal of the folded `\w` class when the pattern has a word
         # boundary (`\b`/`\B`), else 0. Present so the DFA determinizer can ask
@@ -164,6 +168,63 @@ Comp := [
             Quest(x, _) => Comp.ast_has_look(x)
             Group(x, _) => Comp.ast_has_look(x)
             _ => False
+        }
+
+    # Is the pattern a single-class run — a concatenation/quantification of the
+    # SAME character class, with a non-nullable first atom (e.g. `[A-Za-z]+`,
+    # `\p{L}+`, `\d{2,4}` -> Cat of same-class Chars/Quest(Chars))? For these the
+    # forward DFA is "self-anchoring": any byte either extends the run or ends it
+    # cleanly back to the start state — there is no alternation that could start a
+    # fresh attempt mid-run at a later offset. That makes the inline-start trick
+    # (match start = last exit from the start state) sound, so `find_all` can take
+    # the match start from the forward pass and skip the reverse scan. Excludes
+    # alternation, looks/anchors, literals-then-class, and nullable-first shapes.
+    inline_start_ok : Comp -> Bool
+    inline_start_ok = |ast| {
+        xs =
+            match ast {
+                Group(x, _) => Comp.flatten_cat(x)
+                _ => Comp.flatten_cat(ast)
+            }
+        atoms = List.map(xs, Comp.class_atom)
+        any_non_class = List.any(atoms, |r| match r { Err(_) => True Ok(_) => False })
+        if List.is_empty(atoms) or any_non_class {
+            False
+        } else {
+            first_non_null =
+                match List.get(atoms, 0) {
+                    Ok(Ok(a)) => !(a.nullable)
+                    _ => False
+                }
+            cls0 =
+                match List.get(atoms, 0) {
+                    Ok(Ok(a)) => a.class
+                    _ => { neg: False, ranges: [] }
+                }
+            same = List.all(atoms, |r| match r { Ok(a) => a.class == cls0 Err(_) => False })
+            first_non_null and same
+        }
+    }
+
+    flatten_cat : Comp -> List(Comp)
+    flatten_cat = |ast|
+        match ast {
+            Cat(xs) => xs
+            _ => [ast]
+        }
+
+    # a "class atom": a single character class with its nullability, unwrapping
+    # quantifiers and groups. Anything else (literal-run atom stays a class of one
+    # codepoint too, alternation, look, ...) that is not a class -> NotClassAtom.
+    class_atom : Comp -> Try({ class : { neg : Bool, ranges : List(Comp.Rng) }, nullable : Bool }, [NotClassAtom])
+    class_atom = |x|
+        match x {
+            Chars(c) => Ok({ class: c, nullable: False })
+            Plus(y, _) => match Comp.class_atom(y) { Ok(a) => Ok({ class: a.class, nullable: a.nullable }) Err(_) => Err(NotClassAtom) }
+            Star(y, _) => match Comp.class_atom(y) { Ok(a) => Ok({ class: a.class, nullable: True }) Err(_) => Err(NotClassAtom) }
+            Quest(y, _) => match Comp.class_atom(y) { Ok(a) => Ok({ class: a.class, nullable: True }) Err(_) => Err(NotClassAtom) }
+            Group(y, _) => Comp.class_atom(y)
+            _ => Err(NotClassAtom)
         }
 
     # Is the pattern a pure literal — only single-codepoint literal atoms in
@@ -294,6 +355,7 @@ Comp := [
                         # literal or small first-byte set (those own the prefilter).
                         frange = if List.is_empty(prefix) and List.is_empty(fbytes) { Comp.first_range(numbered.ast) } else { NoRange }
                         exact = !(List.is_empty(prefix)) and Comp.is_exact_literal(numbered.ast)
+                        inline_start = Comp.inline_start_ok(numbered.ast)
                         tlits = Comp.lead_literals(numbered.ast)
                         # wrap in group 0: Save0 ; body ; Save1 ; Match
                         prog0 = { prog: [Comp.inst(Comp.op_save, 0)], sets: [], splits: [], n_sets: 0 }
@@ -350,7 +412,7 @@ Comp := [
                             } else {
                                 { sets: ib.p.sets, word_set: 0 }
                             }
-                        Ok({ prog, splits: p2.splits, classes: Trie.build(wb.sets), n_groups, prefix, rprog, rsplits: r1.splits, uprog, usplits: u1.splits, fbytes, frange, exact, tlits, word_set: wb.word_set, anchored_start: a_start, accept_eoi_only: a_eoi, inner: ib.inner })
+                        Ok({ prog, splits: p2.splits, classes: Trie.build(wb.sets), n_groups, prefix, rprog, rsplits: r1.splits, uprog, usplits: u1.splits, fbytes, frange, exact, inline_start, tlits, word_set: wb.word_set, anchored_start: a_start, accept_eoi_only: a_eoi, inner: ib.inner })
                     }
                 Err(e) => Err(e)
             }
