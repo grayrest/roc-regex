@@ -323,17 +323,22 @@ Regex := [].{
             }
             match Teddy.build(re.tlits) {
                 Ok(t) =>
-                    match Teddy.candidates_capped(t, hay, List.len(hay) // k) {
-                        Ok(cands) =>
-                            if re.exact_alt {
-                                Regex.find_all_teddy_lits(re.tlits, hay, cands)
-                            } else {
+                    if re.exact_alt {
+                        # fused monomorphic scan + memcmp verify (no candidate list,
+                        # no dedup sort) — matches are exactly the branch literals.
+                        match Teddy.match_lits(t, hay, List.len(hay) // k) {
+                            Ok(spans) => spans
+                            Err(_) => Regex.find_all_engine(re, hay)
+                        }
+                    } else {
+                        match Teddy.candidates_capped(t, hay, List.len(hay) // k) {
+                            Ok(cands) =>
                                 match verify {
                                     Verify(av) => Regex.find_all_teddy_dfa(av, re.classes, hay, cands)
                                     NoVerify => Regex.find_all_teddy(Regex.base(re), hay, cands)
                                 }
-                            }
-                        Err(_) => Regex.find_all_engine(re, hay)
+                            Err(_) => Regex.find_all_engine(re, hay)
+                        }
                     }
                 Err(_) => Regex.find_all_engine(re, hay)
             }
@@ -445,53 +450,6 @@ Regex := [].{
         }
         acc
     }
-
-    # pure-literal-alternation verify: at each candidate, find the first branch
-    # (pattern order = leftmost-first) that matches by memcmp and emit its span —
-    # no DFA. A false-positive Teddy candidate (no branch matches) is skipped.
-    find_all_teddy_lits : List(List(U8)), List(U8), List(U64) -> List(Regex.Span)
-    find_all_teddy_lits = |lits, hay, cands| {
-        ncand = List.len(cands)
-        var i = 0
-        var last_end = 0
-        var acc = []
-        var running = True
-        while running {
-            if i >= ncand {
-                running = False
-            } else {
-                at = List.get(cands, i) ?? 0
-                if at < last_end {
-                    i = i + 1
-                } else {
-                    match Regex.first_lit_match(lits, hay, at, 0) {
-                        Ok(plen) => {
-                            acc = List.append(acc, { start: at, end: at + plen })
-                            last_end = at + plen
-                            i = i + 1
-                        }
-                        Err(_) => {
-                            i = i + 1
-                        }
-                    }
-                }
-            }
-        }
-        acc
-    }
-
-    # length of the first literal (in order) that matches at `at`, else NoMatch.
-    first_lit_match : List(List(U8)), List(U8), U64, U64 -> Try(U64, [NoMatch])
-    first_lit_match = |lits, hay, at, li|
-        match List.get(lits, li) {
-            Err(_) => Err(NoMatch)
-            Ok(lit) =>
-                if Lit.matches(hay, at, lit, List.len(lit)) {
-                    Ok(List.len(lit))
-                } else {
-                    Regex.first_lit_match(lits, hay, at, li + 1)
-                }
-        }
 
     # verify literal-prefix candidates with the anchored DFA: run it from each
     # candidate — matches iff the pattern matches there, a tight table loop with

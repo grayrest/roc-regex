@@ -215,6 +215,129 @@ Teddy := [].{
             Teddy.scan_capped(t, hay, len, w + 16, res0, res1, acc2, cap)
         }
 
+    ## Fused scan + literal verify for a pure-literal alternation: mirrors
+    ## `candidates_capped`'s main+overlap-tail scan, but verifies each candidate
+    ## inline against `t.lits` (the whole literal, first match in order =
+    ## leftmost-first) and emits its span. No candidate list, no `dedup_sorted`
+    ## (the `last_end` skip absorbs the overlap AND keeps matches non-overlapping),
+    ## and monomorphic (no verify closure — that defeats the tight-loop codegen).
+    ## `cap` bails to `TooMany` once too many candidates are seen.
+    Span : { start : U64, end : U64 }
+    MState : { last_end : U64, spans : List(Teddy.Span), seen : U64 }
+
+    match_lits : Teddy.T, List(U8), U64 -> Try(List(Teddy.Span), [TooMany])
+    match_lits = |t, hay, cap| {
+        len = List.len(hay)
+        st0 = { last_end: 0, spans: [], seen: 0 }
+        if len < 16 {
+            match Teddy.tail_m(t, hay, 0, len, cap, st0) {
+                Ok(st) => Ok(st.spans)
+                Err(e) => Err(e)
+            }
+        } else {
+            match Teddy.scan_m(t, hay, len, t.m - 1, U8x16.splat(0xFF), U8x16.splat(0xFF), cap, st0) {
+                Err(e) => Err(e)
+                Ok(st1) =>
+                    match Teddy.scan_m(t, hay, len, len - 16, U8x16.splat(0xFF), U8x16.splat(0xFF), cap, st1) {
+                        Err(e) => Err(e)
+                        Ok(st2) => Ok(st2.spans)
+                    }
+            }
+        }
+    }
+
+    # verify one candidate against the literals (in order), threading MState
+    step_m : Teddy.T, List(U8), Teddy.MState, U64, U64 -> Try(Teddy.MState, [TooMany])
+    step_m = |t, hay, st, at, cap|
+        if st.seen + 1 > cap {
+            Err(TooMany)
+        } else if at < st.last_end {
+            Ok({ ..st, seen: st.seen + 1 })
+        } else {
+            match Teddy.lit_end(t, hay, at, 0) {
+                Ok(end) => Ok({ last_end: end, spans: List.append(st.spans, { start: at, end }), seen: st.seen + 1 })
+                Err(_) => Ok({ ..st, seen: st.seen + 1 })
+            }
+        }
+
+    # end (`at + len`) of the first literal that fully matches at `at`, else NoMatch
+    lit_end : Teddy.T, List(U8), U64, U64 -> Try(U64, [NoMatch])
+    lit_end = |t, hay, at, li|
+        match List.get(t.lits, li) {
+            Err(_) => Err(NoMatch)
+            Ok(lit) =>
+                if Teddy.eqm(hay, at, lit, 0, List.len(lit)) {
+                    Ok(at + List.len(lit))
+                } else {
+                    Teddy.lit_end(t, hay, at, li + 1)
+                }
+        }
+
+    # windowed fused scan (mirrors `scan`, verifying literals instead of collecting)
+    scan_m : Teddy.T, List(U8), U64, U64, U8x16, U8x16, U64, Teddy.MState -> Try(Teddy.MState, [TooMany])
+    scan_m = |t, hay, len, w, prev0, prev1, cap, st|
+        if w + 16 > len {
+            Ok(st)
+        } else {
+            chunk = U8x16.load(hay, w) ?? U8x16.splat(0)
+            lomask = U8x16.splat(0x0F)
+            hlo = chunk.bitwise_and(lomask)
+            hhi = chunk.shr_zf_wrap(4).bitwise_and(lomask)
+            res0 = t.lo0.table_lookup(hlo).bitwise_and(t.hi0.table_lookup(hhi))
+            res1 = if t.m >= 2 { t.lo1.table_lookup(hlo).bitwise_and(t.hi1.table_lookup(hhi)) } else { U8x16.splat(0) }
+            cand =
+                if t.m == 1 {
+                    res0
+                } else if t.m == 2 {
+                    prev0.concat_shift_bytes(res0, 15).bitwise_and(res1)
+                } else {
+                    res2 = t.lo2.table_lookup(hlo).bitwise_and(t.hi2.table_lookup(hhi))
+                    a0 = prev0.concat_shift_bytes(res0, 14)
+                    a1 = prev1.concat_shift_bytes(res1, 15)
+                    a0.bitwise_and(a1).bitwise_and(res2)
+                }
+            bm = cand.eq_lanes(U8x16.splat(0)).bitwise_not().to_bitmask()
+            if bm == 0 {
+                Teddy.scan_m(t, hay, len, w + 16, res0, res1, cap, st)
+            } else {
+                match Teddy.bits_m(t, hay, bm, w, t.m - 1, 0, cap, st) {
+                    Err(e) => Err(e)
+                    Ok(st2) => Teddy.scan_m(t, hay, len, w + 16, res0, res1, cap, st2)
+                }
+            }
+        }
+
+    # verify each set bit's candidate (mirrors `bits`)
+    bits_m : Teddy.T, List(U8), U16, U64, U64, U64, U64, Teddy.MState -> Try(Teddy.MState, [TooMany])
+    bits_m = |t, hay, bm, w, back, j, cap, st|
+        if j >= 16 {
+            Ok(st)
+        } else {
+            set = bm.bitwise_and(1.U16.shl_wrap(j.to_u8_wrap())) != 0
+            if set and w + j >= back {
+                match Teddy.step_m(t, hay, st, w + j - back, cap) {
+                    Err(e) => Err(e)
+                    Ok(st2) => Teddy.bits_m(t, hay, bm, w, back, j + 1, cap, st2)
+                }
+            } else {
+                Teddy.bits_m(t, hay, bm, w, back, j + 1, cap, st)
+            }
+        }
+
+    # scalar fused tail (mirrors `scalar_tail`) for haystacks shorter than a vector
+    tail_m : Teddy.T, List(U8), U64, U64, U64, Teddy.MState -> Try(Teddy.MState, [TooMany])
+    tail_m = |t, hay, at, len, cap, st|
+        if at >= len {
+            Ok(st)
+        } else if List.any(t.lits, |l| Teddy.starts(hay, at, l, t.m)) {
+            match Teddy.step_m(t, hay, st, at, cap) {
+                Err(e) => Err(e)
+                Ok(st2) => Teddy.tail_m(t, hay, at + 1, len, cap, st2)
+            }
+        } else {
+            Teddy.tail_m(t, hay, at + 1, len, cap, st)
+        }
+
     # scan 16-byte windows from `w`, carrying prev fingerprint results
     scan : Teddy.T, List(U8), U64, U64, U8x16, U8x16, List(U64) -> List(U64)
     scan = |t, hay, len, w, prev0, prev1, acc|
