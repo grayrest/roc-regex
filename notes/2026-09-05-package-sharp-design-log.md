@@ -618,3 +618,58 @@ under Guard Malloc.
 S13 is complete in RE#'s terms except: skip sets on the threaded
 (incomplete-fold) path, which RE# computes lazily per state, and `(?i)`
 prefixes (`StringPrefixCaseIgnore`, not supported by the parser yet).
+
+## Fuzz campaign (2026-09-05): `tools/sharp-fuzz`
+
+`gen.py` grows random RE#-syntax patterns (depth ≤ 3: classes, `.`, `_`,
+`\w\d\s\W`, `é`, quantifiers incl. `{m,n}`, groups, `|`, `&`, `~`, anchors,
+`\b`, all four lookarounds) over fixed haystacks that include a two-byte
+codepoint and an invalid byte, and emits a Roc runner that compiles each
+pattern at runtime and compares `find_all`, `find_all_threaded`, an
+eviction-forcing variant (`with_runtime_cap 6`) and the brute-force
+reference. Seed 20260905, 1500 patterns, 12 haystacks.
+
+- **Tier A, plain constructs** (`plain`: no anchors, `\b` or lookarounds):
+  18000 cases, 0 rejected, 8 incomplete folds, **0 divergences** among the
+  four engines. This is the plan's fuzz campaign against the reference.
+- **Tier B, every construct against real RE#** (`resharp`, ASCII, through
+  `tools/sharp-diff`'s harness): 1500 patterns, 677 rejected by us (RE#'s
+  lookaround normal form), 9816 cases, 101 divergences in 9 pattern families,
+  every one reduced to a minimal case on which RE# contradicts itself or
+  leftmost-longest (below). 0 unexplained.
+- **Every construct against the reference**: 158 divergences in 9 families,
+  all anchors, negative lookbehinds at position 0, lookaheads with `&`, or
+  `\b` after an optional — the corners where real RE# sides with our DFA and
+  the reference is textbook (checked case by case with the harness). The
+  reference interprets the shared node graph with textbook lookaround and
+  anchor semantics; the derivative engine reproduces RE#'s, bugs included.
+
+### Two real bugs the campaign found (fixed)
+
+1. `SetLookup` inference: dropping killing minterms (stage 3's deviation) is
+   only sound when the remainder is not nullable; `[^a]\n{2,}c?` ran to the
+   end of input instead of stopping at the first non-`\n`. The fast path
+   disagreed with the threaded scan, the reference and RE#.
+2. `Rlit.rfind_sets` rejected an occurrence whose two-byte symbol after the
+   anchor reached past the retry bound `p + after` (the bound is for the
+   anchor search; the occurrence only has to end by the sweep position):
+   `..?[ab]\w` on "abéb a" lost its match. Present since the first prefix
+   accelerator; invisible on ASCII.
+
+### RE# bugs confirmed with the .NET harness (owed upstream, kept for parity)
+
+| RE# says | expected |
+|---|---|
+| `b?^` on "b" → 0-1; `a*^` on "xa" → 0-2; `b{0,2}^` on "bbc" → 0-3 (`a^` on "a" → none) | `^` cannot match at end of input after a non-empty loop |
+| `b_{1,2}`, `b.{1,2}` on "aab ba" → 2-4, 4-6 (`b_{2}` → 2-5) | leftmost-longest: 2-5 |
+| `[^a]&.\s\|\W*` on "abxb a" → 1-2, 2-3 …; `(?=a&b\|c)` on "abc" → 0-0 | `[^a]&.\s` is empty (RE# agrees alone: no matches), so the language is `\W*` |
+| `(?<!a.)` on "abc" → 1-1, 2-2, 3-3; `(?<!a.,)` on "ab,c" → 3-3 included | position 0 has nothing behind it; "ab," precedes 3 |
+| `(\n?)+(?<! )b+` on "a\nbb" → 0-4 | `(\n?)+` cannot match "a" |
+| `(?<![^a][ab][ab]\d{0,2})` on "babaacab" → duplicate 2-2 | one span per position |
+| `a?\b\s` on "a b  c,\n\nab" → 0-9 (`\b\s` → 1-2, 3-4) | 1-2, 3-4 |
+
+Our DFA reproduces the first, third, fourth and last families (same node
+graph and derivative semantics) and disagrees with RE# on the `{1,2}` and
+`(\n?)+` ones, where it gives the expected answer. Whether to depart from
+RE# on the reproduced ones is a decision for the owner: the RE# differential
+would then need a known-divergence list, as the corpus already has.

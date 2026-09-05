@@ -78,7 +78,11 @@ Rlit := [].{
                     # symbols at forward indices ja-1 .. 0, ending at the anchor
                     var start = p
                     var k = ja
-                    var ok2 = ok and occ_end <= end
+                    # the occurrence must end at or before the SWEEP position; `end` only
+                    # bounds the anchor search (a two-byte symbol after the anchor can
+                    # reach past `p + after` and was wrongly rejected: `..?[ab]\w` on
+                    # "abéb a" lost its match)
+                    var ok2 = ok and occ_end <= end0
                     while ok2 and k > 0 {
                         if start == 0 {
                             ok2 = False

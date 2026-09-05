@@ -353,3 +353,33 @@ number.
   outside the `mkConcatChecked` rewrites** — RE#'s own unsupported set,
   rejected with RE#'s messages. The Rust RE# port reportedly supports a wider
   fragment; not in scope.
+
+## Implementation status (2026-09-05)
+
+M1–M4 landed on `claude/resharp-regex-design-review-60cff0`; the design log
+(`notes/2026-09-05-package-sharp-design-log.md`) records each milestone's
+findings and measurements. Departures from the plan as written:
+
+- **S13 accelerators**: all of RE#'s are in (prefix / set prefix / potential
+  start, per-state skip sets, fixed length, prefix end, set lookup, remaining
+  sets, literal override) except case-insensitive prefixes (no `(?i)` in the
+  parser) and skip sets on the threaded path. RE#'s `isTooCommon` and
+  commonality weights were replaced by an English byte-frequency table after
+  measurement (`Bset.freq2`); `SetLookup` ignores killing minterms (our
+  `Invalid` class) when the remainder is not nullable; set anchors on the
+  first symbol and potential starts whose anchor is not clearly rarer than
+  the first set are refused. Each is measured in the log.
+- **Fuzz campaign** ("against the brute-force reference with zero
+  divergences"): achieved for all constructs except anchors, `\b` and
+  lookarounds (18000 cases, 0 divergences). For those constructs the
+  reference's textbook semantics differ from RE#'s, and real RE# sides with
+  our DFA; they are fuzzed against RE# itself instead (ASCII), with every
+  divergence reduced to an RE# bug listed in the log. Deciding whether to
+  keep RE# parity on those bugs is open.
+- **Build order**: unchanged. **Budgets**: unchanged (fold cap 1024 states;
+  `a(?=.*b)` hits it and runs threaded).
+- **Codegen findings** that shaped the scan loops (record arguments per
+  call, fold closures, a `var`-list miscompile) are in the log under M4
+  stage 2 and in `upstream/`.
+- Remaining from "done": README for `package-sharp`; the two debug-helper
+  crashes and the `var`-list miscompile need reductions for upstream.

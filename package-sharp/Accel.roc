@@ -133,8 +133,10 @@ Accel := [].{
                             # exists, so no killing symbol can precede the terminator.
                             d1 = Accel.derivs_merged(a, rem, [noprefix, rem])
                             fallback = { e: { ..e2, a: d1.a }, len: PrefixEnd(plen, st.id) }
+                            # (and only when the remainder itself is not nullable: otherwise a
+                            # killing symbol ends the match right there, before any terminator)
                             match List.drop_if(d1.pairs, |(_, x)| x == Arena.bot) {
-                                [(mt, der)] if Arena.is_always_null(d1.a, der) and TSet.count(mt) == 1 => {
+                                [(mt, der)] if Arena.is_always_null(d1.a, der) and TSet.count(mt) == 1 and !Arena.can_be_null(d1.a, rem) => {
                                     # `der` must be a dead end: EVERY minterm kills it. RE# excludes
                                     # derivatives back to `rem`/`der` here, which the bot-dropping above
                                     # would make unsound (`a.*c`: `.*c|()` steps back to `.*c` on most
