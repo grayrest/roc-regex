@@ -255,8 +255,7 @@ Dfa := [].{
         if h.n == 0 {
             s = e.s_rev_ts
             node = Dfa.st_node_of(e, s)
-            nullable = Deriv.nullable(e.a, Deriv.loc_begin, node) or Deriv.nullable(e.a, Deriv.loc_end, node)
-            { e, acc: if nullable { [0] } else { [] } }
+            { e, acc: if Deriv.nullable(e.a, Deriv.loc_both, node) { [0] } else { [] } }
         } else {
             st = Dfa.handle_input_end(e, h)
             col = Dfa.collect(st.e, h, st.pos, st.s, st.acc)

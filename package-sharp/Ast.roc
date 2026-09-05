@@ -1,7 +1,8 @@
 ## RE#'s pattern syntax → AST (S8). Standard syntax plus `&` (intersection,
 ## binds between `|` and concatenation), `~(...)` (complement), `_` (universal
 ## wildcard), and lookarounds `(?=` `(?!` `(?<=` `(?<!`. `(...)` is a plain
-## group (RE# has no captures). Lazy quantifiers are rejected, as RE# does.
+## group (RE# has no captures). Lazy quantifiers are accepted and mean their
+## greedy form, as in RE# (laziness has no meaning under set semantics).
 ## `^`/`$` are line anchors (S7); `\A`/`\z` the text anchors.
 ##
 ## Lexing, classes, escapes and `\p{}` are copied from `Comp`; the grammar is
@@ -236,12 +237,15 @@ Ast := [
         }
     }
 
-    # a `?` after a quantifier is a lazy quantifier: unsupported in RE#. Any
-    # further quantifier stacks (`a**` is `(a*)*`).
+    # a `?` after a quantifier marks it lazy. Under set semantics laziness is
+    # meaningless (`a*?` denotes the same language as `a*`), and RE# itself
+    # accepts these and treats them as greedy (its converter maps `Lazyloop` to
+    # `mkLoop`), so the marker is skipped. Any further quantifier stacks
+    # (`a**` is `(a*)*`).
     after_quant : Ast.St, U64, Ast -> Try(Ast.Out, Err.Error)
     after_quant = |st, i, ast|
         if Ast.cp_at(st.toks, i) == Ok('?') {
-            Err(Ast.err_at(st.src, st.toks, i, LazyQuantifierUnsupported))
+            Ast.apply_postfix(st, i + 1, ast)
         } else {
             Ast.apply_postfix(st, i, ast)
         }

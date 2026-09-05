@@ -289,3 +289,29 @@ divergences are now understood; both are RE# bugs to report upstream.
   `Sharp.with_runtime_cap` exposes the cap for tests.
 - The Homebrew `dotnet-sdk` cask needs `sudo` for its `.pkg`; the SDK is
   installed user-space with Microsoft's `dotnet-install.sh` into `~/.dotnet`.
+
+## M3 findings (part 2: the RE# differential)
+
+`tools/sharp-diff/`: a C# harness (`ResharpDiff`, references RE#'s
+`Resharp.fsproj`, net10.0, `FSharp.Core` pinned so it is copied) answers a
+JSON case list with RE#'s `Matches`; `gen.py` defines a 102-pattern ×
+35-haystack ASCII corpus in RE# syntax, converts UTF-16 offsets to bytes, and
+emits a Roc runner. Outcome classes: Agree / Differ / RejectBoth / WeAccept /
+WeReject. Result: **agree 3430, differ 0, reject-both 140, we-accept 0,
+we-reject 0** of 3570.
+
+Two things the differential caught:
+
+- **Lazy quantifiers.** RE#'s docs list them as unsupported, but its converter
+  maps `Lazyloop` to `mkLoop` (only set-lazy loops raise), so `a*?` compiles
+  and means `a*`. Under set semantics laziness has no meaning, so this is the
+  right behaviour; `Ast.after_quant` now skips the `?` marker. The
+  `LazyQuantifierUnsupported` kind stays in `Err` unused for now.
+- **Empty input with both anchors.** `^$`, `^.*$`, `\A.*\z` on `""`: RE#
+  reports `[0,0]` (its `canBeNullable` flags), we reported nothing because the
+  empty-input check tested `Begin` and `End` separately and `\A…\z` needs
+  both at once. `Deriv.loc_both` is a location where both anchors hold; the
+  empty-input path uses it.
+
+RejectBoth (140 = 4 patterns × 35): `\Bcat`, `a(?=bb)b`, `(?<=a)b|(?<=c)d`,
+`~(\ba)` — RE#'s unsupported fragment, rejected on both sides.

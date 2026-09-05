@@ -14,6 +14,9 @@ Deriv := [].{
     loc_center = 1
     loc_end : U32
     loc_end = 2
+    ## the empty input: position 0 is both the beginning and the end
+    loc_both : U32
+    loc_both = 3
 
     ## does the node match the empty string at this location?
     nullable : Arena.A, U32, U32 -> Bool
@@ -39,9 +42,9 @@ Deriv := [].{
             } else if k == Arena.k_lookahead or k == Arena.k_lookbehind {
                 Deriv.nullable(a, loc, Arena.head(a, id))
             } else if k == Arena.k_end {
-                loc == Deriv.loc_end
+                loc == Deriv.loc_end or loc == Deriv.loc_both
             } else {
-                loc == Deriv.loc_begin
+                loc == Deriv.loc_begin or loc == Deriv.loc_both
             }
         }
 
