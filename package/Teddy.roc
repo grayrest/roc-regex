@@ -137,6 +137,55 @@ Teddy := [].{
             Teddy.byte_tail(b, hay, at + 1, len, if (List.get(hay, at) ?? 0) == b { List.append(acc, at) } else { acc })
         }
 
+    ## memchr-style scan for the offsets of every byte in the inclusive range
+    ## [lo,hi] — the class-prefilter analogue of `byte_candidates_capped`. Same
+    ## 4x-unrolled window loop, but the per-lane test is a range compare
+    ## (`gte_lanes` & `lte_lanes`) instead of an equality, so a wide first-byte
+    ## class (e.g. `[0-9]`) is scanned at SIMD throughput.
+    range_candidates_capped : U8, U8, List(U8), U64 -> Try(List(U64), [TooMany])
+    range_candidates_capped = |lo, hi, hay, cap|
+        Teddy.range_scan(lo, hi, hay, List.len(hay), 0, [], cap)
+
+    range_scan : U8, U8, List(U8), U64, U64, List(U64), U64 -> Try(List(U64), [TooMany])
+    range_scan = |lo, hi, hay, len, w, acc, cap|
+        if List.len(acc) > cap {
+            Err(TooMany)
+        } else if w + 64 <= len {
+            lov = U8x16.splat(lo)
+            hiv = U8x16.splat(hi)
+            in_range = |c| c.gte_lanes(lov).bitwise_and(c.lte_lanes(hiv))
+            m0 = in_range(U8x16.load(hay, w) ?? lov)
+            m1 = in_range(U8x16.load(hay, w + 16) ?? lov)
+            m2 = in_range(U8x16.load(hay, w + 32) ?? lov)
+            m3 = in_range(U8x16.load(hay, w + 48) ?? lov)
+            any = m0.bitwise_or(m1).bitwise_or(m2).bitwise_or(m3).to_bitmask()
+            if any == 0 {
+                Teddy.range_scan(lo, hi, hay, len, w + 64, acc, cap)
+            } else {
+                a0 = Teddy.bits_of(m0, w, acc)
+                a1 = Teddy.bits_of(m1, w + 16, a0)
+                a2 = Teddy.bits_of(m2, w + 32, a1)
+                a3 = Teddy.bits_of(m3, w + 48, a2)
+                Teddy.range_scan(lo, hi, hay, len, w + 64, a3, cap)
+            }
+        } else if w + 16 <= len {
+            c = U8x16.load(hay, w) ?? U8x16.splat(lo)
+            m = c.gte_lanes(U8x16.splat(lo)).bitwise_and(c.lte_lanes(U8x16.splat(hi)))
+            Teddy.range_scan(lo, hi, hay, len, w + 16, Teddy.bits_of(m, w, acc), cap)
+        } else {
+            Ok(Teddy.range_tail(lo, hi, hay, w, len, acc))
+        }
+
+    # scalar scan of the final < 16 bytes
+    range_tail : U8, U8, List(U8), U64, U64, List(U64) -> List(U64)
+    range_tail = |lo, hi, hay, at, len, acc|
+        if at >= len {
+            acc
+        } else {
+            b = List.get(hay, at) ?? 0
+            Teddy.range_tail(lo, hi, hay, at + 1, len, if b >= lo and b <= hi { List.append(acc, at) } else { acc })
+        }
+
     scan_capped : Teddy.T, List(U8), U64, U64, U8x16, U8x16, List(U64), U64 -> Try(List(U64), [TooMany])
     scan_capped = |t, hay, len, w, prev0, prev1, acc, cap|
         if List.len(acc) > cap {

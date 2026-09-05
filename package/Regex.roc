@@ -19,7 +19,7 @@ Regex := [].{
     ## The `engine` field records M3's outcome (D10): `Three` carries the D5
     ## forward+reverse DFAs for a look-free pattern within budget, else `Pike`.
     ## Documented-unstable.
-    T : { prog : List(U32), splits : List(U32), classes : Trie.T, n_groups : U32, prefix : List(U8), rprog : List(U32), rsplits : List(U32), uprog : List(U32), usplits : List(U32), fbytes : List(U8), tlits : List(List(U8)), word_set : U64, engine : [Pike, Three({ fwd : Rev.D, rev : Rev.D, averify : [NoVerify, Verify(Rev.D)], inner : [NoInner, Inner({ lit : List(U8), lrev : Rev.D, full : Rev.D })] })] }
+    T : { prog : List(U32), splits : List(U32), classes : Trie.T, n_groups : U32, prefix : List(U8), rprog : List(U32), rsplits : List(U32), uprog : List(U32), usplits : List(U32), fbytes : List(U8), frange : [NoRange, Range(U8, U8)], tlits : List(List(U8)), word_set : U64, engine : [Pike, Three({ fwd : Rev.D, rev : Rev.D, averify : [NoVerify, Verify(Rev.D)], inner : [NoInner, Inner({ lit : List(U8), lrev : Rev.D, full : Rev.D })] })] }
 
     ## A match, as half-open BYTE offsets into the haystack (D3, D15).
     Span : { start : U64, end : U64 }
@@ -37,7 +37,7 @@ Regex := [].{
                         Ok(d) => Three(d)
                         Err(_) => Pike
                     }
-                Ok({ prog: c.prog, splits: c.splits, classes: c.classes, n_groups: c.n_groups, prefix: c.prefix, rprog: c.rprog, rsplits: c.rsplits, uprog: c.uprog, usplits: c.usplits, fbytes: c.fbytes, tlits: c.tlits, word_set: c.word_set, engine })
+                Ok({ prog: c.prog, splits: c.splits, classes: c.classes, n_groups: c.n_groups, prefix: c.prefix, rprog: c.rprog, rsplits: c.rsplits, uprog: c.uprog, usplits: c.usplits, fbytes: c.fbytes, frange: c.frange, tlits: c.tlits, word_set: c.word_set, engine })
             }
         }
 
@@ -171,7 +171,7 @@ Regex := [].{
     # `anchored_start`/`accept_eoi_only` matter only to the DFA build (they are
     # baked into the engine there); the PikeVM view keeps the anchors in `prog`,
     # so they default to False here.
-    base = |re| { prog: re.prog, splits: re.splits, classes: re.classes, n_groups: re.n_groups, prefix: re.prefix, rprog: re.rprog, rsplits: re.rsplits, uprog: re.uprog, usplits: re.usplits, fbytes: re.fbytes, tlits: re.tlits, word_set: re.word_set, anchored_start: False, accept_eoi_only: False, inner: NoInner }
+    base = |re| { prog: re.prog, splits: re.splits, classes: re.classes, n_groups: re.n_groups, prefix: re.prefix, rprog: re.rprog, rsplits: re.rsplits, uprog: re.uprog, usplits: re.usplits, fbytes: re.fbytes, frange: re.frange, tlits: re.tlits, word_set: re.word_set, anchored_start: False, accept_eoi_only: False, inner: NoInner }
 
 
     ## --- iteration and rewriting (D15, D14) ---------------------------------
@@ -274,18 +274,35 @@ Regex := [].{
                 Err(_) => Regex.find_all_engine(re, hay)
             }
         } else {
-            # No leading literal — but maybe a required INTERIOR literal (e.g.
-            # `\w+@\w+`): memchr it, then do a local reverse/forward search per
-            # hit. Dense literal trips the cap → DFA.
             match re.engine {
                 Three(d) =>
-                    match d.inner {
-                        Inner(inr) =>
-                            match Teddy.byte_candidates_capped(List.get(inr.lit, 0) ?? 0, hay, List.len(hay) // Regex.inner_prefilter_k) {
-                                Ok(cands) => Regex.find_all_inner(inr, re.classes, hay, cands)
-                                Err(_) => Regex.find_all_engine(re, hay)
+                    match re.frange {
+                        # First-byte class prefilter: SIMD range-scan for the next
+                        # byte in [lo,hi], verify each with the anchored DFA. Turns
+                        # a sparse class (e.g. `[0-9]{2,4}`) from a full per-byte
+                        # DFA pass into a scan over just the candidate bytes. Same
+                        # short-verify economics as the inner path → same cap.
+                        Range(lo, hi) =>
+                            match d.averify {
+                                Verify(av) =>
+                                    match Teddy.range_candidates_capped(lo, hi, hay, List.len(hay) // Regex.inner_prefilter_k) {
+                                        Ok(cands) => Regex.find_all_teddy_dfa(av, re.classes, hay, cands)
+                                        Err(_) => Regex.find_all_engine(re, hay)
+                                    }
+                                NoVerify => Regex.find_all_engine(re, hay)
                             }
-                        NoInner => Regex.find_all_engine(re, hay)
+                        # No leading literal or class — but maybe a required
+                        # INTERIOR literal (e.g. `\w+@\w+`): memchr it, then a
+                        # local reverse/forward search per hit.
+                        NoRange =>
+                            match d.inner {
+                                Inner(inr) =>
+                                    match Teddy.byte_candidates_capped(List.get(inr.lit, 0) ?? 0, hay, List.len(hay) // Regex.inner_prefilter_k) {
+                                        Ok(cands) => Regex.find_all_inner(inr, re.classes, hay, cands)
+                                        Err(_) => Regex.find_all_engine(re, hay)
+                                    }
+                                NoInner => Regex.find_all_engine(re, hay)
+                            }
                     }
                 Pike => Regex.find_all_engine(re, hay)
             }

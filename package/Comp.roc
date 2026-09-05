@@ -48,6 +48,14 @@ Comp := [
         uprog : List(U32),
         usplits : List(U32),
         fbytes : List(U8),
+        # First-byte contiguous ASCII range, for a match that must start with a
+        # single byte range wider than the `fbytes` cap (e.g. `[0-9]{2,4}` ->
+        # `Range(0x30, 0x39)`). `find_all` SIMD range-scans for the next byte in
+        # [lo,hi] and verifies each with the anchored DFA — the class analogue of
+        # the literal-prefix prefilter, so a sparse class no longer costs a full
+        # per-byte DFA pass. `NoRange` when the first set is a literal, a small
+        # set (`fbytes`), multiple ranges, or unconstrained.
+        frange : [NoRange, Range(U8, U8)],
         tlits : List(List(U8)),
         # Set ordinal of the folded `\w` class when the pattern has a word
         # boundary (`\b`/`\B`), else 0. Present so the DFA determinizer can ask
@@ -265,6 +273,9 @@ Comp := [
                         n_groups = numbered.next - 1
                         prefix = Comp.prefix_of(numbered.ast)
                         fbytes = Comp.first_bytes(numbered.ast)
+                        # First-byte range prefilter, only when there is no leading
+                        # literal or small first-byte set (those own the prefilter).
+                        frange = if List.is_empty(prefix) and List.is_empty(fbytes) { Comp.first_range(numbered.ast) } else { NoRange }
                         tlits = Comp.lead_literals(numbered.ast)
                         # wrap in group 0: Save0 ; body ; Save1 ; Match
                         prog0 = { prog: [Comp.inst(Comp.op_save, 0)], sets: [], splits: [], n_sets: 0 }
@@ -321,7 +332,7 @@ Comp := [
                             } else {
                                 { sets: ib.p.sets, word_set: 0 }
                             }
-                        Ok({ prog, splits: p2.splits, classes: Trie.build(wb.sets), n_groups, prefix, rprog, rsplits: r1.splits, uprog, usplits: u1.splits, fbytes, tlits, word_set: wb.word_set, anchored_start: a_start, accept_eoi_only: a_eoi, inner: ib.inner })
+                        Ok({ prog, splits: p2.splits, classes: Trie.build(wb.sets), n_groups, prefix, rprog, rsplits: r1.splits, uprog, usplits: u1.splits, fbytes, frange, tlits, word_set: wb.word_set, anchored_start: a_start, accept_eoi_only: a_eoi, inner: ib.inner })
                     }
                 Err(e) => Err(e)
             }
@@ -978,6 +989,37 @@ Comp := [
     }
 
     FS : [Wide, Bytes(List(U8))]
+
+    # First-byte contiguous ASCII range for a SIMD class prefilter: `Range(lo,hi)`
+    # when the pattern must start with exactly one ASCII byte range wider than a
+    # single byte (hi > lo), else `NoRange`. Reuses `first_set`, but `first_set`
+    # caps ASCII ranges at width 4 (they degrade to `Wide`), so this walks the
+    # first non-nullable atom directly to recover the full range.
+    first_range : Comp -> [NoRange, Range(U8, U8)]
+    first_range = |ast|
+        match ast {
+            Chars(cs) => Comp.chars_range(cs)
+            Group(x, _) => Comp.first_range(x)
+            Plus(x, _) => Comp.first_range(x)
+            Cat(xs) =>
+                match List.first(xs) {
+                    Err(_) => NoRange
+                    Ok(x) => if Comp.nullable(x) { NoRange } else { Comp.first_range(x) }
+                }
+            _ => NoRange
+        }
+
+    # a positive single-range ASCII class `[lo-hi]` with hi > lo, else NoRange
+    chars_range : { neg : Bool, ranges : List(Comp.Rng) } -> [NoRange, Range(U8, U8)]
+    chars_range = |cs|
+        if cs.neg {
+            NoRange
+        } else {
+            match cs.ranges {
+                [r] if r.hi < 128 and r.hi > r.lo => Range(r.lo.to_u8_wrap(), r.hi.to_u8_wrap())
+                _ => NoRange
+            }
+        }
 
     first_set : Comp -> Comp.FS
     first_set = |ast|
