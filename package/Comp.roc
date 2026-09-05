@@ -56,6 +56,11 @@ Comp := [
         # per-byte DFA pass. `NoRange` when the first set is a literal, a small
         # set (`fbytes`), multiple ranges, or unconstrained.
         frange : [NoRange, Range(U8, U8)],
+        # The pattern matches exactly the fixed byte string `prefix` and nothing
+        # else (a pure literal like `Holmes`): `find_all` can memcmp-verify each
+        # first-byte candidate and emit a fixed-length span, skipping the anchored
+        # DFA entirely. False for any pattern with structure after the literal.
+        exact : Bool,
         tlits : List(List(U8)),
         # Set ordinal of the folded `\w` class when the pattern has a word
         # boundary (`\b`/`\B`), else 0. Present so the DFA determinizer can ask
@@ -158,6 +163,18 @@ Comp := [
             Plus(x, _) => Comp.ast_has_look(x)
             Quest(x, _) => Comp.ast_has_look(x)
             Group(x, _) => Comp.ast_has_look(x)
+            _ => False
+        }
+
+    # Is the pattern a pure literal — only single-codepoint literal atoms in
+    # sequence (no quantifier, class, alternation, look, or anchor)? Then its only
+    # match is exactly `prefix_of` it, so a memcmp verify suffices.
+    is_exact_literal : Comp -> Bool
+    is_exact_literal = |ast|
+        match ast {
+            Chars(_) => !(List.is_empty(Comp.item_lit(ast)))
+            Group(x, _) => Comp.is_exact_literal(x)
+            Cat(xs) => !(List.is_empty(xs)) and List.all(xs, Comp.is_exact_literal)
             _ => False
         }
 
@@ -276,6 +293,7 @@ Comp := [
                         # First-byte range prefilter, only when there is no leading
                         # literal or small first-byte set (those own the prefilter).
                         frange = if List.is_empty(prefix) and List.is_empty(fbytes) { Comp.first_range(numbered.ast) } else { NoRange }
+                        exact = !(List.is_empty(prefix)) and Comp.is_exact_literal(numbered.ast)
                         tlits = Comp.lead_literals(numbered.ast)
                         # wrap in group 0: Save0 ; body ; Save1 ; Match
                         prog0 = { prog: [Comp.inst(Comp.op_save, 0)], sets: [], splits: [], n_sets: 0 }
@@ -332,7 +350,7 @@ Comp := [
                             } else {
                                 { sets: ib.p.sets, word_set: 0 }
                             }
-                        Ok({ prog, splits: p2.splits, classes: Trie.build(wb.sets), n_groups, prefix, rprog, rsplits: r1.splits, uprog, usplits: u1.splits, fbytes, frange, tlits, word_set: wb.word_set, anchored_start: a_start, accept_eoi_only: a_eoi, inner: ib.inner })
+                        Ok({ prog, splits: p2.splits, classes: Trie.build(wb.sets), n_groups, prefix, rprog, rsplits: r1.splits, uprog, usplits: u1.splits, fbytes, frange, exact, tlits, word_set: wb.word_set, anchored_start: a_start, accept_eoi_only: a_eoi, inner: ib.inner })
                     }
                 Err(e) => Err(e)
             }
