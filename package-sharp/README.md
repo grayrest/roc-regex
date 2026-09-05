@@ -21,7 +21,7 @@ binary); on a runtime pattern the same call runs at runtime.
 import re.Sharp
 
 rx : Sharp.T
-rx = Sharp.unwrap(Sharp.compile("_*cat_*&_*dog_*"))   # lines? no: texts mentioning both
+rx = Sharp.unwrap(Sharp.compile("_*cat_*&_*dog_*"))   # a haystack containing both words
 
 Sharp.find_all(rx, bytes)          # List({ start, end }) byte offsets, non-overlapping, leftmost-longest
 Sharp.find_all_str(rx, "…")        # the same on a Str
