@@ -412,13 +412,18 @@ Rev := [].{
         if pos >= List.len(hay) {
             best2
         } else {
-            dec = Comp.decode(hay, pos)
-            cls = Trie.class_of(classes, dec.cp)
-            nxt = List.get(d.table, state.to_u64() * d.nc.to_u64() + cls.to_u64()) ?? 0
-            if nxt == 0 {
-                best2
+            # ASCII fast path: skip the UTF-8 decode and the class_of dispatch —
+            # the byte is its own codepoint and indexes the class table directly.
+            b0 = List.get(hay, pos) ?? 0
+            if b0 < 0x80 {
+                cls = List.get(classes.ascii, b0.to_u64()) ?? 0
+                nxt = List.get(d.table, state.to_u64() * d.nc.to_u64() + cls.to_u64()) ?? 0
+                if nxt == 0 { best2 } else { Rev.fwd(d, classes, hay, pos + 1, nxt - 1, best2) }
             } else {
-                Rev.fwd(d, classes, hay, pos + dec.len, nxt - 1, best2)
+                dec = Comp.decode(hay, pos)
+                cls = Trie.class_of(classes, dec.cp)
+                nxt = List.get(d.table, state.to_u64() * d.nc.to_u64() + cls.to_u64()) ?? 0
+                if nxt == 0 { best2 } else { Rev.fwd(d, classes, hay, pos + dec.len, nxt - 1, best2) }
             }
         }
     }
@@ -490,14 +495,20 @@ Rev := [].{
         if pos <= lo {
             best2
         } else {
-            cs = Rev.cp_start(hay, pos - 1)
-            dec = Comp.decode(hay, cs)
-            cls = Trie.class_of(classes, dec.cp)
-            nxt = List.get(d.table, state.to_u64() * d.nc.to_u64() + cls.to_u64()) ?? 0
-            if nxt == 0 {
-                best2
+            # ASCII fast path: a byte < 0x80 is a one-byte codepoint, so its start
+            # is `pos-1` and it indexes the class table directly — no scan back to
+            # a codepoint boundary, no decode, no class_of dispatch.
+            b = List.get(hay, pos - 1) ?? 0
+            if b < 0x80 {
+                cls = List.get(classes.ascii, b.to_u64()) ?? 0
+                nxt = List.get(d.table, state.to_u64() * d.nc.to_u64() + cls.to_u64()) ?? 0
+                if nxt == 0 { best2 } else { Rev.rev(d, classes, hay, pos - 1, lo, nxt - 1, best2) }
             } else {
-                Rev.rev(d, classes, hay, cs, lo, nxt - 1, best2)
+                cs = Rev.cp_start(hay, pos - 1)
+                dec = Comp.decode(hay, cs)
+                cls = Trie.class_of(classes, dec.cp)
+                nxt = List.get(d.table, state.to_u64() * d.nc.to_u64() + cls.to_u64()) ?? 0
+                if nxt == 0 { best2 } else { Rev.rev(d, classes, hay, cs, lo, nxt - 1, best2) }
             }
         }
     }
