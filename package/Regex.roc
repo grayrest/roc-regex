@@ -19,7 +19,7 @@ Regex := [].{
     ## The `engine` field records M3's outcome (D10): `Three` carries the D5
     ## forward+reverse DFAs for a look-free pattern within budget, else `Pike`.
     ## Documented-unstable.
-    T : { prog : List(U32), splits : List(U32), classes : Trie.T, n_groups : U32, prefix : List(U8), rprog : List(U32), rsplits : List(U32), uprog : List(U32), usplits : List(U32), fbytes : List(U8), frange : [NoRange, Range(U8, U8)], tlits : List(List(U8)), word_set : U64, engine : [Pike, Three({ fwd : Rev.D, rev : Rev.D, averify : [NoVerify, Verify(Rev.D)], inner : [NoInner, Inner({ lit : List(U8), lrev : Rev.D, full : Rev.D })] })] }
+    T : { prog : List(U32), splits : List(U32), classes : Trie.T, n_groups : U32, prefix : List(U8), rprog : List(U32), rsplits : List(U32), uprog : List(U32), usplits : List(U32), fbytes : List(U8), frange : [NoRange, Range(U8, U8)], exact : Bool, tlits : List(List(U8)), word_set : U64, engine : [Pike, Three({ fwd : Rev.D, rev : Rev.D, averify : [NoVerify, Verify(Rev.D)], inner : [NoInner, Inner({ lit : List(U8), lrev : Rev.D, full : Rev.D })] })] }
 
     ## A match, as half-open BYTE offsets into the haystack (D3, D15).
     Span : { start : U64, end : U64 }
@@ -37,7 +37,7 @@ Regex := [].{
                         Ok(d) => Three(d)
                         Err(_) => Pike
                     }
-                Ok({ prog: c.prog, splits: c.splits, classes: c.classes, n_groups: c.n_groups, prefix: c.prefix, rprog: c.rprog, rsplits: c.rsplits, uprog: c.uprog, usplits: c.usplits, fbytes: c.fbytes, frange: c.frange, tlits: c.tlits, word_set: c.word_set, engine })
+                Ok({ prog: c.prog, splits: c.splits, classes: c.classes, n_groups: c.n_groups, prefix: c.prefix, rprog: c.rprog, rsplits: c.rsplits, uprog: c.uprog, usplits: c.usplits, fbytes: c.fbytes, frange: c.frange, exact: c.exact, tlits: c.tlits, word_set: c.word_set, engine })
             }
         }
 
@@ -171,7 +171,7 @@ Regex := [].{
     # `anchored_start`/`accept_eoi_only` matter only to the DFA build (they are
     # baked into the engine there); the PikeVM view keeps the anchors in `prog`,
     # so they default to False here.
-    base = |re| { prog: re.prog, splits: re.splits, classes: re.classes, n_groups: re.n_groups, prefix: re.prefix, rprog: re.rprog, rsplits: re.rsplits, uprog: re.uprog, usplits: re.usplits, fbytes: re.fbytes, frange: re.frange, tlits: re.tlits, word_set: re.word_set, anchored_start: False, accept_eoi_only: False, inner: NoInner }
+    base = |re| { prog: re.prog, splits: re.splits, classes: re.classes, n_groups: re.n_groups, prefix: re.prefix, rprog: re.rprog, rsplits: re.rsplits, uprog: re.uprog, usplits: re.usplits, fbytes: re.fbytes, frange: re.frange, exact: re.exact, tlits: re.tlits, word_set: re.word_set, anchored_start: False, accept_eoi_only: False, inner: NoInner }
 
 
     ## --- iteration and rewriting (D15, D14) ---------------------------------
@@ -261,21 +261,30 @@ Regex := [].{
             # rather than falling to a full DFA pass. The PikeVM verify is ~µs, so
             # it keeps the tight `prefilter_k` gate.
             fb = List.get(re.prefix, 0) ?? 0
-            verify = match re.engine {
-                Three(d) => d.averify
-                Pike => NoVerify
-            }
-            k = match verify {
-                Verify(_) => Regex.inner_prefilter_k
-                NoVerify => Regex.prefilter_k
-            }
-            match Teddy.byte_candidates_capped(fb, hay, List.len(hay) // k) {
-                Ok(cands) =>
-                    match verify {
-                        Verify(av) => Regex.find_all_teddy_dfa(av, re.classes, hay, cands)
-                        NoVerify => Regex.find_all_teddy(Regex.base(re), hay, cands)
-                    }
-                Err(_) => Regex.find_all_engine(re, hay)
+            if re.exact {
+                # Pure literal: the match IS the prefix, so verify with a memcmp
+                # and emit a fixed-length span — no DFA, no trie lookups per byte.
+                match Teddy.byte_candidates_capped(fb, hay, List.len(hay) // Regex.inner_prefilter_k) {
+                    Ok(cands) => Regex.find_all_literal(re.prefix, hay, cands)
+                    Err(_) => Regex.find_all_engine(re, hay)
+                }
+            } else {
+                verify = match re.engine {
+                    Three(d) => d.averify
+                    Pike => NoVerify
+                }
+                k = match verify {
+                    Verify(_) => Regex.inner_prefilter_k
+                    NoVerify => Regex.prefilter_k
+                }
+                match Teddy.byte_candidates_capped(fb, hay, List.len(hay) // k) {
+                    Ok(cands) =>
+                        match verify {
+                            Verify(av) => Regex.find_all_teddy_dfa(av, re.classes, hay, cands)
+                            NoVerify => Regex.find_all_teddy(Regex.base(re), hay, cands)
+                        }
+                    Err(_) => Regex.find_all_engine(re, hay)
+                }
             }
         } else {
             match re.engine {
@@ -351,6 +360,35 @@ Regex := [].{
                                 }
                             }
                     }
+                }
+            }
+        }
+        acc
+    }
+
+    # pure-literal verify: the whole match is the literal, so a memcmp confirms a
+    # candidate and the span is a fixed length. No DFA, no per-byte trie lookup.
+    # A literal is never empty, so a candidate inside the previous match is
+    # skipped (keeps matches non-overlapping and leftmost-first).
+    find_all_literal : List(U8), List(U8), List(U64) -> List(Regex.Span)
+    find_all_literal = |lit, hay, cands| {
+        ncand = List.len(cands)
+        plen = List.len(lit)
+        var i = 0
+        var last_end = 0
+        var acc = []
+        var running = True
+        while running {
+            if i >= ncand {
+                running = False
+            } else {
+                at = List.get(cands, i) ?? 0
+                if at < last_end or !(Lit.matches(hay, at, lit, plen)) {
+                    i = i + 1
+                } else {
+                    acc = List.append(acc, { start: at, end: at + plen })
+                    last_end = at + plen
+                    i = i + 1
                 }
             }
         }
