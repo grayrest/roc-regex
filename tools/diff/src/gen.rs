@@ -79,6 +79,13 @@ fn main() {
         ("(ab?)c|xyz", "abc"),
         ("(a|ab)c", "abc"),
         ("(ab)?c", "c"),
+        // buried anchors -> PikeVM engine; the first-byte SET now prefilters
+        // find_all too, not just find
+        ("(^a|c|x)d", "ad"),
+        ("(^a|c|x)d", "zcd xd ad"),
+        ("(^a|c|x)d", "zzz"),
+        ("(^a|c|x)d", ""),
+        ("(a$|c|x)d", "cd xd"),
         // repetition bounds are validated, not wrapped
         ("a{2,1}", "aa"),
         ("a{99999999999}", "aa"),
@@ -108,10 +115,32 @@ spans_str = |re, hay|
 	|> List.map(|s| "${s.start.to_str()}-${s.end.to_str()}")
 	|> Str.join_with(",")
 
+# `find` and `is_match` share `find_all`'s plan, so they are checked against the
+# same oracle: the first match must be find_all's first span, and is_match must
+# agree with whether there is one.
+first_str : Regex.T, Str -> Str
+first_str = |re, hay|
+	match Regex.find(re, Str.to_utf8(hay)) {
+		Ok(s) => "${s.start.to_str()}-${s.end.to_str()}"
+		Err(_) => ""
+	}
+
 main! = |_a| {
 	results = List.map(cases, |c| {
 		got = match Regex.compile(c.pat) {
-			Ok(re) => spans_str(re, c.hay)
+			Ok(re) => {
+				all = spans_str(re, c.hay)
+				want_first = List.first(Str.split_on(c.want, ",")) ?? ""
+				first = first_str(re, c.hay)
+				im = Regex.is_match(re, Str.to_utf8(c.hay))
+				if first != want_first {
+					"find=${first} want=${want_first}"
+				} else if im != (c.want != "") {
+					"is_match=${if im { "T" } else { "F" }}"
+				} else {
+					all
+				}
+			}
 			Err(_) => "COMPILE_ERR"
 		}
 		{ c, ok: got == c.want, got }

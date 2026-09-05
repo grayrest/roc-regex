@@ -49,7 +49,7 @@ literal pattern fails the build with a rendered caret message. Gate numbers are
 in [`notes/2026-09-02-m1-gate.md`](notes/2026-09-02-m1-gate.md).
 
 All five milestones (M1–M4) are implemented and committed. The engine agrees
-with the Rust `regex` crate on **1431/1431** differential cases across three
+with the Rust `regex` crate on **1546/1546** differential cases across three
 paths (`find_all`, `is_match`, three-pass `find`), including Unicode classes,
 `\p{}`, `(?i)`, empty-match iteration, and pathological patterns.
 
@@ -60,14 +60,14 @@ paths (`find_all`, `is_match`, three-pass `find`), including Unicode classes,
 | `Pike` | M1/M1.5/M4 | PikeVM with slots; anchored `match_at` |
 | `Rev` | M3 | leftmost determinizer, reverse DFA, three-pass `find` (D5) |
 | `Uni` | M2 | generated Unicode Tier A tables (packed) |
-| `Lit` | M4 | scalar prefilter rungs |
+| `Lit` | M4 | literal memcmp for candidate verifies |
 | `Teddy` | M4 | SIMD (`U8x16`) Teddy prefilter |
 | `Regex` / `Err` | all | public surface; D7 error + renderer |
 
 `find` is the D5 three-pass span finder (forward DFA end + reverse DFA start,
 both leftmost-first, folded into the artifact); captures/`replace`/`split` layer
-on the PikeVM. The full 1431-case differential harness (`tools/diff`) completes
-at **1431/1431 agreeing with the Rust crate** across `find_all`, `is_match` and
+on the PikeVM. The full 1546-case differential harness (`tools/diff`) completes
+at **1546/1546 agreeing with the Rust crate** across `find_all`, `is_match` and
 the three-pass `find` — after it exposed and forced the fix of an epsilon-cycle
 non-termination bug (`(a*)+`) in the three-pass closure.
 

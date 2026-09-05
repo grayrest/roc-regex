@@ -1,42 +1,10 @@
-## M4 — the prefilter seam (D6).
+## M4 — literal comparison for the prefilter seam (D6).
 ##
-## `find_candidate` is the one entry point: given a required-literal prefix, the
-## next byte offset at/after `at` where that prefix occurs, or NoCandidate. A
-## scalar first-byte scan then a compare — the "byte-set scan then verify" rung.
-## No SIMD (none is user-facing in Roc); Rabin-Karp for multi-literal sets is the
-## deferred second rung. When SIMD builtins land this is the one file to swap.
+## `matches` is the memcmp a candidate verify runs once a scan has proposed an
+## offset. The scalar SCANNERS that used to live here (`find_candidate`, `scan`,
+## `find_in_set`) are gone: every entry point now shares one plan, whose scans
+## are the SIMD ones in `Teddy`.
 Lit := [].{
-    ## next occurrence of `pat` in `hay` at or after `at`. Empty `pat` means the
-    ## caller did not extract a prefix — every position is a candidate.
-    find_candidate : List(U8), U64, List(U8) -> Try(U64, [NoCandidate])
-    find_candidate = |hay, at, pat|
-        if List.is_empty(pat) {
-            if at <= List.len(hay) { Ok(at) } else { Err(NoCandidate) }
-        } else {
-            Lit.scan(hay, at, pat, List.first(pat) ?? 0, List.len(pat))
-        }
-
-    scan : List(U8), U64, List(U8), U8, U64 -> Try(U64, [NoCandidate])
-    scan = |hay, at, pat, b0, plen|
-        if at + plen > List.len(hay) {
-            Err(NoCandidate)
-        } else if (List.get(hay, at) ?? 0) == b0 and Lit.matches(hay, at, pat, plen) {
-            Ok(at)
-        } else {
-            Lit.scan(hay, at + 1, pat, b0, plen)
-        }
-
-    ## next offset at/after `at` whose byte is in `set` (the first-byte-set rung).
-    find_in_set : List(U8), U64, List(U8) -> Try(U64, [NoCandidate])
-    find_in_set = |hay, at, set|
-        if at >= List.len(hay) {
-            Err(NoCandidate)
-        } else if List.contains(set, List.get(hay, at) ?? 0) {
-            Ok(at)
-        } else {
-            Lit.find_in_set(hay, at + 1, set)
-        }
-
     matches : List(U8), U64, List(U8), U64 -> Bool
     matches = |hay, at, pat, plen| Lit.eq(hay, at, pat, 0, plen)
 

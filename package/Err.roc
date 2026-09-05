@@ -11,12 +11,11 @@
 ## 66-display-column budget, because the compile-time crash formatter reflows on
 ## display width (D7, corrected 2026-09-02).
 Err := [].{
-    ## A byte offset into the pattern, with the display column for the caret.
-    ## `offset` is bytes (for slicing); `col` is display columns (for the caret).
-    Pos : { offset : U64, col : U64 }
-
-    ## A half-open span of the pattern.
-    Span : { start : Err.Pos, end : Err.Pos }
+    ## A byte offset into the pattern. The display column for the caret is
+    ## derived at render time (`col_of`) rather than stored: a stored column was
+    ## always set to the byte offset, which is wrong for any non-ASCII pattern,
+    ## and nothing read it. Parse errors point at one offset, so there is no span
+    ## either — the previous one always had `end == start`.
 
     ## What went wrong. Names track `regex-syntax` so the differential harness
     ## maps 1:1 (D7). M1 uses the parse subset; the full ~47-kind enumeration
@@ -42,13 +41,13 @@ Err := [].{
     ## The error itself.
     Error : {
         pattern : Str,
-        at : [Whole, At(Err.Span)],
+        at : [Whole, At(U64)],
         kind : Err.Kind,
     }
 
     err : Str, U64, Err.Kind -> Err.Error
     err = |pattern, offset, kind|
-        { pattern, at: At({ start: { offset, col: offset }, end: { offset, col: offset } }), kind }
+        { pattern, at: At(offset), kind }
 
     whole : Str, Err.Kind -> Err.Error
     whole = |pattern, kind| { pattern, at: Whole, kind }
@@ -77,7 +76,7 @@ Err := [].{
     to_str = |e|
         match e.at {
             Whole => "regex: ${Err.message(e.kind)}"
-            At(s) => "regex: ${Err.message(e.kind)} at byte ${s.start.offset.to_str()}"
+            At(offset) => "regex: ${Err.message(e.kind)} at byte ${offset.to_str()}"
         }
     ## S6 — the diagnostic. Message, then the pattern with a caret. M1 renders the
     ## whole pattern (patterns are short); the 66-display-column windowing (D7) is
@@ -87,8 +86,8 @@ Err := [].{
         head = "regex: ${Err.message(e.kind)}"
         match e.at {
             Whole => "${head}\n  | ${e.pattern}"
-            At(s) => {
-                col = Err.col_of(e.pattern, s.start.offset)
+            At(offset) => {
+                col = Err.col_of(e.pattern, offset)
                 pad = Str.repeat(" ", col)
                 "${head}\n  | ${e.pattern}\n  | ${pad}^"
             }
