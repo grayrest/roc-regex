@@ -65,6 +65,11 @@ Comp := [
         # `find_all` can recover the match start from the forward pass and skip
         # the reverse start-scan. False disables that (reverse scan used).
         inline_start : Bool,
+        # The pattern is a pure alternation of literals (`Sherlock|Holmes|…`), so
+        # every match is exactly one of `tlits` and a Teddy candidate can be
+        # verified by memcmp (which literal, in pattern order) rather than a DFA
+        # walk. False for any alternation whose branches carry more structure.
+        exact_alt : Bool,
         tlits : List(List(U8)),
         # Set ordinal of the folded `\w` class when the pattern has a word
         # boundary (`\b`/`\B`), else 0. Present so the DFA determinizer can ask
@@ -227,6 +232,18 @@ Comp := [
             _ => Err(NotClassAtom)
         }
 
+    # Is the pattern a pure alternation of literals (2..8 branches, each a pure
+    # literal)? Then a Teddy candidate is verified by memcmp against the branches
+    # in order (leftmost-first), no DFA walk. Aligns with `lead_literals`, whose
+    # `tlits` are then the full branch literals.
+    is_exact_alt : Comp -> Bool
+    is_exact_alt = |ast|
+        match ast {
+            Group(x, _) => Comp.is_exact_alt(x)
+            Alt(xs) => List.len(xs) >= 2 and List.len(xs) <= 8 and List.all(xs, Comp.is_exact_literal)
+            _ => False
+        }
+
     # Is the pattern a pure literal — only single-codepoint literal atoms in
     # sequence (no quantifier, class, alternation, look, or anchor)? Then its only
     # match is exactly `prefix_of` it, so a memcmp verify suffices.
@@ -356,6 +373,7 @@ Comp := [
                         frange = if List.is_empty(prefix) and List.is_empty(fbytes) { Comp.first_range(numbered.ast) } else { NoRange }
                         exact = !(List.is_empty(prefix)) and Comp.is_exact_literal(numbered.ast)
                         inline_start = Comp.inline_start_ok(numbered.ast)
+                        exact_alt = Comp.is_exact_alt(numbered.ast)
                         tlits = Comp.lead_literals(numbered.ast)
                         # wrap in group 0: Save0 ; body ; Save1 ; Match
                         prog0 = { prog: [Comp.inst(Comp.op_save, 0)], sets: [], splits: [], n_sets: 0 }
@@ -412,7 +430,7 @@ Comp := [
                             } else {
                                 { sets: ib.p.sets, word_set: 0 }
                             }
-                        Ok({ prog, splits: p2.splits, classes: Trie.build(wb.sets), n_groups, prefix, rprog, rsplits: r1.splits, uprog, usplits: u1.splits, fbytes, frange, exact, inline_start, tlits, word_set: wb.word_set, anchored_start: a_start, accept_eoi_only: a_eoi, inner: ib.inner })
+                        Ok({ prog, splits: p2.splits, classes: Trie.build(wb.sets), n_groups, prefix, rprog, rsplits: r1.splits, uprog, usplits: u1.splits, fbytes, frange, exact, inline_start, exact_alt, tlits, word_set: wb.word_set, anchored_start: a_start, accept_eoi_only: a_eoi, inner: ib.inner })
                     }
                 Err(e) => Err(e)
             }

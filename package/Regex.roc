@@ -19,7 +19,7 @@ Regex := [].{
     ## The `engine` field records M3's outcome (D10): `Three` carries the D5
     ## forward+reverse DFAs for a look-free pattern within budget, else `Pike`.
     ## Documented-unstable.
-    T : { prog : List(U32), splits : List(U32), classes : Trie.T, n_groups : U32, prefix : List(U8), rprog : List(U32), rsplits : List(U32), uprog : List(U32), usplits : List(U32), fbytes : List(U8), frange : [NoRange, Range(U8, U8)], exact : Bool, tlits : List(List(U8)), word_set : U64, engine : [Pike, Three({ fwd : Rev.D, rev : Rev.D, averify : [NoVerify, Verify(Rev.D)], inner : [NoInner, Inner({ lit : List(U8), lrev : Rev.D, full : Rev.D })] })] }
+    T : { prog : List(U32), splits : List(U32), classes : Trie.T, n_groups : U32, prefix : List(U8), rprog : List(U32), rsplits : List(U32), uprog : List(U32), usplits : List(U32), fbytes : List(U8), frange : [NoRange, Range(U8, U8)], exact : Bool, exact_alt : Bool, tlits : List(List(U8)), word_set : U64, engine : [Pike, Three({ fwd : Rev.D, rev : Rev.D, averify : [NoVerify, Verify(Rev.D)], inner : [NoInner, Inner({ lit : List(U8), lrev : Rev.D, full : Rev.D })] })] }
 
     ## A match, as half-open BYTE offsets into the haystack (D3, D15).
     Span : { start : U64, end : U64 }
@@ -37,7 +37,7 @@ Regex := [].{
                         Ok(d) => Three(d)
                         Err(_) => Pike
                     }
-                Ok({ prog: c.prog, splits: c.splits, classes: c.classes, n_groups: c.n_groups, prefix: c.prefix, rprog: c.rprog, rsplits: c.rsplits, uprog: c.uprog, usplits: c.usplits, fbytes: c.fbytes, frange: c.frange, exact: c.exact, tlits: c.tlits, word_set: c.word_set, engine })
+                Ok({ prog: c.prog, splits: c.splits, classes: c.classes, n_groups: c.n_groups, prefix: c.prefix, rprog: c.rprog, rsplits: c.rsplits, uprog: c.uprog, usplits: c.usplits, fbytes: c.fbytes, frange: c.frange, exact: c.exact, exact_alt: c.exact_alt, tlits: c.tlits, word_set: c.word_set, engine })
             }
         }
 
@@ -171,7 +171,7 @@ Regex := [].{
     # `anchored_start`/`accept_eoi_only` matter only to the DFA build (they are
     # baked into the engine there); the PikeVM view keeps the anchors in `prog`,
     # so they default to False here.
-    base = |re| { prog: re.prog, splits: re.splits, classes: re.classes, n_groups: re.n_groups, prefix: re.prefix, rprog: re.rprog, rsplits: re.rsplits, uprog: re.uprog, usplits: re.usplits, fbytes: re.fbytes, frange: re.frange, exact: re.exact, inline_start: False, tlits: re.tlits, word_set: re.word_set, anchored_start: False, accept_eoi_only: False, inner: NoInner }
+    base = |re| { prog: re.prog, splits: re.splits, classes: re.classes, n_groups: re.n_groups, prefix: re.prefix, rprog: re.rprog, rsplits: re.rsplits, uprog: re.uprog, usplits: re.usplits, fbytes: re.fbytes, frange: re.frange, exact: re.exact, inline_start: False, exact_alt: False, tlits: re.tlits, word_set: re.word_set, anchored_start: False, accept_eoi_only: False, inner: NoInner }
 
 
     ## --- iteration and rewriting (D15, D14) ---------------------------------
@@ -305,25 +305,40 @@ Regex := [].{
             }
         } else if !List.is_empty(re.tlits) {
             # Alternation of leading literals (e.g. `Sherlock|Holmes|…`): SIMD Teddy
-            # over the literal SET for candidates, then DFA-verify each — the
-            # multi-literal analogue of the prefix path, replacing a full DFA scan.
+            # over the literal SET for candidates. A pure literal alternation
+            # (`exact_alt`) verifies each candidate by memcmp — which branch, in
+            # order — and emits a fixed-length span, no DFA. Otherwise the branches
+            # carry more structure, so verify with the anchored DFA (or PikeVM).
             verify = match re.engine {
                 Three(d) => d.averify
                 Pike => NoVerify
             }
-            k = match verify {
-                Verify(_) => Regex.inner_prefilter_k
-                NoVerify => Regex.prefilter_k
+            k = if re.exact_alt {
+                Regex.inner_prefilter_k
+            } else {
+                match verify {
+                    Verify(_) => Regex.inner_prefilter_k
+                    NoVerify => Regex.prefilter_k
+                }
             }
             match Teddy.build(re.tlits) {
                 Ok(t) =>
-                    match Teddy.candidates_capped(t, hay, List.len(hay) // k) {
-                        Ok(cands) =>
-                            match verify {
-                                Verify(av) => Regex.find_all_teddy_dfa(av, re.classes, hay, cands)
-                                NoVerify => Regex.find_all_teddy(Regex.base(re), hay, cands)
-                            }
-                        Err(_) => Regex.find_all_engine(re, hay)
+                    if re.exact_alt {
+                        # fused monomorphic scan + memcmp verify (no candidate list,
+                        # no dedup sort) — matches are exactly the branch literals.
+                        match Teddy.match_lits(t, hay, List.len(hay) // k) {
+                            Ok(spans) => spans
+                            Err(_) => Regex.find_all_engine(re, hay)
+                        }
+                    } else {
+                        match Teddy.candidates_capped(t, hay, List.len(hay) // k) {
+                            Ok(cands) =>
+                                match verify {
+                                    Verify(av) => Regex.find_all_teddy_dfa(av, re.classes, hay, cands)
+                                    NoVerify => Regex.find_all_teddy(Regex.base(re), hay, cands)
+                                }
+                            Err(_) => Regex.find_all_engine(re, hay)
+                        }
                     }
                 Err(_) => Regex.find_all_engine(re, hay)
             }
