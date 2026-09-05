@@ -179,7 +179,14 @@ Sharp := [].{
     accel_str : Sharp.T -> Str
     accel_str = |re| {
         init = match re.accel.init { Prefix(p) => "prefix=${List.len(p.sets).to_str()}sets@${p.anchor.to_str()}(${Str.from_utf8_lossy([p.anchor_byte])})", NoInit => "prefix=none" }
-        len = match re.accel.len { FixedLength(n) => "len=${n.to_str()}", MatchEnd => "len=any" }
+        len =
+            match re.accel.len {
+                FixedLength(n) => "len=${n.to_str()}"
+                PrefixEnd(k, st) => "len=prefix${k.to_str()}+end@${st.to_str()}"
+                SetLookup(k, c, nk, _) => "len=prefix${k.to_str()}+set${c.to_str()}(nk${nk.to_str()})"
+                RemainingSets(k, c, m) => "len=prefix${k.to_str()}+upto${m.to_str()}x${c.to_str()}"
+                MatchEnd => "len=any"
+            }
         ov = match re.accel.override { Literal(l) => "override=${Str.from_utf8_lossy(l)}", NoOverride => "override=none" }
         "${init} ${len} ${ov}"
     }

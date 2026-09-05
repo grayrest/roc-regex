@@ -11,6 +11,7 @@
 ## - `override`: RE#'s `MatchOverride.FixedLengthString` — the pattern IS a
 ##   literal, so `find_all` is a literal search.
 import Arena
+import Bset
 import Build
 import Deriv
 import Dfa
@@ -22,7 +23,7 @@ import Utf8
 Accel := [].{
     T : {
         init : [NoInit, Prefix(Rlit.Prefix)],
-        len : [MatchEnd, FixedLength(U32)],
+        len : Dfa.Len,
         override : [NoOverride, Literal(List(U8))],
     }
 
@@ -39,11 +40,8 @@ Accel := [].{
         a = e.a
         sets = Accel.prefix_sets(a, rev)
         sp = Accel.set_prefix(e, t, sets, rev_ts)
-        len =
-            match Arena.fixed_len(sp.e.a, noprefix) {
-                Ok(n) => FixedLength(n)
-                Err(_) => MatchEnd
-            }
+        ll = Accel.infer_len(sp.e, t, noprefix)
+        len = ll.len
         # the pattern is exactly a literal (RE#'s `inferOverrideRegex`, which looks
         # at the RAW pattern: a lookbehind stripped from `noprefix` still rules it out)
         override =
@@ -56,8 +54,112 @@ Accel := [].{
                     }
                 _ => NoOverride
             }
-        { e: sp.e, accel: { init: sp.init, len, override } }
+        { e: ll.e, accel: { init: sp.init, len, override } }
     }
+
+    # --- LengthLookup (RE#'s `inferLengthLookup`) -------------------------------------
+
+    ## `getFixedPrefixLength`: how many leading symbols of `node` have a fixed
+    ## length, and what remains after them (lookarounds and anchors count as
+    ## zero and drop out; a bounded loop `x{lo,hi}` contributes `lo` and leaves
+    ## `x{0,hi-lo}`)
+    FP : { a : Arena.A, len : Try(U32, [NoLen]), rem : Try(U32, [NoRem]) }
+
+    fixed_prefix : Arena.A, U32, U32 -> Accel.FP
+    fixed_prefix = |a, acc, node| {
+        k = Arena.kind(a, node)
+        if node == Arena.eps {
+            { a, len: Ok(acc), rem: Err(NoRem) }
+        } else if k == Arena.k_concat {
+            h = Arena.head(a, node)
+            tl = Arena.tail(a, node)
+            hp = Accel.fixed_prefix(a, acc, h)
+            match (hp.len, hp.rem) {
+                (Ok(n), Err(_)) => Accel.fixed_prefix(hp.a, n, tl)
+                (Ok(n), Ok(r)) => {
+                    c = Build.mk_concat2(hp.a, r, tl)
+                    { a: c.a, len: Ok(n), rem: Ok(c.id) }
+                }
+                _ => if acc == 0 { { a: hp.a, len: Err(NoLen), rem: Err(NoRem) } } else { { a: hp.a, len: Ok(acc), rem: Ok(node) } }
+            }
+        } else if k == Arena.k_singleton {
+            { a, len: Ok(1 + acc), rem: Err(NoRem) }
+        } else if k == Arena.k_loop {
+            body = Arena.head(a, node)
+            lo = Arena.loop_lo(a, node)
+            hi = Arena.loop_hi(a, node)
+            if Arena.is_singleton(a, body) and lo == hi {
+                { a, len: Ok(lo + acc), rem: Err(NoRem) }
+            } else if Arena.is_singleton(a, body) and lo != 0 {
+                l = Build.mk_loop(a, body, 0, if hi == Arena.inf { hi } else { hi - lo })
+                { a: l.a, len: Ok(lo + acc), rem: Ok(l.id) }
+            } else {
+                { a, len: Err(NoLen), rem: Ok(node) }
+            }
+        } else if k == Arena.k_lookahead or k == Arena.k_lookbehind or k == Arena.k_begin or k == Arena.k_end {
+            { a, len: Ok(acc), rem: Err(NoRem) }
+        } else {
+            # Or, And, Not
+            { a, len: Err(NoLen), rem: Ok(node) }
+        }
+    }
+
+    ## `inferLengthLookup` for the forward pattern `noprefix`
+    infer_len : Dfa.E, Trie.T, U32 -> { e : Dfa.E, len : Dfa.Len }
+    infer_len = |e, t, noprefix|
+        match Arena.fixed_len(e.a, noprefix) {
+            Ok(n) => { e, len: FixedLength(n) }
+            Err(_) => {
+                fp = Accel.fixed_prefix(e.a, 0, noprefix)
+                match (fp.len, fp.rem) {
+                    (Ok(plen), Ok(rem)) => {
+                        e1 = { ..e, a: fp.a }
+                        st = Dfa.get_state(e1, rem, False)
+                        e2 = st.e
+                        a = e2.a
+                        body = Arena.head(a, rem)
+                        if Arena.is_loop(a, rem) and Arena.loop_lo(a, rem) == 0 and Arena.is_singleton(a, body) and Arena.loop_hi(a, rem) <= 255 and TSet.count(Arena.tset(a, body)) == 1 {
+                            { e: e2, len: RemainingSets(plen, TSet.lowest(Arena.tset(a, body)), Arena.loop_hi(a, rem)) }
+                        } else {
+                            # one live derivative `der`, always nullable, whose own derivatives all die.
+                            # Deviation from RE#: minterms that kill `rem` (→ bot) are ignored here — on
+                            # our alphabet the `Invalid` class kills every negated class, so `[^,]*,`
+                            # would never qualify. Sound because a recorded start guarantees a match
+                            # exists, so no killing symbol can precede the terminator.
+                            d1 = Accel.derivs_merged(a, rem, [noprefix, rem])
+                            fallback = { e: { ..e2, a: d1.a }, len: PrefixEnd(plen, st.id) }
+                            match List.drop_if(d1.pairs, |(_, x)| x == Arena.bot) {
+                                [(mt, der)] if Arena.is_always_null(d1.a, der) and TSet.count(mt) == 1 => {
+                                    # `der` must be a dead end: EVERY minterm kills it. RE# excludes
+                                    # derivatives back to `rem`/`der` here, which the bot-dropping above
+                                    # would make unsound (`a.*c`: `.*c|()` steps back to `.*c` on most
+                                    # symbols and the match goes on to the last `c`).
+                                    d2 = Accel.derivs_merged(d1.a, der, [])
+                                    e3 = { ..e2, a: d2.a }
+                                    match d2.pairs {
+                                        [(_, x)] if x == Arena.bot => {
+                                            ds = Dfa.get_state(e3, der, False)
+                                            nk = Dfa.nk(ds.e, ds.id)
+                                            skips = (List.get(ds.e.skip_ok, ds.id.to_u64()) ?? 0) == 1
+                                            if nk != Dfa.nk_pending and !skips {
+                                                c = TSet.lowest(mt)
+                                                bytes = List.keep_if(Arena.upto(128), |b| (List.get(t.ascii, b) ?? 0) == c) |> List.map(|b| b.to_u8_wrap())
+                                                { e: ds.e, len: SetLookup(plen, c, nk, Bset.table(bytes)) }
+                                            } else {
+                                                { e: ds.e, len: PrefixEnd(plen, st.id) }
+                                            }
+                                        }
+                                        _ => { e: e3, len: PrefixEnd(plen, st.id) }
+                                    }
+                                }
+                                _ => fallback
+                            }
+                        }
+                    }
+                    _ => { e: { ..e, a: fp.a }, len: MatchEnd }
+                }
+            }
+        }
 
     # the prefix as forward literal bytes, when every set is one codepoint
     literal_of : Trie.T, List(U64) -> Try(List(U8), [NotLiteral])

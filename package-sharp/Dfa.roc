@@ -561,7 +561,13 @@ Dfa := [].{
 
     ## The accelerators the fast scans consult (S13; built by `Accel`)
     Init : [NoInit, Prefix(Rlit.Prefix)]
-    Len : [MatchEnd, FixedLength(U32)]
+    ## RE#'s `LengthLookup`, how the end pass finds a match's end. Lengths are
+    ## in symbols. `PrefixEnd(k, st)`: the first `k` symbols are fixed, scan
+    ## from there in state `st`. `SetLookup(k, cls, nk, tab)`: after `k`
+    ## symbols the match ends at the first symbol of class `cls` (`tab` its
+    ## ASCII bytes as a `Bset` table), inclusive when `nk` is CurrentNull.
+    ## `RemainingSets(k, cls, m)`: `k` symbols then up to `m` symbols of `cls`.
+    Len : [MatchEnd, FixedLength(U32), PrefixEnd(U32, U32), SetLookup(U32, U32, U8, List(U8)), RemainingSets(U32, U32, U32)]
     Override : [NoOverride, Literal(List(U8))]
     Accels : { init : Dfa.Init, len : Dfa.Len, override : Dfa.Override }
 
@@ -598,9 +604,15 @@ Dfa := [].{
         skip_lo = e.skip_lo
         table = e.table
         nmt = e.nmt.to_u64()
-        s_np = e.s_noprefix
-        is_fixed = match len { FixedLength(_) => True, MatchEnd => False }
-        fixed = match len { FixedLength(k) => k.to_u64(), MatchEnd => 0 }
+        # the length lookup as scalars (a tag union live across the loop is slow)
+        kind = match len { MatchEnd => 0, FixedLength(_) => 1, PrefixEnd(_, _) => 2, SetLookup(_, _, _, _) => 3, RemainingSets(_, _, _) => 4 }
+        plen = match len { FixedLength(k) => k.to_u64(), PrefixEnd(k, _) => k.to_u64(), SetLookup(k, _, _, _) => k.to_u64(), RemainingSets(k, _, _) => k.to_u64(), MatchEnd => 0 }
+        s_start = match len { PrefixEnd(_, st) => st, _ => e.s_noprefix }
+        cls = match len { SetLookup(_, c, _, _) => c, RemainingSets(_, c, _) => c, _ => 0 }
+        nkd = match len { SetLookup(_, _, k, _) => k, _ => 0 }
+        rem = match len { RemainingSets(_, _, r) => r.to_u64(), _ => 0 }
+        tab = match len { SetLookup(_, _, _, tb) => tb, _ => [] }
+        ascii = t.ascii
         n_sts = List.len(sts)
         var spans = []
         var next_valid = 0
@@ -610,64 +622,137 @@ Dfa := [].{
             i = i + 1
             if start < next_valid {
                 {}
-            } else if is_fixed {
-                en = Utf8.advance(hay, start, fixed)
+            } else if kind == 1 {
+                en = Utf8.advance(hay, start, plen)
                 spans = List.append(spans, { start, end: en })
                 next_valid = en
-            } else if start >= n {
-                match Dfa.at_eoi_fast(e, s_np, hay, n, Err(NoEnd)) {
-                    Ok(en) => {
-                        spans = List.append(spans, { start, end: en })
-                        next_valid = en
-                    }
-                    Err(_) => {}
-                }
-            } else {
-                var pos = start
-                var s = s_np
-                var best = Err(NoEnd)
-                while s != Dfa.dead {
-                    b0 = List.get(hay, pos) ?? 0
-                    # RE#'s forward `CanSkip`: the state loops on every byte up to the
-                    # nearest member; the last such position is the best end, so jump
-                    # there (never past the last byte: the regular step then reaches
-                    # the end-of-input handling)
-                    if (List.get(skip_ok, s.to_u64()) ?? 0) == 1 and !Bset.member(skip_lo, s.to_u64(), b0) {
-                        pos =
-                            match Bset.find(hay, skip_lo, s.to_u64(), pos + 1) {
-                                Ok(p) => p
-                                Err(_) => n - 1
+            } else if kind == 3 {
+                # `llmatch_ends_setlookup_mt`: the first symbol of `cls` after the prefix
+                var pos = Utf8.advance(hay, start, plen)
+                var found = False
+                while found == False and pos < n {
+                    match Bset.find(hay, tab, 0, pos) {
+                        Err(_) => {
+                            pos = n
+                        }
+                        Ok(p) => {
+                            b = List.get(hay, p) ?? 0
+                            if b < 0x80 {
+                                pos = p
+                                found = True
+                            } else {
+                                d = Utf8.decode(hay, p)
+                                c = if d.ok { Trie.class_of(t, d.cp) } else { t.invalid }
+                                if c == cls {
+                                    pos = p
+                                    found = True
+                                } else {
+                                    pos = p + d.len
+                                }
                             }
+                        }
                     }
-                    k = List.get(nks, s.to_u64()) ?? Dfa.nk_notnull
-                    if k == Dfa.nk_current {
-                        best = Ok(pos)
-                    } else if k == Dfa.nk_prev {
-                        best = Ok(Utf8.retreat(hay, pos, 1))
-                    } else if k != Dfa.nk_notnull {
-                        best = Dfa.null_fallback_fast(e, s, hay, pos, best)
-                    }
+                }
+                en = if nkd == Dfa.nk_current and pos < n { Utf8.advance(hay, pos, 1) } else { pos }
+                spans = List.append(spans, { start, end: en })
+                next_valid = en
+            } else if kind == 4 {
+                # `llmatch_ends_remaining_set`: up to `rem` more symbols of `cls`
+                var pos = start
+                var j = 0
+                while j < plen {
+                    pb = List.get(hay, pos) ?? 0
+                    pos = if pb < 0x80 { pos + 1 } else { pos + (Utf8.decode(hay, pos)).len }
+                    j = j + 1
+                }
+                var c = 0
+                var go = True
+                while go and c < rem and pos < n {
                     b = List.get(hay, pos) ?? 0
                     if b < 0x80 {
-                        s = List.get(at, s.to_u64() * 128 + b.to_u64()) ?? Dfa.dead
-                        pos = pos + 1
+                        if (List.get(ascii, b.to_u64()) ?? 0) == cls {
+                            pos = pos + 1
+                            c = c + 1
+                        } else {
+                            go = False
+                        }
                     } else {
                         d = Utf8.decode(hay, pos)
-                        cls = if d.ok { Trie.class_of(t, d.cp) } else { t.invalid }
-                        s = List.get(table, s.to_u64() * nmt + cls.to_u64()) ?? Dfa.dead
-                        pos = pos + d.len
-                    }
-                    if pos >= n {
-                        best = Dfa.at_eoi_fast(e, s, hay, n, best)
-                        s = Dfa.dead
+                        cc = if d.ok { Trie.class_of(t, d.cp) } else { t.invalid }
+                        if cc == cls {
+                            pos = pos + d.len
+                            c = c + 1
+                        } else {
+                            go = False
+                        }
                     }
                 }
-                match best {
-                    Ok(en) => {
-                        spans = List.append(spans, { start, end: en })
-                        next_valid = en
+                spans = List.append(spans, { start, end: pos })
+                next_valid = pos
+            } else {
+                # MatchEnd, or PrefixEnd: scan from the start (or past the fixed prefix)
+                var pos0 = start
+                var j = 0
+                while j < plen {
+                    pb = List.get(hay, pos0) ?? 0
+                    pos0 = if pb < 0x80 { pos0 + 1 } else { pos0 + (Utf8.decode(hay, pos0)).len }
+                    j = j + 1
+                }
+                if pos0 >= n {
+                    match Dfa.at_eoi_fast(e, s_start, hay, n, Err(NoEnd)) {
+                        Ok(en) => {
+                            spans = List.append(spans, { start, end: en })
+                            next_valid = en
+                        }
+                        Err(_) => {}
                     }
-                    Err(_) => {}
+                } else {
+                    var pos = pos0
+                    var s = s_start
+                    var best = Err(NoEnd)
+                    while s != Dfa.dead {
+                        b0 = List.get(hay, pos) ?? 0
+                        # RE#'s forward `CanSkip`: the state loops on every byte up to the
+                        # nearest member; the last such position is the best end, so jump
+                        # there (never past the last byte: the regular step then reaches
+                        # the end-of-input handling)
+                        if (List.get(skip_ok, s.to_u64()) ?? 0) == 1 and !Bset.member(skip_lo, s.to_u64(), b0) {
+                            pos =
+                                match Bset.find(hay, skip_lo, s.to_u64(), pos + 1) {
+                                    Ok(p) => p
+                                    Err(_) => n - 1
+                                }
+                        }
+                        k = List.get(nks, s.to_u64()) ?? Dfa.nk_notnull
+                        if k == Dfa.nk_current {
+                            best = Ok(pos)
+                        } else if k == Dfa.nk_prev {
+                            best = Ok(Utf8.retreat(hay, pos, 1))
+                        } else if k != Dfa.nk_notnull {
+                            best = Dfa.null_fallback_fast(e, s, hay, pos, best)
+                        }
+                        b = List.get(hay, pos) ?? 0
+                        if b < 0x80 {
+                            s = List.get(at, s.to_u64() * 128 + b.to_u64()) ?? Dfa.dead
+                            pos = pos + 1
+                        } else {
+                            d = Utf8.decode(hay, pos)
+                            cc = if d.ok { Trie.class_of(t, d.cp) } else { t.invalid }
+                            s = List.get(table, s.to_u64() * nmt + cc.to_u64()) ?? Dfa.dead
+                            pos = pos + d.len
+                        }
+                        if pos >= n {
+                            best = Dfa.at_eoi_fast(e, s, hay, n, best)
+                            s = Dfa.dead
+                        }
+                    }
+                    match best {
+                        Ok(en) => {
+                            spans = List.append(spans, { start, end: en })
+                            next_valid = en
+                        }
+                        Err(_) => {}
+                    }
                 }
             }
         }

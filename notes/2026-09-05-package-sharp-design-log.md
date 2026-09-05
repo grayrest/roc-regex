@@ -519,3 +519,63 @@ Still owed from S13: the threaded (incomplete-fold) path has none of this;
 `LengthLookup`'s `FixedLengthPrefixMatchEnd`/`SetLookup`/`RemainingSets`;
 RE#'s potential-start sets beyond what the initial startset gives; 32-byte
 kernels for the frequent-byte cases; the word_bound skip-check overhead.
+
+## M4 accelerators, stage 3 (2026-09-05): length lookups, bench rows
+
+Ported RE#'s `inferLengthLookup` for the forward end pass (`Accel.infer_len`,
+`Dfa.Len`): `getFixedPrefixLength` walks the concat chain of the forward
+pattern counting singleton symbols (`x{lo,hi}` contributes `lo` and leaves
+`x{0,hi-lo}`; lookarounds and anchors are zero-length and drop out) and
+returns what remains. Then, in RE#'s order: `RemainingSets` when the rest is
+`[set]{0,m}` over one minterm (`[0-9]{2,4}`: two symbols, then up to two more
+digits — no automaton at all); `SetLookup` when the rest has exactly one live
+derivative, always nullable and a dead end (`t[^,]*,`: the match ends at the
+first `,` after the prefix, found with the `Bset` kernel); otherwise
+`PrefixEnd`: start the scan past the fixed prefix in the remainder's state.
+The end pass dispatches on a hoisted `kind` byte; the prefix advance is
+inlined (a `Utf8.advance` call per start cost more than the state it saved).
+
+Two things learned the hard way:
+
+- **Deviation, kept:** `SetLookup`'s inference ignores minterms that kill the
+  remainder. RE# counts them as live derivatives, which on our alphabet rules
+  the lookup out for every negated class (the `Invalid` symbol kills `[^,]`).
+  Sound because a start recorded by the reverse sweep guarantees a match, so
+  no killing symbol can precede the terminator.
+- **Caught by the RE# differential:** with that change, RE#'s own second
+  check — the continuation's derivatives, EXCLUDING those back to the
+  remainder or itself, must be just `bot` — became unsound: `a.*c` gave
+  `.*c|()` as the continuation, which steps back to `.*c` on most symbols, and
+  the lookup stopped at the first `c` (RE# never reaches this case because
+  `.` → `\n` → bot already disqualifies it). 3 of 3570 cases differed. The
+  continuation must now be a true dead end: every minterm kills it.
+
+Numbers (A/B, `--opt=speed`, 256 KB, ms): `[0-9]{2,4}` 0.53 → 0.385
+(`RemainingSets`); `[A-Za-z]+` 2.23 → 2.17 and `\w+\s+\w+` unchanged
+(`PrefixEnd` saves one transition per match, about what the advance costs);
+`t[^,]*,` 0.372 with `SetLookup` against 0.80 with the state scan.
+
+### `tools/bench` (generated 256 KB haystack, ns per `find_all`)
+
+`examples/bench_sharp.roc` adds `sharp_*` rows; `run.sh` pairs them with the
+`Regex` rows and checks both engines' match counts against Rust (all ten
+agree — leftmost-first and leftmost-longest coincide on these patterns).
+
+| pattern | Regex | Sharp | Rust meta | Sharp / meta |
+|---|---|---|---|---|
+| `Holmes` | 136 K | 120 K | 64 K | 1.9x |
+| `Moriarty` | 22 K | 23 K | 9.6 K | 2.4x |
+| `Sherlock\|Holmes\|…` | 1359 K | 1970 K | 421 K | 4.7x |
+| `[A-Za-z]+` | 3423 K | 2478 K | 2403 K | 1.03x |
+| `[0-9]{2,4}` | 156 K | 185 K | 108 K | 1.7x |
+| `\bthe\b` | 333 K | 512 K | 204 K | 2.5x |
+| `\w+\s+\w+` | 2396 K | 2634 K | 1530 K | 1.7x |
+| `(\w+)@(\w+)` | 134 K | 165 K | 68 K | 2.4x |
+| `\p{L}+` | 3395 K | 2544 K | 2039 K | 1.25x |
+| `.*Holmes` | 532 K | 414 K | 646 K | 0.64x |
+
+(The bench haystack is generated prose with a different letter mix from the
+Sherlock text, so its absolute numbers differ from the probe's.) The
+alternation is the outlier: RE# has no literal-set accelerator, so the sweep
+skips only to the eight capitals; the existing engine runs Teddy over the
+literals themselves.
