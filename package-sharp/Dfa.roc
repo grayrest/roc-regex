@@ -560,7 +560,7 @@ Dfa := [].{
     # offsets are symbol counts, so they move by `Utf8.advance`/`retreat`.
 
     ## The accelerators the fast scans consult (S13; built by `Accel`)
-    Init : [NoInit, Prefix(Rlit.Prefix)]
+    Init : [NoInit, Prefix(Rlit.Prefix), Potential(Rlit.Prefix)]
     ## RE#'s `LengthLookup`, how the end pass finds a match's end. Lengths are
     ## in symbols. `PrefixEnd(k, st)`: the first `k` symbols are fixed, scan
     ## from there in state `st`. `SetLookup(k, cls, nk, tab)`: after `k`
@@ -851,6 +851,7 @@ Dfa := [].{
         match ini {
             NoInit => Dfa.collect_plain(e, t, hay, pos0, s0, acc0, skip)
             Prefix(pf) => Dfa.collect_prefix(e, t, pf, hay, pos0, s0, acc0, skip)
+            Potential(pf) => Dfa.collect_prefix(e, t, pf, hay, pos0, s0, acc0, skip)
         }
 
     collect_plain : Dfa.E, Trie.T, List(U8), U64, U32, List(U64), Bool -> { s : U32, acc : List(U64) }
@@ -942,15 +943,34 @@ Dfa := [].{
         nmt = e.nmt.to_u64()
         start_state = e.s_rev_ts
         land = pf.state
+        lands = pf.land
         var pos = pos0
         var s = s0
         var acc = acc0
         while pos > 0 {
             if s == start_state {
+                # an exact prefix: jump to its start and land; a potential start: resume
+                # at the occurrence's end and re-read it, stepping once when the
+                # occurrence ends right here so the sweep always progresses
                 match Rlit.rfind_sets(hay, t, pf, pos) {
-                    Ok(start) => {
-                        pos = start
-                        s = land
+                    Ok(occ) => {
+                        if lands {
+                            pos = occ.start
+                            s = land
+                        } else if occ.end < pos {
+                            pos = occ.end
+                        } else {
+                            b = List.get(hay, pos - 1) ?? 0
+                            if b < 0x80 {
+                                s = List.get(at, s.to_u64() * 128 + b.to_u64()) ?? Dfa.dead
+                                pos = pos - 1
+                            } else {
+                                d = Utf8.decode_rev(hay, pos)
+                                cls = if d.ok { Trie.class_of(t, d.cp) } else { t.invalid }
+                                s = List.get(table, s.to_u64() * nmt + cls.to_u64()) ?? Dfa.dead
+                                pos = d.cs
+                            }
+                        }
                     }
                     Err(_) => {
                         pos = 0

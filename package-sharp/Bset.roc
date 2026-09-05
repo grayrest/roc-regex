@@ -101,16 +101,37 @@ Bset := [].{
             Bset.find_tail(hay, tables, k, n, pos + 1)
         }
 
-    ## RE#'s `CommonalityScoreSimple`: how often the set's members occur in
-    ## text, lower is rarer (whitespace and lowercase 20, everything else 10)
-    weight : List(U8) -> U64
-    weight = |bytes|
-        List.fold(bytes, 0, |acc, b|
-            acc + (if b == ' ' or b == '\n' or b == '\t' or b == '\r' or (b >= 'a' and b <= 'z') { 20 } else { 10 }))
+    ## How often a byte occurs in English-ish text, per mille (rough: letters by
+    ## frequency, space 170, newline and common punctuation 10-15, digits and
+    ## capitals about 1 each, everything else 0.5 — stored ×2 so the rare
+    ## bytes are 1). RE# weights lowercase and whitespace 20, the rest 10; that
+    ## made `e` as good an anchor as `h` and a set of six letters "rarer" than
+    ## the capitals. A set's weight is the sum: 2000 / weight is the expected
+    ## gap in bytes between members.
+    freq2 : U8 -> U64
+    freq2 = |b|
+        if b == ' ' { 340 }
+        else if b == 'e' { 200 } else if b == 't' { 140 } else if b == 'a' { 130 } else if b == 'o' { 120 }
+        else if b == 'i' { 110 } else if b == 'n' { 110 } else if b == 's' { 100 } else if b == 'h' { 96 }
+        else if b == 'r' { 94 } else if b == 'd' { 66 } else if b == 'l' { 64 } else if b == 'u' { 44 }
+        else if b == 'c' { 42 } else if b == 'm' { 40 } else if b == 'w' { 36 } else if b == 'f' { 34 }
+        else if b == 'g' { 32 } else if b == 'y' { 30 } else if b == 'p' { 28 } else if b == 'b' { 24 }
+        else if b == 'v' { 16 } else if b == 'k' { 12 }
+        else if b == '\n' { 30 } else if b == ',' or b == '.' { 24 } else if b == '\'' or b == '"' { 8 } else if b == '-' { 6 }
+        else if b >= 'a' and b <= 'z' { 2 }
+        else if b >= 'A' and b <= 'Z' { 3 }
+        else if b >= '0' and b <= '9' { 2 }
+        else { 1 }
 
-    ## A set not worth skipping to (RE#'s `isTooCommon`, which leans on .NET's
-    ## `SearchValues` kinds; ours is the weight alone): `[a-z]` (520) and `\w`
-    ## are too common, `[A-Z]` (260), `\d` (100) and `\s` are not.
+    ## the expected frequency of a set's ASCII members (per mille ×2)
+    weight : List(U8) -> U64
+    weight = |bytes| List.fold(bytes, 0, |acc, b| acc + Bset.freq2(b))
+
+    ## Not worth skipping to: members expected closer than ~12 bytes apart, where
+    ## a 16-byte window and the skip's bookkeeping cost about what the table
+    ## steps did (RE#'s `isTooCommon` leans on .NET's `SearchValues` kinds; this
+    ## is ours). `[a-z]`, `\w`, `\s` (space alone is 340) are too common;
+    ## `[A-Z]` (78), `\d` (20), `h` (96), `[.,;:]` are not; `e` (200) is.
     too_common : List(U8) -> Bool
-    too_common = |bytes| Bset.weight(bytes) > 300
+    too_common = |bytes| Bset.weight(bytes) > 160
 }

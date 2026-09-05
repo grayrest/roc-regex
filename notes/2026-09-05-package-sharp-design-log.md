@@ -579,3 +579,42 @@ Sherlock text, so its absolute numbers differ from the probe's.) The
 alternation is the outlier: RE# has no literal-set accelerator, so the sweep
 skips only to the eight capitals; the existing engine runs Teddy over the
 literals themselves.
+
+## M4 accelerators, stage 4 (2026-09-05): set anchors, potential starts, frequency weights
+
+- **Prefix anchors are byte sets now** (RE#'s `SearchValuesPrefix`), not only
+  single ASCII codepoints: the rarest set is searched with the `Bset` kernel
+  and a non-ASCII hit is verified against the set after `Utf8.sym_start`.
+  `Rlit.rfind_sets` became one function of `while` loops that returns the
+  occurrence's start and end; the recursive version passed the trie and
+  prefix records per candidate and, on dense anchors, cost 5x the plain skip.
+- **Potential-start sets** (`calcPotentialMatchStart`, `Potential` in
+  `Dfa.Init`): the union of first sets over all live derivatives per depth;
+  an occurrence only says a match may start there, so the sweep resumes at
+  its end in the initial state (stepping once when the occurrence ends at
+  the current position, as RE#'s `pos <> resultEnd`). Gated harder than RE#'s
+  `useOnlyHead`: only when the anchor is not the first set and at least twice
+  as rare as it — the initial state's own skip set already jumps to the first
+  set with no verification.
+- **Frequency weights replace RE#'s commonality.** RE# weights every
+  lowercase letter 20 and everything else 10, which made `e` as good an
+  anchor as `h` (`\bthe\b` went from 0.75 to 1.37 ms) and a set of six last
+  letters "rarer" than the eight capitals (`Sherlock|Holmes|…` 4.4 ms). `Bset.freq2`
+  is a rough English per-mille table; a set's weight is the sum and 2000 /
+  weight the expected gap. `too_common` is weight > 160 (gap under ~12
+  bytes): `[a-z]`, `\w`, `\s`, `e`, `t` are too common, `[A-Z]`, `\d`, `h`,
+  punctuation are not. Consequences measured: the alternation's initial skip
+  set (last letters `k s n r e`) is dropped, 0.94 → 0.85 ms; `_*cat_*&_*dog_*`
+  no longer skips to `t`/`g`, unchanged.
+- A set anchor on the first symbol is refused: it is the initial state's skip
+  set plus verification and a landing (`[0-9]{2,4}` 0.385 → 0.457 with it).
+
+A/B (`--opt=speed`, 256 KB, ms, full): word_bound 0.55 (starts 0.26),
+caps_email 0.095, dotstar_lit 0.156, literal 0.027, bounded_num 0.368,
+class_plus 2.25, two_words 2.0, compl 1.37, inter 2.1, set_lookup 0.37.
+Corpus 331/331, RE# differential 3430/0, sixteen patterns fast-vs-threaded
+under Guard Malloc.
+
+S13 is complete in RE#'s terms except: skip sets on the threaded
+(incomplete-fold) path, which RE# computes lazily per state, and `(?i)`
+prefixes (`StringPrefixCaseIgnore`, not supported by the parser yet).

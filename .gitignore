@@ -26,3 +26,4 @@ tools/diff/target/
 tools/diff/Cargo.lock
 tools/bench/target/
 tools/bench/Cargo.lock
+/bench_sharp

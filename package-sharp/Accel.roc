@@ -22,7 +22,7 @@ import Utf8
 
 Accel := [].{
     T : {
-        init : [NoInit, Prefix(Rlit.Prefix)],
+        init : Dfa.Init,
         len : Dfa.Len,
         override : [NoOverride, Literal(List(U8))],
     }
@@ -39,7 +39,12 @@ Accel := [].{
     analyze = |e, t, root, rev, rev_ts, noprefix| {
         a = e.a
         sets = Accel.prefix_sets(a, rev)
-        sp = Accel.set_prefix(e, t, sets, rev_ts)
+        sp0 = Accel.set_prefix(e, t, sets, rev_ts)
+        sp =
+            match sp0.init {
+                NoInit => { e: sp0.e, init: Accel.potential_start(t, Accel.potential_sets(sp0.e.a, rev), sp0.e.s_rev_ts) }
+                _ => sp0
+            }
         ll = Accel.infer_len(sp.e, t, noprefix)
         len = ll.len
         # the pattern is exactly a literal (RE#'s `inferOverrideRegex`, which looks
@@ -263,12 +268,18 @@ Accel := [].{
 
     # --- the prefix accelerator (RE#'s StringPrefix / SearchValuesPrefix) --------------
 
-    ## Search the rarest single-ASCII-codepoint set, verify the others, land in the
-    ## state `_*·rev` reaches after the whole prefix (`applyPrefixSetsChecked`).
+    ## Search the rarest set (a single ASCII byte, or a `Bset` table), verify the
+    ## others, land in the state `_*·rev` reaches after the whole prefix
+    ## (`applyPrefixSetsChecked`). Needs two or more sets: a single set is what
+    ## the initial state's own skip set already does.
     set_prefix : Dfa.E, Trie.T, List(U64), U32 -> { e : Dfa.E, init : Dfa.Init }
     set_prefix = |e, t, sets, rev_ts|
         match Accel.pick_anchor(t, sets) {
             Err(_) => { e, init: NoInit }
+            Ok(_) if List.len(sets) < 2 => { e, init: NoInit }
+            # a set anchor on the first symbol is the initial state's own skip set
+            # with verification and a landing added: measured slower (`[0-9]{2,4}`)
+            Ok(anchor) if anchor.i == 0 and anchor.single == False => { e, init: NoInit }
             Ok(anchor) => {
                 # derive `_*·rev` through the prefix; every minterm of a set must agree
                 applied = List.fold_until(sets, { a: e.a, id: rev_ts, ok: True }, |acc, s| {
@@ -288,26 +299,83 @@ Accel := [].{
                     { e: { ..e, a: applied.a }, init: NoInit }
                 } else {
                     st = Dfa.get_state({ ..e, a: applied.a }, applied.id, False)
-                    { e: st.e, init: Prefix({ sets, anchor: anchor.i, anchor_byte: anchor.b, state: st.id }) }
+                    { e: st.e, init: Prefix({ sets, anchor: anchor.i, single: anchor.single, anchor_byte: anchor.b, anchor_tab: anchor.tab, state: st.id, land: True }) }
                 }
             }
         }
 
-    # the rarest set that is a single ASCII codepoint (RE#'s weighting; ours is
-    # `Rlit.rank`); none -> no accelerator (every set "too common")
-    pick_anchor : Trie.T, List(U64) -> Try({ i : U64, b : U8 }, [NoAnchor])
-    pick_anchor = |t, sets|
-        List.fold_with_index(sets, Err(NoAnchor), |best, s, i|
-            match Accel.single_cp(t, s) {
-                Ok(cp) if cp < 0x80 => {
-                    b = cp.to_u8_wrap()
-                    match best {
-                        Ok(bb) => if Rlit.rank(b) < Rlit.rank(bb.b) { Ok({ i, b }) } else { best }
-                        Err(_) => Ok({ i, b })
-                    }
-                }
-                _ => best
+    ## RE#'s `calcPotentialMatchStart`: when no exact prefix applies, the union
+    ## of first sets over ALL live derivatives at each depth (until one can be
+    ## nullable, 200 nodes or 20 sets). An occurrence marks where a match MAY
+    ## start; the sweep resumes at its end in the initial state.
+    potential_sets : Arena.A, U32 -> List(U64)
+    potential_sets = |a, start| {
+        p = Accel.prefix_node(a, start)
+        Accel.potential_loop(p.a, [p.id], [Arena.bot, start], [])
+    }
+
+    potential_loop : Arena.A, List(U32), List(U32), List(U64) -> List(U64)
+    potential_loop = |a, nodes, redundant, acc|
+        if List.is_empty(nodes) or List.len(nodes) > 200 or List.len(acc) >= 20 or List.any(nodes, |n| Arena.can_be_null(a, n)) {
+            acc
+        } else {
+            r = List.fold(nodes, { a, ss: 0, next: [] }, |st, n| {
+                d = Accel.derivs_merged(st.a, n, redundant)
+                List.fold(d.pairs, { ..st, a: d.a }, |st2, (mt, der)| {
+                    { ..st2, ss: TSet.union(st2.ss, mt), next: if List.contains(st2.next, der) { st2.next } else { List.append(st2.next, der) } }
+                })
             })
+            Accel.potential_loop(r.a, r.next, redundant, List.append(acc, r.ss))
+        }
+
+    ## the potential-start accelerator, when the sets have a rare one and are
+    ## not just a head (RE#'s `useOnlyHead`: the initial skip set covers that)
+    potential_start : Trie.T, List(U64), U32 -> Dfa.Init
+    potential_start = |t, sets, rev_ts_state|
+        if List.len(sets) < 2 {
+            NoInit
+        } else {
+            match Accel.pick_anchor(t, sets) {
+                Err(_) => NoInit
+                Ok(anchor) =>
+                    # RE#'s `useOnlyHead`, sharpened: the initial state's skip set already
+                    # jumps to the first set with no verification, so an occurrence check
+                    # only pays when a later set is clearly rarer than the first
+                    if anchor.i == 0 or anchor.w * 2 > Bset.weight(Accel.ascii_bytes(t, List.get(sets, 0) ?? 0)) {
+                        NoInit
+                    } else {
+                        Potential({ sets, anchor: anchor.i, single: anchor.single, anchor_byte: anchor.b, anchor_tab: anchor.tab, state: rev_ts_state, land: False })
+                    }
+            }
+        }
+
+    # the ASCII bytes of a minterm set
+    ascii_bytes : Trie.T, U64 -> List(U8)
+    ascii_bytes = |t, s| List.keep_if(Arena.upto(128), |b| TSet.contains(s, List.get(t.ascii, b) ?? 0)) |> List.map(|b| b.to_u8_wrap())
+
+    Anchor : { i : U64, single : Bool, b : U8, tab : List(U8), w : U64 }
+
+    # the rarest set by RE#'s commonality weight, skipping sets too common to
+    # search for; a single ASCII codepoint uses the byte kernel
+    pick_anchor : Trie.T, List(U64) -> Try(Accel.Anchor, [NoAnchor])
+    pick_anchor = |t, sets|
+        List.fold_with_index(sets, Err(NoAnchor), |best, s, i| {
+            bytes = Accel.ascii_bytes(t, s)
+            if Bset.too_common(bytes) or TSet.contains(s, t.invalid) {
+                best
+            } else {
+                w = Bset.weight(bytes)
+                cand =
+                    match Accel.single_cp(t, s) {
+                        Ok(cp) if cp < 0x80 => { i, single: True, b: cp.to_u8_wrap(), tab: [], w }
+                        _ => { i, single: False, b: 0, tab: Bset.table(bytes), w }
+                    }
+                match best {
+                    Ok(bb) => if w < bb.w { Ok(cand) } else { best }
+                    Err(_) => Ok(cand)
+                }
+            }
+        })
 
     # a minterm set that is exactly one codepoint
     single_cp : Trie.T, U64 -> Try(U32, [NotSingle])

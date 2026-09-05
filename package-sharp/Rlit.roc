@@ -3,6 +3,7 @@
 ## `LastIndexOf`. `rfind_byte` walks 16-byte windows backwards with one
 ## `eq_lanes`/`to_bitmask` per window and takes the highest set lane;
 ## `rfind_lit` looks for the literal's last byte and verifies the rest.
+import Bset
 import Lit
 import Trie
 import TSet
@@ -11,67 +12,116 @@ import Utf8
 Rlit := [].{
     ## A required prefix as minterm sets in REVERSE-reading order (the reverse
     ## sweep consumes `sets[0]` first, i.e. the rightmost symbol), with the index
-    ## of the set searched for (`anchor`, a single ASCII codepoint `anchor_byte`)
-    ## and the state the sweep lands in after consuming all of them.
-    Prefix : { sets : List(U64), anchor : U64, anchor_byte : U8, state : U32 }
+    ## of the set searched for (`anchor`: the rarest; `anchor_byte` when it is a
+    ## single ASCII codepoint, else `anchor_tab`, its `Bset` table) and the state
+    ## the sweep lands in after consuming all of them. `land` is False for RE#'s
+    ## potential-start sets: the occurrence only says a match may start here, so
+    ## the sweep resumes at its end in the initial state and re-reads it.
+    Prefix : { sets : List(U64), anchor : U64, single : Bool, anchor_byte : U8, anchor_tab : List(U8), state : U32, land : Bool }
 
-    ## The start of the last occurrence of the prefix ending at or before `end`:
-    ## `rfind_byte` for the anchor, then the other sets verified symbol by symbol
-    ## to its left and right (RE#'s `trySkipToWeightedSetCharRev`).
-    rfind_sets : List(U8), Trie.T, Rlit.Prefix, U64 -> Try(U64, [NotFound])
-    rfind_sets = |hay, t, pf, end| {
-        m = List.len(pf.sets)
+    Occ : { start : U64, end : U64 }
+
+    ## The last occurrence of the prefix ending at or before `end`: the anchor
+    ## set is searched (`rfind_byte`, or `Bset.rfind` for a set), then the other
+    ## sets verified symbol by symbol to its left and right (RE#'s
+    ## `trySkipToWeightedSetCharRev`). One function with `while` loops: a call
+    ## per candidate that passed the trie and prefix records cost more than the
+    ## search on dense anchors (digits: 1.25 ms against 0.25 for plain skipping).
+    ## Only a non-ASCII symbol calls out (`Rlit.class_at`, with the trie).
+    rfind_sets : List(U8), Trie.T, Rlit.Prefix, U64 -> Try(Rlit.Occ, [NotFound])
+    rfind_sets = |hay, t, pf, end0| {
+        sets = pf.sets
+        ascii = t.ascii
+        anchor_set = List.get(sets, pf.anchor) ?? 0
+        single = pf.single
+        ab = pf.anchor_byte
+        tab = pf.anchor_tab
+        m = List.len(sets)
         # forward index of the anchor symbol; symbols after it need >= 1 byte each
         ja = m - 1 - pf.anchor
         after = m - 1 - ja
-        if end < m {
-            Err(NotFound)
-        } else {
-            match Rlit.rfind_byte(hay, pf.anchor_byte, end - after) {
-                Err(_) => Err(NotFound)
-                Ok(p) =>
-                    match Rlit.verify_sets(hay, t, pf.sets, m, ja, p, end) {
-                        Ok(start) => Ok(start)
-                        Err(_) => Rlit.rfind_sets(hay, t, pf, p + after)
+        n = List.len(hay)
+        var end = end0
+        var result = Err(NotFound)
+        var searching = end >= m
+        while searching {
+            hit = if single { Rlit.rfind_byte(hay, ab, end - after) } else { Bset.rfind(hay, tab, 0, end - after) }
+            match hit {
+                Err(_) => {
+                    searching = False
+                }
+                Ok(p0) => {
+                    # a set hit on a non-ASCII byte names some byte of the symbol: find
+                    # its start and check the symbol really is in the anchor set
+                    b0 = List.get(hay, p0) ?? 0
+                    p = if b0 < 0x80 { p0 } else { Utf8.sym_start(hay, p0) }
+                    anchor_ok = b0 < 0x80 or TSet.contains(anchor_set, Rlit.class_at(t, hay, p))
+                    # symbols at forward indices ja+1 .. m-1, starting after the anchor
+                    var pos = if b0 < 0x80 { p + 1 } else { p + (Utf8.decode(hay, p)).len }
+                    var j = ja + 1
+                    var ok = anchor_ok
+                    while ok and j < m {
+                        if pos >= n {
+                            ok = False
+                        } else {
+                            b = List.get(hay, pos) ?? 0
+                            cls = if b < 0x80 { List.get(ascii, b.to_u64()) ?? 0 } else { Rlit.class_at(t, hay, pos) }
+                            if TSet.contains(List.get(sets, m - 1 - j) ?? 0, cls) {
+                                pos = if b < 0x80 { pos + 1 } else { pos + (Utf8.decode(hay, pos)).len }
+                                j = j + 1
+                            } else {
+                                ok = False
+                            }
+                        }
                     }
+                    occ_end = pos
+                    # symbols at forward indices ja-1 .. 0, ending at the anchor
+                    var start = p
+                    var k = ja
+                    var ok2 = ok and occ_end <= end
+                    while ok2 and k > 0 {
+                        if start == 0 {
+                            ok2 = False
+                        } else {
+                            bl = List.get(hay, start - 1) ?? 0
+                            if bl < 0x80 {
+                                if TSet.contains(List.get(sets, m - k) ?? 0, List.get(ascii, bl.to_u64()) ?? 0) {
+                                    start = start - 1
+                                    k = k - 1
+                                } else {
+                                    ok2 = False
+                                }
+                            } else {
+                                d = Utf8.decode_rev(hay, start)
+                                cls = if d.ok { Trie.class_of(t, d.cp) } else { t.invalid }
+                                if TSet.contains(List.get(sets, m - k) ?? 0, cls) {
+                                    start = d.cs
+                                    k = k - 1
+                                } else {
+                                    ok2 = False
+                                }
+                            }
+                        }
+                    }
+                    if ok2 {
+                        result = Ok({ start, end: occ_end })
+                        searching = False
+                    } else {
+                        end = p + after
+                        searching = end >= m
+                    }
+                }
             }
         }
+        result
     }
 
-    # sets[m-1-j] must accept the symbol at forward index j of the occurrence.
-    # Plain recursion: this runs once per anchor-byte candidate.
-    verify_sets : List(U8), Trie.T, List(U64), U64, U64, U64, U64 -> Try(U64, [NoMatch])
-    verify_sets = |hay, t, sets, m, ja, p, end|
-        match Rlit.verify_right(hay, t, sets, m, ja + 1, p + 1) {
-            Err(e) => Err(e)
-            Ok(occ_end) => if occ_end > end { Err(NoMatch) } else { Rlit.verify_left(hay, t, sets, m, ja, p) }
-        }
-
-    # symbols at forward indices j, j+1, ... m-1 starting at byte `pos`; the end
-    verify_right : List(U8), Trie.T, List(U64), U64, U64, U64 -> Try(U64, [NoMatch])
-    verify_right = |hay, t, sets, m, j, pos|
-        if j >= m {
-            Ok(pos)
-        } else if pos >= List.len(hay) {
-            Err(NoMatch)
-        } else {
-            d = Utf8.decode(hay, pos)
-            cls = if d.ok { Trie.class_of(t, d.cp) } else { t.invalid }
-            if TSet.contains(List.get(sets, m - 1 - j) ?? 0, cls) { Rlit.verify_right(hay, t, sets, m, j + 1, pos + d.len) } else { Err(NoMatch) }
-        }
-
-    # symbols at forward indices j-1, ..., 0 ending at byte `pos`; the start
-    verify_left : List(U8), Trie.T, List(U64), U64, U64, U64 -> Try(U64, [NoMatch])
-    verify_left = |hay, t, sets, m, j, pos|
-        if j == 0 {
-            Ok(pos)
-        } else if pos == 0 {
-            Err(NoMatch)
-        } else {
-            d = Utf8.decode_rev(hay, pos)
-            cls = if d.ok { Trie.class_of(t, d.cp) } else { t.invalid }
-            if TSet.contains(List.get(sets, m - j) ?? 0, cls) { Rlit.verify_left(hay, t, sets, m, j - 1, d.cs) } else { Err(NoMatch) }
-        }
+    # the class of the (non-ASCII) symbol starting at `pos`
+    class_at : Trie.T, List(U8), U64 -> U32
+    class_at = |t, hay, pos| {
+        d = Utf8.decode(hay, pos)
+        if d.ok { Trie.class_of(t, d.cp) } else { t.invalid }
+    }
 
     ## the position of the last `b` strictly before `end`
     rfind_byte : List(U8), U8, U64 -> Try(U64, [NotFound])

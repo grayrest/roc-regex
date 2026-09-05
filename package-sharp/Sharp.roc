@@ -178,7 +178,13 @@ Sharp := [].{
     ## the accelerators chosen for this pattern, for tests
     accel_str : Sharp.T -> Str
     accel_str = |re| {
-        init = match re.accel.init { Prefix(p) => "prefix=${List.len(p.sets).to_str()}sets@${p.anchor.to_str()}(${Str.from_utf8_lossy([p.anchor_byte])})", NoInit => "prefix=none" }
+        anchor_of = |p| if p.single { Str.from_utf8_lossy([p.anchor_byte]) } else { "set" }
+        init =
+            match re.accel.init {
+                Prefix(p) => "prefix=${List.len(p.sets).to_str()}sets@${p.anchor.to_str()}(${anchor_of(p)})"
+                Potential(p) => "potential=${List.len(p.sets).to_str()}sets@${p.anchor.to_str()}(${anchor_of(p)})"
+                NoInit => "prefix=none"
+            }
         len =
             match re.accel.len {
                 FixedLength(n) => "len=${n.to_str()}"
