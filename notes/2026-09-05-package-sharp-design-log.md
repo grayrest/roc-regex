@@ -198,6 +198,11 @@ generator carries the spec-correct spans in `KNOWN_RESHARP_DIVERGENCES`.
   `[\s\S]*` prints as `[\s\S]*`, not `_*`. RE#'s "identity true star" test is
   therefore expected to differ.
 - `\B` is unsupported, as in RE# (a union of lookarounds).
+- `mkConcat2`'s fall-through registration right-nests a concat head
+  (`(ab)c -> a(bc)`) before interning. RE# only normalizes in its LAST
+  match arm, so a rewrite path that ends in `createCached` — the
+  concat-tail case, reached whenever the tail is itself a concat — interns
+  `Concat(Concat(a,b), c)` as a node distinct from `a(bc)`. See M4.
 
 ### Normalizations that .NET's parser did for RE#
 
@@ -348,3 +353,78 @@ the threaded scan and `Ref.prepare` from a complete-fold binary). Remaining
 gap to the existing engine on dense patterns: RE#'s design sweeps the WHOLE
 haystack in reverse before any forward pass (two passes over every byte),
 and there are no accelerators yet — S13's work.
+
+## M4 accelerators (2026-09-05): S13, first stage
+
+Built (RE#'s `Optimizations.fs`, derivative-driven so they see through
+`&`/`~` and the rewrites):
+
+- `Accel.prefix_sets`: `getPrefixNode` + `calcPrefixSets` — the minterm sets
+  every match must start with, as derivatives of the reverse pattern while
+  exactly one non-dead derivative exists.
+- `Accel.set_prefix` (RE#'s `InitialAccelerator.StringPrefix` /
+  `SearchValuesPrefix`, `applyPrefixSetsChecked`): the reverse sweep, when in
+  its initial state, searches backwards for the rarest single-ASCII set of
+  the prefix (`Rlit.rank`, memmem's rarest-byte trick), verifies the other
+  sets symbol by symbol, and lands in the state `_*·rev(R)` reaches after the
+  whole prefix. Landing states are created at compile time so the fold
+  stays complete.
+- `Rlit.rfind_byte`: the reverse SIMD kernel — 16-byte windows backwards,
+  one `eq_lanes`/`to_bitmask` per window, highest lane via
+  `count_leading_zero_bits`.
+- `LengthLookup.FixedLength`: every match has one symbol length, so the
+  forward end pass is `Utf8.advance`.
+- `MatchOverride.FixedLengthString`: the raw pattern IS a literal
+  (`inferOverrideRegex`'s conditions: no anchors, no lookarounds, forward and
+  reverse), so `find_all` is a Teddy-candidate + `Lit.matches` search. The
+  check is on the RAW pattern: `^abc` and `(?<!,)x` both strip to a literal
+  in `noprefix` and must not be overridden.
+
+### The duplicate initial state
+
+The set-prefix skip first measured at zero gain on `(\w+)@(\w+)` and a loss
+on `\bthe\b`, while a standalone `rfind_sets` sweep found all 1157 anchors
+in 390 µs. Instrumenting the sweep: `skips=1 steps=261821 back_to_start=0`.
+The reverse sweep never returned to its initial state, so the skip fired once
+per haystack. Dumping states: the initial node was
+`_*·(\w+·(@·\w+))`, but after `(_*\w+|\w*)@\w+` (mergeOrSuffix's shape)
+lost its `\w*` branch the derivative interned `(_*·\w+)·(@·\w+)` — the same
+language, a distinct node, a distinct state without the initial flag. Cause:
+the concat-tail rewrite case ends in a plain registration without the
+`(ab)c -> a(bc)` normalization, which RE# (and our port) only apply in the
+final fall-through arm. Fix: `Build.concat_register` right-nests a concat
+head before interning (a deviation from RE#'s code, listed under M1's
+deviations; RE# likely carries the same latent duplicate — owed upstream
+with a repro once reduced). With canonical concats the email pattern folds to
+10 states instead of 11 and the sweep returns to its initial state after
+every non-word symbol.
+
+### Measurements (`tools/sharp-size/probe.sh`, 256 KB, `--opt=size`, ns per `find_all`)
+
+| pattern | M4 step 0 | with accelerators | accelerator |
+|---|---|---|---|
+| `Holmes` | 3.5 M | 0.032 M | override (Teddy + memcmp) |
+| `Sherlock\|Holmes\|…` | 1.8 M | 1.5 M | none yet (alternation: no single prefix) |
+| `[A-Za-z]+` | 14.2 M | 8.5 M | none (byte-loop gains from unrelated cleanup) |
+| `[0-9]{2,4}` | 4.8 M | 2.6 M | none |
+| `\bthe\b` | 1.4 M | 0.56 M | prefix, 4 sets, anchor `h` |
+| `\w+\s+\w+` | 12.2 M | 6.6 M | none |
+| `(\w+)@(\w+)` | 4.0 M | 0.32 M | prefix, 3 sets, anchor `@` |
+| `\p{L}+` | 15.4 M | 8.4 M | none |
+| `.*Holmes` | 4.7 M | 1.2 M | prefix, 6 sets, anchor `H` |
+| `_*cat_*&_*dog_*` | 18.4 M | 11.6 M | none (prefix inference stops at the `&`) |
+| `~(_*\d\d_*)` | 18.8 M | 11.9 M | none |
+| `a(?=.*b)` (incomplete) | 34.4 M | 26.8 M | none |
+
+A/B at `--opt=speed` (`find_all` / starts-only, accel vs plain):
+word_bound 0.49 / 0.41 ms vs 1.31 / 1.20; caps_email 0.31 / 0.17 vs
+1.38 / 1.25; dotstar_lit 1.12 / 0.59 vs 2.12 / 1.60; literal 0.030 vs 1.2;
+teddy_alt and two_words unchanged (no accelerator applies).
+
+Not yet done from S13, in the order the table suggests: potential-start sets
+for literal alternations (teddy_alt: RE#'s `CanSkip` startset over the union
+of first sets, our Teddy as the kernel), `CanSkip` startsets for non-initial
+states, the remaining `LengthLookup` variants (SetLookup / RemainingSets /
+FixedLengthPrefixMatchEnd), and a forward-direction accelerator for the end
+pass (the dense-class patterns spend their time in two full sweeps, which no
+skip helps).

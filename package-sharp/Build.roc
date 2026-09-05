@@ -990,8 +990,25 @@ Build := [].{
             }
         }
 
+    # Register head·tail once every rewrite has declined. A concat head is
+    # right-nested first (`(ab)c -> a(bc)`): RE# only normalizes in its last
+    # fall-through, so a rewrite path that ends in `createCached` (e.g. the
+    # concat-tail case) registers a structurally distinct copy of a node the
+    # derivative also reaches in normal form — `_*\w+@\w+` came back as
+    # `(_*\w+)(@\w+)` after `(_*\w+|\w*)@\w+` lost its `\w*` branch, so the
+    # reverse sweep never returned to its initial state and the prefix skip
+    # fired once per haystack. Canonical concats make those the same state.
     concat_register : Arena.A, U32, U32 -> Arena.R
-    concat_register = |a, h, t| {
+    concat_register = |a, h, t|
+        if Arena.is_concat(a, h) {
+            inner = Build.mk_concat2(a, Arena.tail(a, h), t)
+            Build.mk_concat2(inner.a, Arena.head(a, h), inner.id)
+        } else {
+            Build.concat_register_raw(a, h, t)
+        }
+
+    concat_register_raw : Arena.A, U32, U32 -> Arena.R
+    concat_register_raw = |a, h, t| {
         key = Arena.key_concat(h, t)
         match Arena.lookup(a, key) {
             Ok(id) => { a, id }

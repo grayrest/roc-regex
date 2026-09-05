@@ -9,6 +9,7 @@
 ##
 ## Searches run on the derivative automaton (`Dfa`); the brute-force reference
 ## (`Ref`) stays reachable as `find_all_ref` for the differential.
+import Accel
 import Arena
 import Ast
 import Build
@@ -26,7 +27,7 @@ Sharp := [].{
     ## The compiled pattern. `root` is the raw pattern node, `rev` its reversal,
     ## `rev_ts` `_*·rev` (the reverse search start), `noprefix` the pattern with
     ## its lookbehind prefix stripped (the forward end pass). Documented-unstable.
-    T : { a : Arena.A, trie : Trie.T, root : U32, rev : U32, rev_ts : U32, ts : U32, noprefix : U32, e : Dfa.E }
+    T : { a : Arena.A, trie : Trie.T, root : U32, rev : U32, rev_ts : U32, ts : U32, noprefix : U32, e : Dfa.E, accel : Accel.T }
 
     ## D13 budget 4: states the fold may explore — the artifact budget (256 KB
     ## provisional) over the table stride, capped at `fold_state_cap`. The cap is
@@ -86,8 +87,10 @@ Sharp := [].{
                         match np.a.err {
                             Unsup(msg) => Err(Err.whole(src, Unsupported(msg)))
                             NoErr => {
-                                e = Dfa.freeze(Dfa.explore(Dfa.init(np.a, rts.id, np.id, Sharp.max_states(trie.n_classes))), trie.ascii)
-                                Ok({ a: e.a, trie, root: root.id, rev: rv.id, rev_ts: rts.id, ts: ts.id, noprefix: np.id, e })
+                                e0 = Dfa.init(np.a, rts.id, np.id, Sharp.max_states(trie.n_classes))
+                                ac = Accel.analyze(e0, trie, root.id, rv.id, rts.id, np.id)
+                                e = Dfa.freeze(Dfa.explore(ac.e), trie.ascii)
+                                Ok({ a: e.a, trie, root: root.id, rev: rv.id, rev_ts: rts.id, ts: ts.id, noprefix: np.id, e, accel: ac.accel })
                             }
                         }
                     }
@@ -117,12 +120,17 @@ Sharp := [].{
     find_all = |re, hay|
         if re.e.complete {
             # a complete fold is a read-only table: the byte-loop scans
-            Dfa.find_all_fast(re.e, re.trie, hay)
+            Dfa.find_all_fast(re.e, re.trie, re.accel, hay)
         } else {
             h = Ref.prepare(re.trie, hay)
             r = Dfa.find_all(re.e, h)
             List.map(r.spans, |sp| { start: List.get(h.pos, sp.start) ?? 0, end: List.get(h.pos, sp.end) ?? 0 })
         }
+
+    ## `find_all` on the fast scan with every accelerator off (A/B measurement)
+    find_all_plain : Sharp.T, List(U8) -> List(Sharp.Span)
+    find_all_plain = |re, hay|
+        if re.e.complete { Dfa.find_all_fast(re.e, re.trie, Accel.none, hay) } else { Sharp.find_all_threaded(re, hay) }
 
     ## `find_all` on the threaded (extensible) scan regardless of completeness —
     ## the corpus cross-checks it against the fast path
@@ -161,6 +169,20 @@ Sharp := [].{
         r = Dfa.starts(re.e, h)
         List.map(r.acc, |p| List.get(h.pos, p) ?? 0)
     }
+
+    ## the accelerators chosen for this pattern, for tests
+    accel_str : Sharp.T -> Str
+    accel_str = |re| {
+        init = match re.accel.init { Prefix(p) => "prefix=${List.len(p.sets).to_str()}sets@${p.anchor.to_str()}(${Str.from_utf8_lossy([p.anchor_byte])})", NoInit => "prefix=none" }
+        len = match re.accel.len { FixedLength(n) => "len=${n.to_str()}", MatchEnd => "len=any" }
+        ov = match re.accel.override { Literal(l) => "override=${Str.from_utf8_lossy(l)}", NoOverride => "override=none" }
+        "${init} ${len} ${ov}"
+    }
+
+    ## the fast reverse sweep alone (profiling): match starts, accelerated or not
+    match_starts_fast : Sharp.T, List(U8), Bool -> List(U64)
+    match_starts_fast = |re, hay, accel|
+        Dfa.starts_fast(re.e, re.trie, if accel { re.accel.init } else { NoInit }, hay)
 
     ## Did the fold explore every reachable state?
     is_complete : Sharp.T -> Bool

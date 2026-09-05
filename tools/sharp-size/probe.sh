@@ -51,14 +51,21 @@ rx : Sharp.T
 rx = Sharp.unwrap(Sharp.compile("$1"))
 
 iters : U64
-iters = 5
+iters = 20
 
 checksum : List(Sharp.Span) -> U64
 checksum = |spans| List.fold(spans, 0, |acc, sp| acc + sp.start + sp.end)
 
-time_loop : List(U8), U64, U64 -> U64
-time_loop = |hay, n, acc|
-	if n == 0 { acc } else { time_loop(hay, n - 1, acc + checksum(Sharp.find_all(rx, hay))) }
+# min over iterations of one find_all, in ns (noise only inflates a run)
+time_min! : List(U8), U64, U128, U64 => (U128, U64)
+time_min! = |hay, n, best, cs|
+	if n == 0 { (best, cs) } else {
+		t0 = Utc.now!()
+		c = checksum(Sharp.find_all(rx, hay))
+		t1 = Utc.now!()
+		d = if t1 > t0 { t1 - t0 } else { 0 }
+		time_min!(hay, n - 1, if d < best { d } else { best }, cs + c)
+	}
 
 last_arg : List(OsStr.OsStr) -> Try(OsStr.OsStr, [Empty])
 last_arg = |args| {
@@ -70,10 +77,7 @@ last_arg = |args| {
 
 main! = |args| {
 	hay = match last_arg(args) { Ok(a) => Path.read_bytes!(Path.from_os_str(a))? Err(_) => [] }
-	t0 = Utc.now!()
-	cs = time_loop(hay, iters, 0)
-	t1 = Utc.now!()
-	per = (if t1 > t0 { t1 - t0 } else { 0 }) / iters.to_u128()
+	(per, cs) = time_min!(hay, iters, 0xFFFF_FFFF_FFFF_FFFF, 0)
 	n = List.len(Sharp.find_all(rx, hay))
 	Stdout.line!("states=\${Sharp.n_states(rx).to_str()} complete=\${if Sharp.is_complete(rx) { "yes" } else { "no" }} nodes=\${Sharp.n_nodes(rx).to_str()} matches=\${n.to_str()} ns_per_find_all=\${per.to_str()} cs=\${cs.to_str()}")
 }

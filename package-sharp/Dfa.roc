@@ -13,7 +13,10 @@
 import Arena
 import Build
 import Deriv
+import Lit
 import Ref
+import Rlit
+import Teddy
 import Trie
 import TSet
 import Utf8
@@ -500,18 +503,47 @@ Dfa := [].{
     # symbols through the trie), and report byte offsets. Pending-nullable
     # offsets are symbol counts, so they move by `Utf8.advance`/`retreat`.
 
+    ## The accelerators the fast scans consult (S13; built by `Accel`)
+    Init : [NoInit, Prefix(Rlit.Prefix)]
+    Len : [MatchEnd, FixedLength(U32)]
+    Override : [NoOverride, Literal(List(U8))]
+    Accels : { init : Dfa.Init, len : Dfa.Len, override : Dfa.Override }
+
     ## RE#'s llmatch on a complete fold, as byte spans
-    find_all_fast : Dfa.E, Trie.T, List(U8) -> List({ start : U64, end : U64 })
-    find_all_fast = |e, t, hay| {
-        sts = Dfa.starts_fast(e, t, hay) |> List.sort_with(|x, y| U64.order_relative_to(x, y)) |> Dfa.dedup
-        fin = List.fold(sts, { spans: [], next_valid: 0 }, |acc, s|
-            if s < acc.next_valid {
+    find_all_fast : Dfa.E, Trie.T, Dfa.Accels, List(U8) -> List({ start : U64, end : U64 })
+    find_all_fast = |e, t, ac, hay|
+        match ac.override {
+            Literal(lit) => Dfa.find_all_literal(hay, lit)
+            NoOverride => {
+                sts = Dfa.starts_fast(e, t, ac.init, hay) |> List.sort_with(|x, y| U64.order_relative_to(x, y)) |> Dfa.dedup
+                fin = List.fold(sts, { spans: [], next_valid: 0 }, |acc, s|
+                    if s < acc.next_valid {
+                        acc
+                    } else {
+                        end =
+                            match ac.len {
+                                FixedLength(n) => Ok(Utf8.advance(hay, s, n.to_u64()))
+                                MatchEnd => Dfa.end_fast(e, t, hay, s)
+                            }
+                        match end {
+                            Ok(en) => { spans: List.append(acc.spans, { start: s, end: en }), next_valid: en }
+                            Err(_) => acc
+                        }
+                    })
+                fin.spans
+            }
+        }
+
+    # the pattern is exactly `lit`: a forward literal search (RE#'s FixedLengthString)
+    find_all_literal : List(U8), List(U8) -> List({ start : U64, end : U64 })
+    find_all_literal = |hay, lit| {
+        plen = List.len(lit)
+        cands = Teddy.byte_candidates_capped(List.get(lit, 0) ?? 0, hay, List.len(hay) + 1) ?? []
+        fin = List.fold(cands, { spans: [], last_end: 0 }, |acc, at|
+            if at < acc.last_end or !(Lit.matches(hay, at, lit, plen)) {
                 acc
             } else {
-                match Dfa.end_fast(e, t, hay, s) {
-                    Ok(en) => { spans: List.append(acc.spans, { start: s, end: en }), next_valid: en }
-                    Err(_) => acc
-                }
+                { spans: List.append(acc.spans, { start: at, end: at + plen }), last_end: at + plen }
             })
         fin.spans
     }
@@ -530,8 +562,8 @@ Dfa := [].{
     }
 
     ## the reverse sweep on a complete fold: match-start byte offsets
-    starts_fast : Dfa.E, Trie.T, List(U8) -> List(U64)
-    starts_fast = |e, t, hay| {
+    starts_fast : Dfa.E, Trie.T, Dfa.Init, List(U8) -> List(U64)
+    starts_fast = |e, t, ini, hay| {
         n = List.len(hay)
         if n == 0 {
             if Deriv.nullable(e.a, Deriv.loc_both, Dfa.st_node_of(e, e.s_rev_ts)) { [0] } else { [] }
@@ -572,20 +604,40 @@ Dfa := [].{
                         { s: s1, pos, acc: acc1 }
                     }
                 }
-            col = Dfa.collect_fast(e, t, hay, st.pos, st.s, st.acc)
+            col = Dfa.collect_fast(e, t, ini, hay, st.pos, st.s, st.acc)
             Dfa.start_fast(e, col.s, col.acc, hay)
         }
     }
 
-    collect_fast : Dfa.E, Trie.T, List(U8), U64, U32, List(U64) -> { s : U32, acc : List(U64) }
-    collect_fast = |e, t, hay, pos0, s0, acc0| {
+    # `collect_skip`: in the start state, a required prefix lets the sweep jump
+    # to the prefix's last occurrence and land in the state it leads to (RE#'s
+    # `TrySkipInitialRevChar`); no match can start in the skipped stretch. The
+    # skip parameters are hoisted out of the loop: matching on the accelerator
+    # value per iteration doubled the scan time of patterns without one.
+    collect_fast : Dfa.E, Trie.T, Dfa.Init, List(U8), U64, U32, List(U64) -> { s : U32, acc : List(U64) }
+    collect_fast = |e, t, ini, hay, pos0, s0, acc0| {
+        has_skip = match ini { Prefix(_) => True, NoInit => False }
+        pf = match ini { Prefix(p) => p, NoInit => { sets: [], anchor: 0, anchor_byte: 0, state: 0 } }
+        start_state = e.s_rev_ts
         var pos = pos0
         var s = s0
         var acc = acc0
         while pos > 0 {
-            r = Dfa.step_rev_fast(e, t, hay, s, pos)
-            s = r.s
-            pos = r.cs
+            if has_skip and s == start_state {
+                match Rlit.rfind_sets(hay, t, pf, pos) {
+                    Ok(start) => {
+                        pos = start
+                        s = pf.state
+                    }
+                    Err(_) => {
+                        pos = 0
+                    }
+                }
+            } else {
+                r = Dfa.step_rev_fast(e, t, hay, s, pos)
+                s = r.s
+                pos = r.cs
+            }
             if Dfa.is_null(e, s) {
                 acc = Dfa.set_null_fast(e, s, acc, hay, pos)
             }
