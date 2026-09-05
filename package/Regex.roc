@@ -19,7 +19,7 @@ Regex := [].{
     ## The `engine` field records M3's outcome (D10): `Three` carries the D5
     ## forward+reverse DFAs for a look-free pattern within budget, else `Pike`.
     ## Documented-unstable.
-    T : { prog : List(U32), splits : List(U32), classes : Trie.T, n_groups : U32, prefix : List(U8), rprog : List(U32), rsplits : List(U32), uprog : List(U32), usplits : List(U32), fbytes : List(U8), tlits : List(List(U8)), word_set : U64, engine : [Pike, Three({ fwd : Rev.D, rev : Rev.D, averify : [NoVerify, Verify(Rev.D)] })] }
+    T : { prog : List(U32), splits : List(U32), classes : Trie.T, n_groups : U32, prefix : List(U8), rprog : List(U32), rsplits : List(U32), uprog : List(U32), usplits : List(U32), fbytes : List(U8), tlits : List(List(U8)), word_set : U64, engine : [Pike, Three({ fwd : Rev.D, rev : Rev.D, averify : [NoVerify, Verify(Rev.D)], inner : [NoInner, Inner({ lit : List(U8), lrev : Rev.D, full : Rev.D })] })] }
 
     ## A match, as half-open BYTE offsets into the haystack (D3, D15).
     Span : { start : U64, end : U64 }
@@ -171,7 +171,7 @@ Regex := [].{
     # `anchored_start`/`accept_eoi_only` matter only to the DFA build (they are
     # baked into the engine there); the PikeVM view keeps the anchors in `prog`,
     # so they default to False here.
-    base = |re| { prog: re.prog, splits: re.splits, classes: re.classes, n_groups: re.n_groups, prefix: re.prefix, rprog: re.rprog, rsplits: re.rsplits, uprog: re.uprog, usplits: re.usplits, fbytes: re.fbytes, tlits: re.tlits, word_set: re.word_set, anchored_start: False, accept_eoi_only: False }
+    base = |re| { prog: re.prog, splits: re.splits, classes: re.classes, n_groups: re.n_groups, prefix: re.prefix, rprog: re.rprog, rsplits: re.rsplits, uprog: re.uprog, usplits: re.usplits, fbytes: re.fbytes, tlits: re.tlits, word_set: re.word_set, anchored_start: False, accept_eoi_only: False, inner: NoInner }
 
 
     ## --- iteration and rewriting (D15, D14) ---------------------------------
@@ -236,6 +236,15 @@ Regex := [].{
     prefilter_k : U64
     prefilter_k = 512
 
+    # The reverse-inner path (interior literal) gets a far looser gate: a missed
+    # candidate costs only a short local reverse-DFA scan, not a full PikeVM
+    # `wmatch_at`, so the prefilter stays a win at much higher literal density.
+    # Measured crossover is past `e`-in-prose density (~1 per 10 bytes, ~5% loss);
+    # len/4 keeps every realistic interior literal on the fast path and only bails
+    # when the literal byte saturates the haystack.
+    inner_prefilter_k : U64
+    inner_prefilter_k = 4
+
     find_all : Regex.T, List(U8) -> List(Regex.Span)
     find_all = |re, hay|
         # With a required literal prefix, SIMD-scan for candidates and verify each
@@ -265,8 +274,67 @@ Regex := [].{
                 Err(_) => Regex.find_all_engine(re, hay)
             }
         } else {
-            Regex.find_all_engine(re, hay)
+            # No leading literal — but maybe a required INTERIOR literal (e.g.
+            # `\w+@\w+`): memchr it, then do a local reverse/forward search per
+            # hit. Dense literal trips the cap → DFA.
+            match re.engine {
+                Three(d) =>
+                    match d.inner {
+                        Inner(inr) =>
+                            match Teddy.byte_candidates_capped(List.get(inr.lit, 0) ?? 0, hay, List.len(hay) // Regex.inner_prefilter_k) {
+                                Ok(cands) => Regex.find_all_inner(inr, re.classes, hay, cands)
+                                Err(_) => Regex.find_all_engine(re, hay)
+                            }
+                        NoInner => Regex.find_all_engine(re, hay)
+                    }
+                Pike => Regex.find_all_engine(re, hay)
+            }
         }
+
+    # reverse-inner verify: for each interior-literal candidate `p`, run the
+    # reverse DFA of LEFT·lit backward from `p+litlen` (floored at the previous
+    # match end). It both confirms the literal is present at `p` and yields the
+    # leftmost start `s`; the anchored full-pattern DFA from `s` then gives the
+    # leftmost-first end (greedy-correct for a variable-length LEFT).
+    find_all_inner : { lit : List(U8), lrev : Rev.D, full : Rev.D }, Trie.T, List(U8), List(U64) -> List(Regex.Span)
+    find_all_inner = |inr, classes, hay, cands| {
+        ncand = List.len(cands)
+        len = List.len(hay)
+        litlen = List.len(inr.lit)
+        var i = 0
+        var last_end = 0
+        var acc = []
+        var running = True
+        while running {
+            if i >= ncand {
+                running = False
+            } else {
+                p = List.get(cands, i) ?? 0
+                pe = p + litlen
+                if p < last_end or pe > len {
+                    i = i + 1
+                } else {
+                    match Rev.run_rev_check(inr.lrev, classes, hay, pe, last_end) {
+                        Err(_) => {
+                            i = i + 1
+                        }
+                        Ok(s) =>
+                            match Rev.run_fwd_from(inr.full, classes, hay, s) {
+                                Err(_) => {
+                                    i = i + 1
+                                }
+                                Ok(e) => {
+                                    acc = List.append(acc, { start: s, end: e })
+                                    last_end = e
+                                    i = i + 1
+                                }
+                            }
+                    }
+                }
+            }
+        }
+        acc
+    }
 
     # verify literal-prefix candidates with the anchored DFA: run it from each
     # candidate — matches iff the pattern matches there, a tight table loop with

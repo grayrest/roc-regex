@@ -55,6 +55,14 @@ Comp := [
         # the S1 partition to be word-uniform. Only meaningful when a `\b`/`\B`
         # op is in the prog (see `Comp.has_wb`).
         word_set : U64,
+        # Reverse-inner literal prefilter (for patterns with no leading literal
+        # but a required INTERIOR literal, e.g. `\w+@\w+`): `lit` is that literal
+        # and `lrev_prog` is the reverse NFA of LEFT·lit (everything up to and
+        # including the literal). `find_all` `memchr`s `lit`, runs `lrev` backward
+        # from `p+litlen` to confirm the literal and find the leftmost start, then
+        # runs the anchored full-pattern DFA from there for the end. `NoInner`
+        # when the shape doesn't apply.
+        inner : [NoInner, Inner({ lit : List(U8), lrev_prog : List(U32), lrev_splits : List(U32) })],
         # Outermost text anchors, stripped from the DFA progs (`uprog`/`rprog`)
         # and re-imposed as scan constraints (approach B): `anchored_start` (`^`)
         # builds an anchored forward `uprog` (no dot-star) so a match can only
@@ -92,6 +100,79 @@ Comp := [
 
     inst : U32, U32 -> U32
     inst = |op, operand| op.shl_wrap(28).bitwise_or(operand)
+
+    # --- reverse-inner literal split (D6) -------------------------------------
+    #
+    # Split a top-level `Cat` at its most selective required INTERIOR literal run
+    # (the longest run of single-codepoint literal atoms not at the very start).
+    # Only fires for a top-level `Cat` (or a group wrapping one), `NoInner`
+    # otherwise. The caller only uses this when there is no leading literal (that
+    # case is the ordinary prefix prefilter), which guarantees the run starts past
+    # index 0 so LEFT is non-empty.
+    #
+    # `lpre` is everything up to AND INCLUDING the literal run (LEFT·lit); its
+    # reverse, run backward from `p + litlen`, both confirms the literal at `p`
+    # and finds the leftmost match start. `lit` is the literal bytes. The match
+    # end then comes from the anchored full-pattern DFA from that start (which is
+    # what makes greedy variable-length LEFT correct, e.g. `(a|b)*abb`).
+    InnerSplit : [NoInner, Inner({ lpre : List(Comp), lit : List(U8) })]
+    inner_split : Comp -> Comp.InnerSplit
+    inner_split = |ast|
+        # Looks (`^ $ \b \B`) anywhere would make the LEFT·lit reverse scan and
+        # the leftmost-start computation subtle; defer those patterns to the
+        # existing engines. `caps_email`-style patterns have none.
+        if Comp.ast_has_look(ast) {
+            NoInner
+        } else {
+        match ast {
+            Group(x, _) => Comp.inner_split(x)
+            Cat(xs) => {
+                run = Comp.best_lit_run(xs, 0, { start: 0, len: 0 }, { start: 0, len: 0 })
+                if run.len == 0 or run.start == 0 {
+                    NoInner
+                } else {
+                    lit = List.fold(List.sublist(xs, { start: run.start, len: run.len }), [], |acc, x| List.concat(acc, Comp.item_lit(x)))
+                    Inner({ lpre: List.sublist(xs, { start: 0, len: run.start + run.len }), lit })
+                }
+            }
+            _ => NoInner
+        }
+        }
+
+    # Does the AST contain any look assertion (`^ $ \b \B`) anywhere?
+    ast_has_look : Comp -> Bool
+    ast_has_look = |ast|
+        match ast {
+            Look(_) => True
+            Cat(xs) => List.any(xs, Comp.ast_has_look)
+            Alt(xs) => List.any(xs, Comp.ast_has_look)
+            Star(x, _) => Comp.ast_has_look(x)
+            Plus(x, _) => Comp.ast_has_look(x)
+            Quest(x, _) => Comp.ast_has_look(x)
+            Group(x, _) => Comp.ast_has_look(x)
+            _ => False
+        }
+
+    # bytes of a Cat item iff it is a single-codepoint literal atom, else []
+    item_lit : Comp -> List(U8)
+    item_lit = |x|
+        match x {
+            Chars(cs) => Comp.lit_byte(cs)
+            _ => []
+        }
+
+    # longest run of consecutive literal-atom items; `cur` is the run in progress,
+    # `best` the best seen so far.
+    best_lit_run : List(Comp), U64, { start : U64, len : U64 }, { start : U64, len : U64 } -> { start : U64, len : U64 }
+    best_lit_run = |xs, i, cur, best|
+        match List.get(xs, i) {
+            Err(_) => if cur.len > best.len { cur } else { best }
+            Ok(x) => {
+                cur2 = if List.is_empty(Comp.item_lit(x)) { { start: i + 1, len: 0 } } else { { start: cur.start, len: cur.len + 1 } }
+                best2 = if cur2.len > best.len { cur2 } else { best }
+                Comp.best_lit_run(xs, i + 1, cur2, best2)
+            }
+        }
 
     # Does the prog assert a word boundary (`\b` or `\B`)?
     has_wb : List(U32), U64 -> Bool
@@ -218,14 +299,29 @@ Comp := [
                         # set into the class table: its ranges refine the S1
                         # partition to be word-uniform, and its ordinal lets the
                         # DFA read per-class word-ness. No effect on the PikeVM.
+                        # reverse-inner split: only when there is no leading
+                        # literal (else the prefix prefilter covers it). Emit the
+                        # reverse of LEFT·lit as a sub-NFA into the shared sets
+                        # table; run backward from `p+litlen` it confirms the
+                        # literal at `p` and yields the leftmost start. The match
+                        # end then comes from the anchored full-pattern DFA.
+                        isplit = if List.is_empty(prefix) { Comp.inner_split(numbered.ast) } else { NoInner }
+                        ib =
+                            match isplit {
+                                Inner(s) => {
+                                    li = Comp.emit({ ..u1, prog: [], splits: [] }, Comp.reverse_ast(Cat(s.lpre)), 0)
+                                    { p: li, inner: Inner({ lit: s.lit, lrev_prog: List.append(li.prog, Comp.inst(Comp.op_match, 0)), lrev_splits: li.splits }) }
+                                }
+                                NoInner => { p: u1, inner: NoInner }
+                            }
                         wb =
                             if Comp.has_wb(prog, 0) {
-                                r = Comp.push_set(u1, False, Comp.ranges_w)
+                                r = Comp.push_set(ib.p, False, Comp.ranges_w)
                                 { sets: r.p.sets, word_set: r.idx.to_u64() }
                             } else {
-                                { sets: u1.sets, word_set: 0 }
+                                { sets: ib.p.sets, word_set: 0 }
                             }
-                        Ok({ prog, splits: p2.splits, classes: Trie.build(wb.sets), n_groups, prefix, rprog, rsplits: r1.splits, uprog, usplits: u1.splits, fbytes, tlits, word_set: wb.word_set, anchored_start: a_start, accept_eoi_only: a_eoi })
+                        Ok({ prog, splits: p2.splits, classes: Trie.build(wb.sets), n_groups, prefix, rprog, rsplits: r1.splits, uprog, usplits: u1.splits, fbytes, tlits, word_set: wb.word_set, anchored_start: a_start, accept_eoi_only: a_eoi, inner: ib.inner })
                     }
                 Err(e) => Err(e)
             }
