@@ -89,16 +89,50 @@ Regex := [].{
     find = |re, hay|
         match re.plan.verify {
             VerEngine => Regex.find_engine(re, hay)
-            _ =>
-                match Regex.scan_candidates(re.plan, hay) {
-                    Err(_) => Regex.find_engine(re, hay)
-                    Ok(cands) =>
-                        match List.first(Regex.verify_candidates(re, hay, cands, True)) {
-                            Ok(span) => Ok(span)
-                            Err(_) => Err(NoMatch)
+            _ => Regex.find_chunked(re, hay, Regex.first_chunk)
+        }
+
+    # The prefix length `find` scans before verifying what it has, and the factor
+    # it grows by when nothing matched.
+    first_chunk : U64
+    first_chunk = 256
+
+    chunk_growth : U64
+    chunk_growth = 4
+
+    # Search a GROWING PREFIX of the haystack, verifying after each round.
+    #
+    # Handing the whole haystack to the scan and verifying afterwards is right
+    # for `find_all`, which needs every candidate anyway, but wrong for `find`:
+    # it made an early match far more expensive than the plain DFA pass it
+    # replaced (a match at offset 0 of a 256 KB haystack measured 310 ns through
+    # the DFA and 30 µs through a full scan). Quadrupling prefixes keep the
+    # no-match win — one SIMD pass instead of a full DFA pass, ~100x here — while
+    # an early match only pays for its own chunk. The rounds are geometric, so
+    # re-scanning and re-verifying from 0 each round costs a constant factor.
+    #
+    # Leftmost-first survives because a round reports candidates in increasing
+    # order and covers every position below its limit, so the first candidate
+    # that verifies is the leftmost match.
+    find_chunked : Regex.T, List(U8), U64 -> Try(Regex.Span, [NoMatch])
+    find_chunked = |re, hay, limit| {
+        len = List.len(hay)
+        lim = if limit > len { len } else { limit }
+        match Regex.scan_candidates_upto(re.plan, hay, lim, len) {
+            # too dense for the prefilter to pay for itself: the DFA is cheaper
+            Err(_) => Regex.find_engine(re, hay)
+            Ok(cands) =>
+                match List.first(Regex.verify_candidates(re, hay, cands, True)) {
+                    Ok(span) => Ok(span)
+                    Err(_) =>
+                        if lim >= len {
+                            Err(NoMatch)
+                        } else {
+                            Regex.find_chunked(re, hay, limit * Regex.chunk_growth)
                         }
                 }
         }
+    }
 
     # no prefilter: the engine's own unanchored search
     find_engine : Regex.T, List(U8) -> Try(Regex.Span, [NoMatch])
@@ -359,6 +393,20 @@ Regex := [].{
             ScanByte(b) => Teddy.byte_candidates_capped(b, hay, cap)
             ScanTeddy(t) => Teddy.candidates_capped(t, hay, cap)
             ScanRange(lo, hi) => Teddy.range_candidates_capped(lo, hi, hay, cap)
+        }
+    }
+
+    # As `scan_candidates` over `hay[0..limit]`. The density gate still uses the
+    # WHOLE haystack length, so a growing-prefix search never bails to the engine
+    # any sooner than `find_all` would.
+    scan_candidates_upto : Regex.Plan, List(U8), U64, U64 -> Try(List(U64), [TooMany])
+    scan_candidates_upto = |plan, hay, limit, len| {
+        cap = len // plan.k
+        match plan.scan {
+            ScanNone => Ok([])
+            ScanByte(b) => Teddy.byte_candidates_upto(b, hay, limit, cap)
+            ScanTeddy(t) => Teddy.candidates_upto(t, hay, limit, cap)
+            ScanRange(lo, hi) => Teddy.range_candidates_upto(lo, hi, hay, limit, cap)
         }
     }
 

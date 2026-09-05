@@ -43,11 +43,35 @@ run_one = |c| {
 	{ ok: got == c.want, got }
 }
 
+# `find` walks a GROWING PREFIX of the haystack (Regex.find_chunked), so a
+# needle past the first few rounds exercises a path the short cases above never
+# reach. Each check asserts the three entry points agree: `find` must return
+# `find_all`'s first span, and `is_match` must agree that there is one.
+long_pats : List(Str)
+long_pats = ["zqxjv", "[0-9]{2,4}", "\\w+@\\w+", "ZQ|QZ", "q[a-z]+v", "nomatchhere", "\\bzq\\b"]
+
+long_hay : List(U8)
+long_hay = {
+	pad = List.repeat('.', 100000)
+	List.join([pad, Str.to_utf8(" zqxjv42@wq ZQ zq "), pad])
+}
+
+run_long : Str -> { ok : Bool, got : Str }
+run_long = |src| {
+	re = Regex.unwrap(Regex.compile(src))
+	span_str = |r| match r { Ok(sp) => "${sp.start.to_str()}-${sp.end.to_str()}", Err(_) => "none" }
+	want = span_str(List.first(Regex.find_all(re, long_hay)))
+	got = span_str(Regex.find(re, long_hay))
+	im = Regex.is_match(re, long_hay)
+	{ ok: got == want and im == (want != "none"), got: "${got} (find_all ${want})" }
+}
+
 main! = |_a| {
-	results = List.map(cases, run_one)
+	results = List.concat(List.map(cases, run_one), List.map(long_pats, run_long))
+	cases_all = List.concat(cases, List.map(long_pats, |p| { pat: p, hay: "<200 KB>", want: "= find_all's first span" }))
 	passed = List.len(List.keep_if(results, |r| r.ok))
 	total = List.len(results)
-	lines = List.map2(cases, results, |c, r| {
+	lines = List.map2(cases_all, results, |c, r| {
 		mark = if r.ok { "ok  " } else { "FAIL" }
 		"${mark} /${c.pat}/ want ${c.want} got ${r.got}"
 	})

@@ -91,6 +91,32 @@ Teddy := [].{
         }
     }
 
+    ## As the three `*_capped` scans, but covering only `hay[0..limit]` — the
+    ## growing prefix an early-exit search walks. A SIMD window may overshoot and
+    ## report a candidate at or past `limit`; that is harmless, because every
+    ## candidate is verified and they still come out in increasing order, so the
+    ## caller's "first verified candidate" is still the leftmost one.
+    candidates_upto : Teddy.T, List(U8), U64, U64 -> Try(List(U64), [TooMany])
+    candidates_upto = |t, hay, limit, cap|
+        if limit < 16 {
+            cands = Teddy.scalar_tail(t, hay, 0, limit, [])
+            if List.len(cands) > cap { Err(TooMany) } else { Ok(cands) }
+        } else {
+            match Teddy.scan_capped(t, hay, limit, t.m - 1, U8x16.splat(0xFF), U8x16.splat(0xFF), [], cap) {
+                Err(TooMany) => Err(TooMany)
+                Ok(main) => {
+                    tail = Teddy.scan(t, hay, limit, limit - 16, U8x16.splat(0xFF), U8x16.splat(0xFF), main)
+                    Ok(Teddy.dedup_sorted(tail))
+                }
+            }
+        }
+
+    byte_candidates_upto : U8, List(U8), U64, U64 -> Try(List(U64), [TooMany])
+    byte_candidates_upto = |b, hay, limit, cap| Teddy.byte_scan(b, hay, limit, 0, [], cap)
+
+    range_candidates_upto : U8, U8, List(U8), U64, U64 -> Try(List(U64), [TooMany])
+    range_candidates_upto = |lo, hi, hay, limit, cap| Teddy.range_scan(lo, hi, hay, limit, 0, [], cap)
+
     ## memchr-style single-byte candidate scan (offsets of byte `b`), capped like
     ## `candidates_capped`. Leaner than a Teddy fingerprint — one `eq_lanes` per
     ## 16-byte window, no nibble tables, no overlap so no dedup — and enough for
