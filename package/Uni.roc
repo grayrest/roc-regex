@@ -89,11 +89,21 @@ Uni := [].{
         if c >= 97 { (c - 87).to_u32() } else { (c - 48).to_u32() }
     }
 
+    ## The orbit table decoded once — `{ lo: codepoint, hi: partner }`, one entry
+    ## per pair. A top-level value so `(?i)` compilation doesn't re-decode the
+    ## hex string per codepoint (it did, ~1735 ranges each time).
+    fold_pairs : List({ lo : U32, hi : U32 })
+    fold_pairs = Uni.ranges(Uni.fold_hex)
+
     ## fold partners of a codepoint (M2 (?i)): the other members of its orbit.
     fold_of : U32 -> List(U32)
-    fold_of = |cp| {
-        rs = Uni.ranges(Uni.fold_hex)
-        List.keep_if(rs, |r| r.lo == cp) |> List.map(|r| r.hi)
-    }
+    fold_of = |cp| List.keep_if(Uni.fold_pairs, |r| r.lo == cp) |> List.map(|r| r.hi)
+
+    ## fold partners of every codepoint in `[lo, hi]`, as single-codepoint
+    ## ranges. One pass over the orbit table regardless of how wide the range is,
+    ## so a wide `(?i)` class costs the same as a narrow one.
+    fold_partners_in : U32, U32 -> List({ lo : U32, hi : U32 })
+    fold_partners_in = |lo, hi|
+        List.keep_if(Uni.fold_pairs, |r| r.lo >= lo and r.lo <= hi) |> List.map(|r| { lo: r.hi, hi: r.hi })
 
 }

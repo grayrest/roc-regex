@@ -381,9 +381,9 @@ Regex := [].{
     # reverse DFA of LEFT·lit backward from `p+litlen` (floored at the previous
     # match end). It both confirms the literal is present at `p` and yields the
     # leftmost start `s`. The end comes from `end`: `FromStart(full)` runs the
-    # anchored full-pattern DFA from `s` (greedy-correct for a variable-length
-    # LEFT); `FromLit(rfwd)` runs the anchored lit·RIGHT DFA from `p` (hard
-    # separator — the end is RIGHT-determined, so LEFT isn't re-scanned).
+    # anchored full-pattern DFA from `s` (greedy-correct for a LEFT that can run
+    # past the literal); `FromLit(rfwd)` runs the anchored lit·RIGHT DFA from `p`
+    # (hard separator — the end is RIGHT-determined, so LEFT isn't re-scanned).
     find_all_inner : { lit : List(U8), lrev : Rev.D, end : [FromStart(Rev.D), FromLit(Rev.D)] }, Trie.T, List(U8), List(U64) -> List(Regex.Span)
     find_all_inner = |inr, classes, hay, cands| {
         ncand = List.len(cands)
@@ -437,6 +437,7 @@ Regex := [].{
     find_all_literal : List(U8), List(U8), List(U64) -> List(Regex.Span)
     find_all_literal = |lit, hay, cands| {
         ncand = List.len(cands)
+        len = List.len(hay)
         plen = List.len(lit)
         var i = 0
         var last_end = 0
@@ -447,7 +448,11 @@ Regex := [].{
                 running = False
             } else {
                 at = List.get(cands, i) ?? 0
-                if at < last_end or !(Lit.matches(hay, at, lit, plen)) {
+                # `at + plen <= len` is load-bearing, not defensive: `Lit.eq`
+                # reads a missing haystack byte as 0, so without it a literal
+                # containing a NUL byte "matches" past the end and the emitted
+                # span has `end > len` (which then underflows `split`).
+                if at < last_end or at + plen > len or !(Lit.matches(hay, at, lit, plen)) {
                     i = i + 1
                 } else {
                     acc = List.append(acc, { start: at, end: at + plen })

@@ -32,6 +32,7 @@ Err := [].{
         RepetitionCountInvalid,
         EscapeUnrecognized,
         EscapeUnexpectedEof,
+        FlagUnsupported,
         # budgets (D13)
         PatternTooLong({ limit : U64, given : U64 }),
         NestLimitExceeded({ limit : U64, given : U64 }),
@@ -65,6 +66,7 @@ Err := [].{
             RepetitionCountInvalid => "invalid repetition count"
             EscapeUnrecognized => "unrecognized escape"
             EscapeUnexpectedEof => "incomplete escape at end of pattern"
+            FlagUnsupported => "unsupported inline flag (only `i` is implemented)"
             PatternTooLong(b) => "pattern too long: limit ${b.limit.to_str()}, given ${b.given.to_str()}"
             NestLimitExceeded(b) => "nesting too deep: limit ${b.limit.to_str()}, given ${b.given.to_str()}"
             NfaSizeLimitExceeded(b) => "pattern compiles too large: limit ${b.limit.to_str()} bytes, given ${b.given.to_str()}"

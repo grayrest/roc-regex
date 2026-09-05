@@ -57,7 +57,12 @@ Rev := [].{
         } else {
             nc = c.classes.n_classes
             wb = Comp.has_wb(c.uprog, 0)
-            det = |prog, splits| if wb { Rev.determinize_wb(prog, splits, c.classes, nc, c.word_set, max_states) } else { Rev.determinize(prog, splits, c.classes, nc, max_states) }
+            # `keep_all` picks the match semantics: leftmost-FIRST (truncate at
+            # Match) for every FORWARD DFA, all-matches for the REVERSE ones,
+            # whose job is to report the leftmost start of a match ending at a
+            # known position — truncating there would drop the branch that
+            # reaches further left (`a*?b`, `(?:b|ab)c`).
+            det = |prog, splits, keep_all| if wb { Rev.determinize_wb(prog, splits, c.classes, nc, c.word_set, max_states, keep_all) } else { Rev.determinize(prog, splits, c.classes, nc, max_states, keep_all) }
             # Anchored verify DFA for the literal-prefix prefilter: `c.prog`
             # (Save0·body·Save1·Match) is already the anchored forward NFA (no
             # dot-star), so determinizing it gives a DFA that, run from a candidate
@@ -72,7 +77,7 @@ Rev := [].{
             }
             averify =
                 if (!List.is_empty(c.prefix) or has_frange or (!List.is_empty(c.tlits) and !c.exact_alt)) and !c.anchored_start and !c.accept_eoi_only {
-                    match det(c.prog, c.splits) {
+                    match det(c.prog, c.splits, False) {
                         Ok(av) => Verify(av)
                         Err(_) => NoVerify
                     }
@@ -81,24 +86,24 @@ Rev := [].{
                 }
             # reverse-inner literal prefilter DFAs. `lrev` is reverse(LEFT·lit):
             # run backward from `p+litlen` it confirms the literal at `p` and
-            # yields the leftmost start. `full` is the anchored full-pattern
-            # forward DFA (det of `c.prog`): run from that start it gives the
-            # leftmost-first end, which is what makes a greedy variable-length
-            # LEFT correct (e.g. `(a|b)*abb`). Both share the class trie.
+            # yields the leftmost start. `rfwd` is the anchored `lit·RIGHT`
+            # forward DFA: run from `p` it gives the end. Sound because `Comp`
+            # only emits this shape with a hard separator, so LEFT stops exactly
+            # at the literal and the end depends on RIGHT alone.
             inner =
                 match c.inner {
                     Inner(s) =>
-                        match det(s.lrev_prog, s.lrev_splits) {
+                        match det(s.lrev_prog, s.lrev_splits, True) {
                             Err(_) => NoInner
                             Ok(lrev) =>
                                 match s.end {
                                     EndFull =>
-                                        match det(c.prog, c.splits) {
+                                        match det(c.prog, c.splits, False) {
                                             Err(_) => NoInner
                                             Ok(full) => Inner({ lit: s.lit, lrev, end: FromStart(full) })
                                         }
                                     EndRight(r) =>
-                                        match det(r.rfwd_prog, r.rfwd_splits) {
+                                        match det(r.rfwd_prog, r.rfwd_splits, False) {
                                             Err(_) => NoInner
                                             Ok(rfwd) => Inner({ lit: s.lit, lrev, end: FromLit(rfwd) })
                                         }
@@ -106,11 +111,11 @@ Rev := [].{
                         }
                     NoInner => NoInner
                 }
-            match det(c.uprog, c.usplits) {
+            match det(c.uprog, c.usplits, False) {
                 Err(_) => Err(TooBig)
                 Ok(fwd0) =>
                     # the outermost-anchor constraints ride on the forward D only
-                    match det(c.rprog, c.rsplits) {
+                    match det(c.rprog, c.rsplits, True) {
                         Err(_) => Err(TooBig)
                         Ok(rev) => Ok({ fwd: { ..fwd0, eoi_only: c.accept_eoi_only, anchored: c.anchored_start, inline_start: c.inline_start }, rev, averify, inner })
                     }
@@ -177,10 +182,10 @@ Rev := [].{
 
     # --- leftmost-first determinization ---------------------------------------
 
-    determinize : List(U32), List(U32), Trie.T, U32, U64 -> Try(Rev.D, [TooBig])
-    determinize = |prog, splits, classes, nc, max_states| {
-        s0 = Rev.close_pri(prog, splits, [0], [])
-        match Rev.explore(prog, splits, classes, nc, max_states, [s0], { table: [], hit: [], smap: [s0], next: 1 }) {
+    determinize : List(U32), List(U32), Trie.T, U32, U64, Bool -> Try(Rev.D, [TooBig])
+    determinize = |prog, splits, classes, nc, max_states, keep_all| {
+        s0 = Rev.close_pri(prog, splits, [0], [], keep_all)
+        match Rev.explore(prog, splits, classes, nc, max_states, [s0], { table: [], hit: [], smap: [s0], next: 1 }, keep_all) {
             Err(e) => Err(e)
             Ok(st) => {
                 n_states = List.len(st.hit)
@@ -239,7 +244,7 @@ Rev := [].{
             nx.shl_wrap(1).bitwise_or(ac.to_u32())
         })
 
-    explore = |prog, splits, classes, nc, max_states, work, st|
+    explore = |prog, splits, classes, nc, max_states, work, st, keep_all|
         match List.first(work) {
             Err(_) => Ok(st)
             Ok(set) => {
@@ -249,7 +254,7 @@ Rev := [].{
                 } else {
                 is_m = List.any(set, |pc| Comp.inst_op(List.get(prog, pc.to_u64()) ?? 0) == Comp.op_match)
                 r = List.fold(Rev.upto(nc.to_u64()), { st, work: rest, ids: [] }, |acc, cls| {
-                    tset = Rev.step(prog, splits, classes, set, cls.to_u32_wrap())
+                    tset = Rev.step(prog, splits, classes, set, cls.to_u32_wrap(), keep_all)
                     if List.is_empty(tset) {
                         { st: acc.st, work: acc.work, ids: List.append(acc.ids, 0) }
                     } else {
@@ -263,7 +268,7 @@ Rev := [].{
                     }
                 })
                 st2 = { ..r.st, table: List.concat(r.st.table, r.ids), hit: List.append(r.st.hit, if is_m { 1 } else { 0 }) }
-                Rev.explore(prog, splits, classes, nc, max_states, r.work, st2)
+                Rev.explore(prog, splits, classes, nc, max_states, r.work, st2, keep_all)
                 }
             }
         }
@@ -278,13 +283,13 @@ Rev := [].{
 
     WbState : { pcs : List(U32), lw : Bool }
 
-    determinize_wb : List(U32), List(U32), Trie.T, U32, U64, U64 -> Try(Rev.D, [TooBig])
-    determinize_wb = |prog, splits, classes, nc, word_set, max_states| {
-        pcs0 = Rev.close_pri(prog, splits, [0], [])
+    determinize_wb : List(U32), List(U32), Trie.T, U32, U64, U64, Bool -> Try(Rev.D, [TooBig])
+    determinize_wb = |prog, splits, classes, nc, word_set, max_states, keep_all| {
+        pcs0 = Rev.close_pri(prog, splits, [0], [], keep_all)
         s0f = { pcs: pcs0, lw: False }
         s0t = { pcs: pcs0, lw: True }
         ciw = List.map(Rev.upto(nc.to_u64()), |a| Trie.accepts_atom(classes, word_set.to_u32_wrap(), a.to_u32_wrap()))
-        match Rev.explore_wb(prog, splits, classes, nc, ciw, max_states, [s0f, s0t], { table: [], acc_on: [], acc_eoi: [], smap: [s0f, s0t], next: 2 }) {
+        match Rev.explore_wb(prog, splits, classes, nc, ciw, max_states, [s0f, s0t], { table: [], acc_on: [], acc_eoi: [], smap: [s0f, s0t], next: 2 }, keep_all) {
             Err(e) => Err(e)
             Ok(st) => {
                 n_states = List.len(st.acc_eoi)
@@ -299,7 +304,7 @@ Rev := [].{
     is_match_pc : List(U32), List(U32) -> Bool
     is_match_pc = |prog, pcs| List.any(pcs, |pc| Comp.inst_op(List.get(prog, pc.to_u64()) ?? 0) == Comp.op_match)
 
-    explore_wb = |prog, splits, classes, nc, ciw, max_states, work, st|
+    explore_wb = |prog, splits, classes, nc, ciw, max_states, work, st, keep_all|
         match List.first(work) {
             Err(_) => Ok(st)
             Ok(state) => {
@@ -309,12 +314,12 @@ Rev := [].{
                 } else {
                     lw = state.lw
                     # accept at end-of-input: right side is non-word
-                    eoi = Rev.close_resolve(prog, splits, state.pcs, [], [], lw != False, lw == False)
+                    eoi = Rev.close_resolve(prog, splits, state.pcs, [], [], lw != False, lw == False, keep_all)
                     is_eoi = Rev.is_match_pc(prog, eoi)
                     r = List.fold(Rev.upto(nc.to_u64()), { st, work: rest, ids: [], accs: [] }, |acc, cls| {
                         rw = List.get(ciw, cls) ?? False
                         wok = lw != rw
-                        resolved = Rev.close_resolve(prog, splits, state.pcs, [], [], wok, !wok)
+                        resolved = Rev.close_resolve(prog, splits, state.pcs, [], [], wok, !wok, keep_all)
                         accept = if Rev.is_match_pc(prog, resolved) { 1 } else { 0 }
                         moved = List.fold(resolved, [], |m, pc| {
                             w = List.get(prog, pc.to_u64()) ?? 0
@@ -324,7 +329,7 @@ Rev := [].{
                                 m
                             }
                         })
-                        tset = Rev.close_pri(prog, splits, moved, [])
+                        tset = Rev.close_pri(prog, splits, moved, [], keep_all)
                         accs2 = List.append(acc.accs, accept)
                         if List.is_empty(tset) {
                             { st: acc.st, work: acc.work, ids: List.append(acc.ids, 0), accs: accs2 }
@@ -340,7 +345,7 @@ Rev := [].{
                         }
                     })
                     st2 = { ..r.st, table: List.concat(r.st.table, r.ids), acc_on: List.concat(r.st.acc_on, r.accs), acc_eoi: List.append(r.st.acc_eoi, if is_eoi { 1 } else { 0 }) }
-                    Rev.explore_wb(prog, splits, classes, nc, ciw, max_states, r.work, st2)
+                    Rev.explore_wb(prog, splits, classes, nc, ciw, max_states, r.work, st2, keep_all)
                 }
             }
         }
@@ -356,14 +361,14 @@ Rev := [].{
     # resolve pending Looks in `stack` at a position with the given
     # word-boundary / non-word-boundary flags, following satisfied assertions and
     # dropping unsatisfied ones; yields Char/Match pcs in priority order.
-    close_resolve : List(U32), List(U32), List(U32), List(U32), List(U32), Bool, Bool -> List(U32)
-    close_resolve = |prog, splits, stack, seen, out, wok, nwok|
+    close_resolve : List(U32), List(U32), List(U32), List(U32), List(U32), Bool, Bool, Bool -> List(U32)
+    close_resolve = |prog, splits, stack, seen, out, wok, nwok, keep_all|
         match List.first(stack) {
             Err(_) => out
             Ok(pc) => {
                 rest = List.drop_first(stack, 1)
                 if List.contains(seen, pc) {
-                    Rev.close_resolve(prog, splits, rest, seen, out, wok, nwok)
+                    Rev.close_resolve(prog, splits, rest, seen, out, wok, nwok, keep_all)
                 } else {
                     seen2 = List.append(seen, pc)
                     w = List.get(prog, pc.to_u64()) ?? 0
@@ -372,22 +377,27 @@ Rev := [].{
                     if op == Comp.op_split {
                         t1 = List.get(splits, arg.to_u64()) ?? 0
                         t2 = List.get(splits, (arg + 1).to_u64()) ?? 0
-                        Rev.close_resolve(prog, splits, List.concat([t1, t2], rest), seen2, out, wok, nwok)
+                        Rev.close_resolve(prog, splits, List.concat([t1, t2], rest), seen2, out, wok, nwok, keep_all)
                     } else if op == Comp.op_jmp {
-                        Rev.close_resolve(prog, splits, List.prepend(rest, arg), seen2, out, wok, nwok)
+                        Rev.close_resolve(prog, splits, List.prepend(rest, arg), seen2, out, wok, nwok, keep_all)
                     } else if op == Comp.op_save {
-                        Rev.close_resolve(prog, splits, List.prepend(rest, pc + 1), seen2, out, wok, nwok)
+                        Rev.close_resolve(prog, splits, List.prepend(rest, pc + 1), seen2, out, wok, nwok, keep_all)
                     } else if op == Comp.op_look {
                         pass = if arg == Comp.look_wordb { wok } else if arg == Comp.look_nwordb { nwok } else { False }
                         if pass {
-                            Rev.close_resolve(prog, splits, List.prepend(rest, pc + 1), seen2, out, wok, nwok)
+                            Rev.close_resolve(prog, splits, List.prepend(rest, pc + 1), seen2, out, wok, nwok, keep_all)
                         } else {
-                            Rev.close_resolve(prog, splits, rest, seen2, out, wok, nwok)
+                            Rev.close_resolve(prog, splits, rest, seen2, out, wok, nwok, keep_all)
                         }
                     } else if op == Comp.op_match {
-                        List.append(out, pc)
+                        # see `close_go`: reverse DFAs keep all alternatives
+                        if keep_all {
+                            Rev.close_resolve(prog, splits, rest, seen2, List.append(out, pc), wok, nwok, keep_all)
+                        } else {
+                            List.append(out, pc)
+                        }
                     } else {
-                        Rev.close_resolve(prog, splits, rest, seen2, List.append(out, pc), wok, nwok)
+                        Rev.close_resolve(prog, splits, rest, seen2, List.append(out, pc), wok, nwok, keep_all)
                     }
                 }
             }
@@ -395,8 +405,8 @@ Rev := [].{
 
     # advance the Char pcs that accept `cls` (priority order preserved), then
     # epsilon-close with truncation
-    step : List(U32), List(U32), Trie.T, List(U32), U32 -> List(U32)
-    step = |prog, splits, classes, set, cls| {
+    step : List(U32), List(U32), Trie.T, List(U32), U32, Bool -> List(U32)
+    step = |prog, splits, classes, set, cls, keep_all| {
         moved = List.fold(set, [], |m, pc| {
             w = List.get(prog, pc.to_u64()) ?? 0
             if Comp.inst_op(w) == Comp.op_char and Trie.accepts_atom(classes, Comp.inst_arg(w), cls) {
@@ -405,26 +415,26 @@ Rev := [].{
                 m
             }
         })
-        Rev.close_pri(prog, splits, moved, [])
+        Rev.close_pri(prog, splits, moved, [], keep_all)
     }
 
     # priority-preserving epsilon closure, truncating at (and including) the
     # first Match. `stack` is processed front-to-back (DFS, higher priority
     # first). Returns Char/Match pcs in priority order, deduped keeping first.
-    close_pri : List(U32), List(U32), List(U32), List(U32) -> List(U32)
-    close_pri = |prog, splits, stack, out| Rev.close_go(prog, splits, stack, [], out)
+    close_pri : List(U32), List(U32), List(U32), List(U32), Bool -> List(U32)
+    close_pri = |prog, splits, stack, out, keep_all| Rev.close_go(prog, splits, stack, [], out, keep_all)
 
     # `seen` tracks EVERY visited pc (split/jmp/save included), so an epsilon
     # cycle through a nullable loop (e.g. `(a*)+`) terminates. `out` is the
     # priority-ordered Char/Match result; truncated at the first Match.
-    close_go : List(U32), List(U32), List(U32), List(U32), List(U32) -> List(U32)
-    close_go = |prog, splits, stack, seen, out|
+    close_go : List(U32), List(U32), List(U32), List(U32), List(U32), Bool -> List(U32)
+    close_go = |prog, splits, stack, seen, out, keep_all|
         match List.first(stack) {
             Err(_) => out
             Ok(pc) => {
                 rest = List.drop_first(stack, 1)
                 if List.contains(seen, pc) {
-                    Rev.close_go(prog, splits, rest, seen, out)
+                    Rev.close_go(prog, splits, rest, seen, out, keep_all)
                 } else {
                     seen2 = List.append(seen, pc)
                     w = List.get(prog, pc.to_u64()) ?? 0
@@ -433,20 +443,29 @@ Rev := [].{
                     if op == Comp.op_split {
                         t1 = List.get(splits, arg.to_u64()) ?? 0
                         t2 = List.get(splits, (arg + 1).to_u64()) ?? 0
-                        Rev.close_go(prog, splits, List.concat([t1, t2], rest), seen2, out)
+                        Rev.close_go(prog, splits, List.concat([t1, t2], rest), seen2, out, keep_all)
                     } else if op == Comp.op_jmp {
-                        Rev.close_go(prog, splits, List.prepend(rest, arg), seen2, out)
+                        Rev.close_go(prog, splits, List.prepend(rest, arg), seen2, out, keep_all)
                     } else if op == Comp.op_save {
-                        Rev.close_go(prog, splits, List.prepend(rest, pc + 1), seen2, out)
+                        Rev.close_go(prog, splits, List.prepend(rest, pc + 1), seen2, out, keep_all)
                     } else if op == Comp.op_look {
                         # leave the assertion pending in the set; a transition
                         # resolves it once both sides' word-ness are known
                         # (`close_resolve`). Look-free progs never reach this.
-                        Rev.close_go(prog, splits, rest, seen2, List.append(out, pc))
+                        Rev.close_go(prog, splits, rest, seen2, List.append(out, pc), keep_all)
                     } else if op == Comp.op_match {
-                        List.append(out, pc)
+                        # Leftmost-FIRST truncates here: every lower-priority
+                        # thread (a later-starting attempt) is cut. A REVERSE
+                        # scan instead needs the leftmost start, so it must keep
+                        # the longer-backward alternatives alive — `keep_all` is
+                        # Rust's `MatchKind::All` for reverse DFAs.
+                        if keep_all {
+                            Rev.close_go(prog, splits, rest, seen2, List.append(out, pc), keep_all)
+                        } else {
+                            List.append(out, pc)
+                        }
                     } else {
-                        Rev.close_go(prog, splits, rest, seen2, List.append(out, pc))
+                        Rev.close_go(prog, splits, rest, seen2, List.append(out, pc), keep_all)
                     }
                 }
             }
