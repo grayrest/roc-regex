@@ -303,6 +303,30 @@ Regex := [].{
                     Err(_) => Regex.find_all_engine(re, hay)
                 }
             }
+        } else if !List.is_empty(re.tlits) {
+            # Alternation of leading literals (e.g. `Sherlock|Holmes|…`): SIMD Teddy
+            # over the literal SET for candidates, then DFA-verify each — the
+            # multi-literal analogue of the prefix path, replacing a full DFA scan.
+            verify = match re.engine {
+                Three(d) => d.averify
+                Pike => NoVerify
+            }
+            k = match verify {
+                Verify(_) => Regex.inner_prefilter_k
+                NoVerify => Regex.prefilter_k
+            }
+            match Teddy.build(re.tlits) {
+                Ok(t) =>
+                    match Teddy.candidates_capped(t, hay, List.len(hay) // k) {
+                        Ok(cands) =>
+                            match verify {
+                                Verify(av) => Regex.find_all_teddy_dfa(av, re.classes, hay, cands)
+                                NoVerify => Regex.find_all_teddy(Regex.base(re), hay, cands)
+                            }
+                        Err(_) => Regex.find_all_engine(re, hay)
+                    }
+                Err(_) => Regex.find_all_engine(re, hay)
+            }
         } else {
             match re.engine {
                 Three(d) =>
