@@ -81,10 +81,12 @@ Comp := [
         # but a required INTERIOR literal, e.g. `\w+@\w+`): `lit` is that literal
         # and `lrev_prog` is the reverse NFA of LEFT·lit (everything up to and
         # including the literal). `find_all` `memchr`s `lit`, runs `lrev` backward
-        # from `p+litlen` to confirm the literal and find the leftmost start, then
-        # runs the anchored full-pattern DFA from there for the end. `NoInner`
-        # when the shape doesn't apply.
-        inner : [NoInner, Inner({ lit : List(U8), lrev_prog : List(U32), lrev_splits : List(U32) })],
+        # from `p+litlen` to confirm the literal and find the leftmost start. The
+        # end comes from `end`: `EndFull` runs the anchored full-pattern DFA from
+        # the start; `EndRight` (hard separator) runs an anchored `lit·RIGHT` DFA
+        # from `p`, avoiding a re-scan of LEFT. `NoInner` when the shape doesn't
+        # apply.
+        inner : [NoInner, Inner({ lit : List(U8), lrev_prog : List(U32), lrev_splits : List(U32), end : [EndFull, EndRight({ rfwd_prog : List(U32), rfwd_splits : List(U32) })] })],
         # Outermost text anchors, stripped from the DFA progs (`uprog`/`rprog`)
         # and re-imposed as scan constraints (approach B): `anchored_start` (`^`)
         # builds an anchored forward `uprog` (no dot-star) so a match can only
@@ -134,10 +136,17 @@ Comp := [
     #
     # `lpre` is everything up to AND INCLUDING the literal run (LEFT·lit); its
     # reverse, run backward from `p + litlen`, both confirms the literal at `p`
-    # and finds the leftmost match start. `lit` is the literal bytes. The match
-    # end then comes from the anchored full-pattern DFA from that start (which is
-    # what makes greedy variable-length LEFT correct, e.g. `(a|b)*abb`).
-    InnerSplit : [NoInner, Inner({ lpre : List(Comp), lit : List(U8) })]
+    # and finds the leftmost match start. `lit` is the literal bytes. `rlit` is the
+    # literal run AND everything after it (lit·RIGHT).
+    #
+    # The match end normally comes from the anchored full-pattern DFA from the
+    # start `s` (correct for a greedy LEFT that can reach the literal, e.g.
+    # `(a|b)*abb`). But when `hard_sep` — no LEFT atom can match a literal byte, so
+    # LEFT stops exactly at the literal (e.g. `@ ∉ \w` in `\w+@\w+`) — the end is
+    # determined solely by RIGHT, so it can come from an anchored `lit·RIGHT` DFA
+    # run from `p`. That avoids re-scanning LEFT (which the reverse scan already
+    # covered) in the forward pass.
+    InnerSplit : [NoInner, Inner({ lpre : List(Comp), lit : List(U8), rlit : List(Comp), hard_sep : Bool })]
     inner_split : Comp -> Comp.InnerSplit
     inner_split = |ast|
         # Looks (`^ $ \b \B`) anywhere would make the LEFT·lit reverse scan and
@@ -154,12 +163,43 @@ Comp := [
                     NoInner
                 } else {
                     lit = List.fold(List.sublist(xs, { start: run.start, len: run.len }), [], |acc, x| List.concat(acc, Comp.item_lit(x)))
-                    Inner({ lpre: List.sublist(xs, { start: 0, len: run.start + run.len }), lit })
+                    left = List.sublist(xs, { start: 0, len: run.start })
+                    hard_sep = List.all(lit, |b| b < 0x80 and !(List.any(left, |a| Comp.ast_can_match_byte(a, b))))
+                    Inner({
+                        lpre: List.sublist(xs, { start: 0, len: run.start + run.len }),
+                        lit,
+                        rlit: List.sublist(xs, { start: run.start, len: List.len(xs) - run.start }),
+                        hard_sep,
+                    })
                 }
             }
             _ => NoInner
         }
         }
+
+    # Can `ast` match a codepoint equal to byte `b` anywhere within it? Used to
+    # decide whether an interior literal is a hard separator (LEFT can't consume
+    # it). Conservative: unknown constructs (looks/empty) can't; classes test
+    # their ranges (honoring negation).
+    ast_can_match_byte : Comp, U8 -> Bool
+    ast_can_match_byte = |ast, b|
+        match ast {
+            Chars(c) => Comp.class_matches_byte(c, b)
+            Cat(xs) => List.any(xs, |x| Comp.ast_can_match_byte(x, b))
+            Alt(xs) => List.any(xs, |x| Comp.ast_can_match_byte(x, b))
+            Plus(x, _) => Comp.ast_can_match_byte(x, b)
+            Star(x, _) => Comp.ast_can_match_byte(x, b)
+            Quest(x, _) => Comp.ast_can_match_byte(x, b)
+            Group(x, _) => Comp.ast_can_match_byte(x, b)
+            _ => False
+        }
+
+    class_matches_byte : { neg : Bool, ranges : List(Comp.Rng) }, U8 -> Bool
+    class_matches_byte = |c, b| {
+        cp = b.to_u32()
+        within = List.any(c.ranges, |r| r.lo <= cp and cp <= r.hi)
+        if c.neg { !within } else { within }
+    }
 
     # Does the AST contain any look assertion (`^ $ \b \B`) anywhere?
     ast_has_look : Comp -> Bool
@@ -459,7 +499,16 @@ Comp := [
                             match isplit {
                                 Inner(s) => {
                                     li = Comp.emit({ ..u1, prog: [], splits: [] }, Comp.reverse_ast(Cat(s.lpre)), 0)
-                                    { p: li, inner: Inner({ lit: s.lit, lrev_prog: List.append(li.prog, Comp.inst(Comp.op_match, 0)), lrev_splits: li.splits }) }
+                                    lrev_prog = List.append(li.prog, Comp.inst(Comp.op_match, 0))
+                                    if s.hard_sep {
+                                        # hard separator: emit the anchored lit·RIGHT
+                                        # NFA for the end-scan from `p` (skips a
+                                        # re-scan of LEFT).
+                                        ri = Comp.emit({ ..li, prog: [], splits: [] }, Cat(s.rlit), 0)
+                                        { p: ri, inner: Inner({ lit: s.lit, lrev_prog, lrev_splits: li.splits, end: EndRight({ rfwd_prog: List.append(ri.prog, Comp.inst(Comp.op_match, 0)), rfwd_splits: ri.splits }) }) }
+                                    } else {
+                                        { p: li, inner: Inner({ lit: s.lit, lrev_prog, lrev_splits: li.splits, end: EndFull }) }
+                                    }
                                 }
                                 NoInner => { p: u1, inner: NoInner }
                             }
