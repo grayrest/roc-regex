@@ -35,7 +35,13 @@ Rev := [].{
     ## forward scan can recover the match start itself (last exit from the start
     ## state) and the reverse start-scan is skipped. Set from `Comp` in `build`;
     ## the determinizers default it False.
-    D : { table : List(U32), atable : List(U32), accept_bits : U64, accept_on : List(U8), accept_eoi : List(U8), nc : U32, eoi_only : Bool, anchored : Bool, inline_start : Bool }
+    ## `awb` is the word-boundary analogue of `atable`: for a `\b`/`\B` DFA it
+    ## packs BOTH the transition and the per-transition accept bit for each ASCII
+    ## byte into one entry — `awb[state*128 + byte] = (table[idx] << 1) | accept_on[idx]`
+    ## with `idx = state*nc + class(byte)` — so the scan does one lookup per ASCII
+    ## byte instead of decode + class_of + two list loads. Empty for non-wb DFAs
+    ## or when over the fuse budget (scan falls back to `fwd_wb_c`/`rev_wb_c`).
+    D : { table : List(U32), atable : List(U32), awb : List(U32), accept_bits : U64, accept_on : List(U8), accept_eoi : List(U8), nc : U32, eoi_only : Bool, anchored : Bool, inline_start : Bool }
 
     ## Build both DFAs at compile time (folds when the pattern is constant), or
     ## say why not. `HasLook` -> `^`/`$` assertions (still PikeVM); `TooBig` ->
@@ -174,7 +180,7 @@ Rev := [].{
                 # and the accept bitset are valid together (a match state's id
                 # must fit in the U64). Larger DFAs fall back to the class path.
                 atable = if n_states <= 64 { Rev.fuse_ascii(st.table, classes.ascii, nc.to_u64(), n_states) } else { [] }
-                Ok({ table: st.table, atable, accept_bits: Rev.accept_bitset(st.hit, n_states), accept_on: [], accept_eoi: st.hit, nc, eoi_only: False, anchored: False, inline_start: False })
+                Ok({ table: st.table, atable, awb: [], accept_bits: Rev.accept_bitset(st.hit, n_states), accept_on: [], accept_eoi: st.hit, nc, eoi_only: False, anchored: False, inline_start: False })
             }
         }
     }
@@ -206,6 +212,23 @@ Rev := [].{
             b = i % 128
             cls = List.get(ascii, b) ?? 0
             List.get(table, s * nc + cls.to_u64()) ?? 0
+        })
+
+    # Word-boundary fused ASCII table: each entry packs the transition and the
+    # per-transition accept bit for one (state, ASCII byte) — `(next << 1) | accept`
+    # — since `fwd_wb`/`rev_wb` index both `table` and `accept_on` at the same
+    # `state*nc + class(byte)`. One lookup per ASCII byte replaces decode +
+    # class_of + two list loads.
+    fuse_wb_ascii : List(U32), List(U8), List(U32), U64, U64 -> List(U32)
+    fuse_wb_ascii = |table, accept_on, ascii, nc, n_states|
+        List.map(Rev.upto(n_states * 128), |i| {
+            s = i // 128
+            b = i % 128
+            cls = List.get(ascii, b) ?? 0
+            idx = s * nc + cls.to_u64()
+            nx = List.get(table, idx) ?? 0
+            ac = List.get(accept_on, idx) ?? 0
+            nx.shl_wrap(1).bitwise_or(ac.to_u32())
         })
 
     explore = |prog, splits, classes, nc, max_states, work, st|
@@ -255,7 +278,13 @@ Rev := [].{
         ciw = List.map(Rev.upto(nc.to_u64()), |a| Trie.accepts_atom(classes, word_set.to_u32_wrap(), a.to_u32_wrap()))
         match Rev.explore_wb(prog, splits, classes, nc, ciw, max_states, [s0f, s0t], { table: [], acc_on: [], acc_eoi: [], smap: [s0f, s0t], next: 2 }) {
             Err(e) => Err(e)
-            Ok(st) => Ok({ table: st.table, atable: [], accept_bits: Rev.accept_bits_invalid, accept_on: st.acc_on, accept_eoi: st.acc_eoi, nc, eoi_only: False, anchored: False, inline_start: False })
+            Ok(st) => {
+                n_states = List.len(st.acc_eoi)
+                # fuse transition + per-transition accept into one ASCII table
+                # (256 KB budget: 128 entries/state * 4 bytes).
+                awb = if n_states <= 512 { Rev.fuse_wb_ascii(st.table, st.acc_on, classes.ascii, nc.to_u64(), n_states) } else { [] }
+                Ok({ table: st.table, atable: [], awb, accept_bits: Rev.accept_bits_invalid, accept_on: st.acc_on, accept_eoi: st.acc_eoi, nc, eoi_only: False, anchored: False, inline_start: False })
+            }
         }
     }
 
@@ -435,7 +464,13 @@ Rev := [].{
 
     run_fwd : Rev.D, Trie.T, List(U8) -> Try(U64, [NoMatch])
     run_fwd = |d, classes, hay|
-        if Rev.is_wb(d) { Rev.fwd_wb(d, classes, hay, 0, 0, Err(NoMatch)) } else { Rev.fwd(d, classes, hay, 0, 0, Err(NoMatch)) }
+        if Rev.is_wb(d) {
+            if List.is_empty(d.awb) { Rev.fwd_wb_c(d, classes, hay, 0, 0, Err(NoMatch)) } else { Rev.fwd_wb(d, classes, hay, 0, 0, Err(NoMatch)) }
+        } else if List.is_empty(d.atable) {
+            Rev.fwd_c(d, classes, hay, 0, 0, Err(NoMatch))
+        } else {
+            Rev.fwd(d, classes, hay, 0, 0, Err(NoMatch))
+        }
 
     # Forward scan that yields BOTH ends of the leftmost match in one pass, so no
     # reverse start-scan is needed. `mstart` tracks the start of the current match
@@ -493,7 +528,8 @@ Rev := [].{
         if d.anchored and at != 0 {
             Err(NoMatch)
         } else if Rev.is_wb(d) {
-            Rev.fwd_wb(d, classes, hay, at, Rev.wstart_fwd(hay, at), Err(NoMatch))
+            ws = Rev.wstart_fwd(hay, at)
+            if List.is_empty(d.awb) { Rev.fwd_wb_c(d, classes, hay, at, ws, Err(NoMatch)) } else { Rev.fwd_wb(d, classes, hay, at, ws, Err(NoMatch)) }
         } else if List.is_empty(d.atable) {
             Rev.fwd_c(d, classes, hay, at, 0, Err(NoMatch))
         } else {
@@ -553,9 +589,32 @@ Rev := [].{
 
     # word-boundary forward scan: accept is per position (`accept_on[state,cls]`
     # resolves the boundary against the following codepoint) with `accept_eoi`
-    # at end-of-input (right side = non-word).
+    # at end-of-input (right side = non-word). Fused `awb` path: for an ASCII byte
+    # one lookup yields both the accept bit and the next state.
     fwd_wb : Rev.D, Trie.T, List(U8), U64, U32, Try(U64, [NoMatch]) -> Try(U64, [NoMatch])
     fwd_wb = |d, classes, hay, pos, state, best|
+        if pos >= List.len(hay) {
+            if (List.get(d.accept_eoi, state.to_u64()) ?? 0) == 1 { Ok(pos) } else { best }
+        } else {
+            b0 = List.get(hay, pos) ?? 0
+            if b0 < 0x80 {
+                v = List.get(d.awb, state.to_u64() * 128 + b0.to_u64()) ?? 0
+                best2 = if v.bitwise_and(1) == 1 { Ok(pos) } else { best }
+                nxt = v.shr_wrap(1)
+                if nxt == 0 { best2 } else { Rev.fwd_wb(d, classes, hay, pos + 1, nxt - 1, best2) }
+            } else {
+                dec = Comp.decode(hay, pos)
+                cls = Trie.class_of(classes, dec.cp)
+                idx = state.to_u64() * d.nc.to_u64() + cls.to_u64()
+                best2 = if (List.get(d.accept_on, idx) ?? 0) == 1 { Ok(pos) } else { best }
+                nxt = List.get(d.table, idx) ?? 0
+                if nxt == 0 { best2 } else { Rev.fwd_wb(d, classes, hay, pos + dec.len, nxt - 1, best2) }
+            }
+        }
+
+    # class-lookup word-boundary forward scan: fallback when `awb` was skipped.
+    fwd_wb_c : Rev.D, Trie.T, List(U8), U64, U32, Try(U64, [NoMatch]) -> Try(U64, [NoMatch])
+    fwd_wb_c = |d, classes, hay, pos, state, best|
         if pos >= List.len(hay) {
             if (List.get(d.accept_eoi, state.to_u64()) ?? 0) == 1 { Ok(pos) } else { best }
         } else {
@@ -567,7 +626,7 @@ Rev := [].{
             if nxt == 0 {
                 best2
             } else {
-                Rev.fwd_wb(d, classes, hay, pos + dec.len, nxt - 1, best2)
+                Rev.fwd_wb_c(d, classes, hay, pos + dec.len, nxt - 1, best2)
             }
         }
 
@@ -632,7 +691,8 @@ Rev := [].{
     rev_dispatch : Rev.D, Trie.T, List(U8), U64, U64, U64 -> U64
     rev_dispatch = |d, classes, hay, end, lo, best0|
         if Rev.is_wb(d) {
-            Rev.rev_wb(d, classes, hay, end, lo, Rev.wstart_rev(hay, end), best0)
+            ws = Rev.wstart_rev(hay, end)
+            if List.is_empty(d.awb) { Rev.rev_wb_c(d, classes, hay, end, lo, ws, best0) } else { Rev.rev_wb(d, classes, hay, end, lo, ws, best0) }
         } else if List.is_empty(d.atable) {
             Rev.rev_c(d, classes, hay, end, lo, 0, best0)
         } else {
@@ -665,8 +725,44 @@ Rev := [].{
     # codepoint to its left (the one about to be consumed going backward), via
     # `accept_on`; at the true haystack start (pos 0) that left side is non-word,
     # so `accept_eoi` applies.
+    # Fused `awb` path: the byte to the left (`hay[pos-1]`) supplies both the
+    # boundary-accept bit (its class is the left context) and the transition, in
+    # one lookup — for ASCII. `pos == 0` (haystack start, left = non-word) and
+    # non-ASCII keep the explicit accept_on/table path.
     rev_wb : Rev.D, Trie.T, List(U8), U64, U64, U32, U64 -> U64
     rev_wb = |d, classes, hay, pos, lo, state, best| {
+        if pos == 0 {
+            if (List.get(d.accept_eoi, state.to_u64()) ?? 0) == 1 { pos } else { best }
+        } else {
+            b = List.get(hay, pos - 1) ?? 0
+            if b < 0x80 {
+                v = List.get(d.awb, state.to_u64() * 128 + b.to_u64()) ?? 0
+                best2 = if v.bitwise_and(1) == 1 { pos } else { best }
+                if pos <= lo {
+                    best2
+                } else {
+                    nxt = v.shr_wrap(1)
+                    if nxt == 0 { best2 } else { Rev.rev_wb(d, classes, hay, pos - 1, lo, nxt - 1, best2) }
+                }
+            } else {
+                cs = Rev.cp_start(hay, pos - 1)
+                dec = Comp.decode(hay, cs)
+                cls = Trie.class_of(classes, dec.cp)
+                idx = state.to_u64() * d.nc.to_u64() + cls.to_u64()
+                best2 = if (List.get(d.accept_on, idx) ?? 0) == 1 { pos } else { best }
+                if pos <= lo {
+                    best2
+                } else {
+                    nxt = List.get(d.table, idx) ?? 0
+                    if nxt == 0 { best2 } else { Rev.rev_wb(d, classes, hay, cs, lo, nxt - 1, best2) }
+                }
+            }
+        }
+    }
+
+    # class-lookup word-boundary reverse scan: fallback when `awb` was skipped.
+    rev_wb_c : Rev.D, Trie.T, List(U8), U64, U64, U32, U64 -> U64
+    rev_wb_c = |d, classes, hay, pos, lo, state, best| {
         accepted =
             if pos == 0 {
                 (List.get(d.accept_eoi, state.to_u64()) ?? 0) == 1
@@ -685,7 +781,7 @@ Rev := [].{
             if nxt == 0 {
                 best2
             } else {
-                Rev.rev_wb(d, classes, hay, cs, lo, nxt - 1, best2)
+                Rev.rev_wb_c(d, classes, hay, cs, lo, nxt - 1, best2)
             }
         }
     }
