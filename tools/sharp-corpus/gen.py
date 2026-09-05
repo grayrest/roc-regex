@@ -85,6 +85,14 @@ spans_str = |re, hay|
 	|> List.map(|s| "${s.start.to_str()}-${s.end.to_str()}")
 	|> Str.join_with(",")
 
+# every scan with a tiny runtime cap, so eviction fires on any pattern that
+# mints states at scan time (S4)
+evict_str : Sharp.T, Str -> Str
+evict_str = |re, hay|
+	Sharp.find_all(Sharp.with_runtime_cap(re, 24), Str.to_utf8(hay))
+	|> List.map(|s| "${s.start.to_str()}-${s.end.to_str()}")
+	|> Str.join_with(",")
+
 ref_str : Sharp.T, Str -> Str
 ref_str = |re, hay|
 	Sharp.find_all_ref(re, Str.to_utf8(hay))
@@ -126,7 +134,8 @@ run = |c0, filler| {
 			if c.kind == "matches" {
 				got = spans_str(re, c.hay)
 				ref = ref_str(re, c.hay)
-				{ ok: got == c.want and ref == c.want, got: if ref == got { got } else { "dfa=[${got}] ref=[${ref}]" }, skipped: False }
+				ev = evict_str(re, c.hay)
+				{ ok: got == c.want and ref == c.want and ev == c.want, got: if ref == got and ev == got { got } else { "dfa=[${got}] ref=[${ref}] evict=[${ev}]" }, skipped: False }
 			} else if c.kind == "ends" {
 				{ ok: ends_ok(re, c.hay, c.want) and spans_str(re, c.hay) == ref_str(re, c.hay), got: "dfa=[${spans_str(re, c.hay)}] ref=[${ref_str(re, c.hay)}]", skipped: False }
 			} else if c.kind == "unsupported" {

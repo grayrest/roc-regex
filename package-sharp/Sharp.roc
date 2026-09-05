@@ -86,7 +86,7 @@ Sharp := [].{
                         match np.a.err {
                             Unsup(msg) => Err(Err.whole(src, Unsupported(msg)))
                             NoErr => {
-                                e = Dfa.explore(Dfa.init(np.a, rts.id, np.id, Sharp.max_states(trie.n_classes)))
+                                e = Dfa.freeze(Dfa.explore(Dfa.init(np.a, rts.id, np.id, Sharp.max_states(trie.n_classes))))
                                 Ok({ a: e.a, trie, root: root.id, rev: rv.id, rev_ts: rts.id, ts: ts.id, noprefix: np.id, e })
                             }
                         }
@@ -119,6 +119,22 @@ Sharp := [].{
         r = Dfa.find_all(re.e, h)
         List.map(r.spans, |sp| { start: List.get(h.pos, sp.start) ?? 0, end: List.get(h.pos, sp.end) ?? 0 })
     }
+
+    ## `find_all`, also returning the regex with every state the scan minted
+    ## (S5): a caller looping over haystacks threads it so an incomplete fold
+    ## is not re-derived per call.
+    find_all_grow : Sharp.T, List(U8) -> (Sharp.T, List(Sharp.Span))
+    find_all_grow = |re, hay| {
+        h = Ref.prepare(re.trie, hay)
+        r = Dfa.find_all(re.e, h)
+        ({ ..re, e: r.e, a: r.e.a }, List.map(r.spans, |sp| { start: List.get(h.pos, sp.start) ?? 0, end: List.get(h.pos, sp.end) ?? 0 }))
+    }
+
+    ## The runtime state cap (RE#'s `MaxDfaCapacity`, default 100k): past it a
+    ## scan evicts back to the folded prefix and continues (S4). Exposed so the
+    ## corpus can force eviction.
+    with_runtime_cap : Sharp.T, U64 -> Sharp.T
+    with_runtime_cap = |re, cap| { ..re, e: { ..re.e, runtime_cap: cap } }
 
     ## The same, on the brute-force reference (S2.2) — the differential's oracle.
     find_all_ref : Sharp.T, List(U8) -> List(Sharp.Span)

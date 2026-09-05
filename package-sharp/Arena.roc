@@ -377,6 +377,39 @@ Arena := [].{
         })
     }
 
+    ## Sizes that define the arena's folded prefix (for eviction, S4).
+    Marks : { nodes : U64, cells : U64, ents : U64, ikeys : U64, rs : U64, rs_data : U64 }
+
+    marks : Arena.A -> Arena.Marks
+    marks = |a| { nodes: List.len(a.offs), cells: List.len(a.cells), ents: List.len(a.ient_id), ikeys: List.len(a.ikeys), rs: List.len(a.rs_off), rs_data: List.len(a.rs_data) }
+
+    ## Drop every node, key, and refset created after `m` and rebuild the index.
+    truncate : Arena.A, Arena.Marks -> Arena.A
+    truncate = |a, m| {
+        a1 = { ..a,
+            cells: List.take_first(a.cells, m.cells),
+            offs: List.take_first(a.offs, m.nodes),
+            flags: List.take_first(a.flags, m.nodes),
+            sub: List.take_first(a.sub, m.nodes),
+            minl: List.take_first(a.minl, m.nodes),
+            maxl: List.take_first(a.maxl, m.nodes),
+            pend: List.take_first(a.pend, m.nodes),
+            ient_key: List.take_first(a.ient_key, m.ents),
+            ient_len: List.take_first(a.ient_len, m.ents),
+            ient_id: List.take_first(a.ient_id, m.ents),
+            ikeys: List.take_first(a.ikeys, m.ikeys),
+            rs_off: List.take_first(a.rs_off, m.rs),
+            rs_len: List.take_first(a.rs_len, m.rs),
+            rs_data: List.take_first(a.rs_data, m.rs_data),
+            islots: List.repeat(0.U32, List.len(a.islots)),
+        }
+        List.fold(Arena.upto(m.ents), a1, |acc, ei| {
+            koff = (List.get(acc.ient_key, ei) ?? 0).to_u64()
+            klen = (List.get(acc.ient_len, ei) ?? 0).to_u64()
+            Arena.place(acc, List.sublist(acc.ikeys, { start: koff, len: klen }), ei.to_u32_wrap())
+        })
+    }
+
     # --- refsets ---------------------------------------------------------------
     #
     # RE#'s `RefSet`: a sorted list of (start, end) relative-position ranges,

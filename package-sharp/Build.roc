@@ -1476,6 +1476,45 @@ Build := [].{
         }
     }
 
+    # --- relocation after eviction (S4) ---------------------------------------------
+
+    ## Re-create node `id` of arena `src` inside `a` (which is `src` truncated to
+    ## `marks`): ids below the mark are shared; anything newer is rebuilt through
+    ## the constructors, refsets included.
+    copy_node : Arena.A, Arena.A, Arena.Marks, U32 -> Arena.R
+    copy_node = |src, a, m, id|
+        if id.to_u64() < m.nodes {
+            { a, id }
+        } else {
+            k = Arena.kind(src, id)
+            if k == Arena.k_singleton {
+                Build.one(a, Arena.tset(src, id))
+            } else if k == Arena.k_concat {
+                h = Build.copy_node(src, a, m, Arena.head(src, id))
+                t = Build.copy_node(src, h.a, m, Arena.tail(src, id))
+                Build.mk_concat2(t.a, h.id, t.id)
+            } else if k == Arena.k_loop {
+                b = Build.copy_node(src, a, m, Arena.head(src, id))
+                Build.mk_loop(b.a, b.id, Arena.loop_lo(src, id), Arena.loop_hi(src, id))
+            } else if k == Arena.k_or or k == Arena.k_and {
+                cs = List.fold(Arena.children(src, id), { a, ids: [] }, |acc, c| {
+                    r = Build.copy_node(src, acc.a, m, c)
+                    { a: r.a, ids: List.append(acc.ids, r.id) }
+                })
+                if k == Arena.k_or { Build.mk_or_seq(cs.a, cs.ids) } else { Build.mk_and_seq(cs.a, cs.ids) }
+            } else if k == Arena.k_not {
+                b = Build.copy_node(src, a, m, Arena.head(src, id))
+                Build.mk_not(b.a, b.id)
+            } else if k == Arena.k_lookahead or k == Arena.k_lookbehind {
+                b = Build.copy_node(src, a, m, Arena.head(src, id))
+                pend = Arena.look_pend(src, id)
+                rs = if pend.to_u64() < m.rs { { a: b.a, id: pend } } else { Arena.rs_intern(b.a, Arena.rs_get(src, pend)) }
+                Build.mk_lookaround(rs.a, b.id, k == Arena.k_lookbehind, Arena.look_rel(src, id), rs.id)
+            } else {
+                { a, id }
+            }
+        }
+
     # --- anchors and negative lookarounds (RegexBuilder anchors, RegexNodeConverter) --
 
     ## Create RE#'s well-known anchor nodes. `wordc`/`nonwordc` are the `\w`/`\W`

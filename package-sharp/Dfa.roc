@@ -11,6 +11,7 @@
 ## codepoint, or one `Invalid` symbol per malformed run, is one step, which is
 ## what the lookahead `rel` counters count. Spans convert to bytes at the end.
 import Arena
+import Build
 import Deriv
 import Ref
 import TSet
@@ -33,6 +34,11 @@ Dfa := [].{
         s_noprefix : U32,
         max_states : U64,
         complete : Bool,
+        # the folded prefix (S4): `freeze` records it after `explore`; a scan
+        # that mints past `runtime_cap` states evicts back to it
+        fold_states : U64,
+        fold_marks : Arena.Marks,
+        runtime_cap : U64,
     }
 
     dead : U32
@@ -72,11 +78,43 @@ Dfa := [].{
             st_node: [0], st_flags: [0], st_nk: [Dfa.nk_notnull], st_pend: [0], st_minpend: [0],
             node_state: [], table: List.repeat(0.U32, a.nmt.to_u64()), end_table: List.repeat(0.U32, a.nmt.to_u64()),
             s_rev_ts: 0, s_noprefix: 0, max_states, complete: True,
+            fold_states: 0, fold_marks: Arena.marks(a), runtime_cap: Dfa.default_runtime_cap,
         }
         d = Dfa.get_state(e0, Arena.bot, False)
         r1 = Dfa.get_state(d.e, rev_ts, True)
         r2 = Dfa.get_state(r1.e, noprefix, False)
         { ..r2.e, s_rev_ts: r1.id, s_noprefix: r2.id }
+    }
+
+    ## RE#'s `MaxDfaCapacity`
+    default_runtime_cap : U64
+    default_runtime_cap = 100_000
+
+    ## Record the fold's extent; everything created later can be evicted.
+    freeze : Dfa.E -> Dfa.E
+    freeze = |e| { ..e, fold_states: List.len(e.st_node), fold_marks: Arena.marks(e.a) }
+
+    ## Drop every state and node minted since the fold, keeping only the node of
+    ## state `s`, rebuilt into the truncated arena; returns its new state.
+    evict : Dfa.E, U32 -> Dfa.R
+    evict = |e, s| {
+        node = Dfa.st_node_of(e, s)
+        m = e.fold_marks
+        n = e.fold_states
+        a1 = Arena.truncate(e.a, m)
+        e1 = { ..e,
+            a: a1,
+            st_node: List.take_first(e.st_node, n),
+            st_flags: List.take_first(e.st_flags, n),
+            st_nk: List.take_first(e.st_nk, n),
+            st_pend: List.take_first(e.st_pend, n),
+            st_minpend: List.take_first(e.st_minpend, n),
+            node_state: List.take_first(e.node_state, m.nodes) |> List.map(|v| if v.to_u64() < n { v } else { 0 }),
+            table: List.take_first(e.table, n * e.nmt.to_u64()),
+            end_table: List.take_first(e.end_table, n * e.nmt.to_u64()),
+        }
+        r = Build.copy_node(e.a, e1.a, m, node)
+        Dfa.get_state({ ..e1, a: r.a }, r.id, False)
     }
 
     n_states : Dfa.E -> U64
@@ -146,9 +184,13 @@ Dfa := [].{
         if nxt != 0 {
             { e, id: nxt }
         } else {
-            d = Deriv.derivative(e.a, Deriv.loc_center, TSet.bit(cls), Dfa.st_node_of(e, s))
-            r = Dfa.get_state({ ..e, a: d.a }, d.id, False)
-            { e: { ..r.e, table: List.set(r.e.table, idx, r.id) ?? r.e.table }, id: r.id }
+            # over the cap with runtime-minted states present: evict first (a cap
+            # below the folded prefix can never be satisfied, so it is ignored)
+            ev = if List.len(e.st_node) > e.runtime_cap and List.len(e.st_node) > e.fold_states { Dfa.evict(e, s) } else { { e, id: s } }
+            idx2 = ev.id.to_u64() * ev.e.nmt.to_u64() + cls.to_u64()
+            d = Deriv.derivative(ev.e.a, Deriv.loc_center, TSet.bit(cls), Dfa.st_node_of(ev.e, ev.id))
+            r = Dfa.get_state({ ..ev.e, a: d.a }, d.id, False)
+            { e: { ..r.e, table: List.set(r.e.table, idx2, r.id) ?? r.e.table }, id: r.id }
         }
     }
 
@@ -160,9 +202,11 @@ Dfa := [].{
         if nxt != 0 {
             { e, id: nxt }
         } else {
-            d = Deriv.derivative(e.a, Deriv.loc_end, TSet.bit(cls), Dfa.st_node_of(e, s))
-            r = Dfa.get_state({ ..e, a: d.a }, d.id, False)
-            { e: { ..r.e, end_table: List.set(r.e.end_table, idx, r.id) ?? r.e.end_table }, id: r.id }
+            ev = if List.len(e.st_node) > e.runtime_cap and List.len(e.st_node) > e.fold_states { Dfa.evict(e, s) } else { { e, id: s } }
+            idx2 = ev.id.to_u64() * ev.e.nmt.to_u64() + cls.to_u64()
+            d = Deriv.derivative(ev.e.a, Deriv.loc_end, TSet.bit(cls), Dfa.st_node_of(ev.e, ev.id))
+            r = Dfa.get_state({ ..ev.e, a: d.a }, d.id, False)
+            { e: { ..r.e, end_table: List.set(r.e.end_table, idx2, r.id) ?? r.e.end_table }, id: r.id }
         }
     }
 

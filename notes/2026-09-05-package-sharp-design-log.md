@@ -273,3 +273,19 @@ divergences are now understood; both are RE# bugs to report upstream.
   `upstream/2026-09-05-sharp-debug-crashes/`: `Sharp.show_rev` faults in
   `free` (heap corruption, dev backend), `Sharp.derive_chain_rev` overflows
   the stack. The same pattern's `find_all` path is fine. Not reduced yet.
+
+## M3 findings (2026-09-05, part 1: eviction and the threaded variant)
+
+- `Dfa.freeze` records the fold's extent (states, arena marks); a scan that
+  mints past `runtime_cap` (RE#'s 100k default) evicts: arena, tables, index
+  and refsets are truncated back to the fold, and the current state's node is
+  rebuilt through the constructors (`Build.copy_node`) so the scan continues.
+  A cap below the folded prefix is ignored — the first version evicted on
+  every miss forever when the cap was under the fold (10-minute corpus run).
+- Corpus runner: every `matches` case is scanned a third time with a 24-state
+  cap, forcing eviction on any pattern that mints states at scan time (the 59
+  over-budget ones); 331/331 agree. 14 s for the whole run.
+- `Sharp.find_all_grow` returns the regex with its cache extended (S5);
+  `Sharp.with_runtime_cap` exposes the cap for tests.
+- The Homebrew `dotnet-sdk` cask needs `sudo` for its `.pkg`; the SDK is
+  installed user-space with Microsoft's `dotnet-install.sh` into `~/.dotnet`.
