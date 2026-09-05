@@ -27,12 +27,11 @@ Rev := [].{
     ## into one lookup — the hot path for prose). Empty when unfused (word-boundary
     ## DFAs, or a state count over the fuse budget); the scan then falls back to the
     ## class-lookup path.
-    D : { table : List(U32), atable : List(U32), accept_on : List(U8), accept_eoi : List(U8), nc : U32, eoi_only : Bool, anchored : Bool }
-
-    # Cap on fused-table size (entries): 128 per state, so this bounds the extra
-    # artifact bytes at 256 KB (65536 * 4). Larger DFAs skip the fuse.
-    atable_budget : U64
-    atable_budget = 65536
+    ## `accept_bits` packs the per-state accept flags (bit s = state s is a match)
+    ## for <=64-state DFAs, so the scan tests acceptance with a register shift-mask
+    ## instead of a list load; `accept_bits_invalid` marks a DFA too large for it
+    ## (the scan then reads `accept_eoi`). Valid exactly when `atable` is non-empty.
+    D : { table : List(U32), atable : List(U32), accept_bits : U64, accept_on : List(U8), accept_eoi : List(U8), nc : U32, eoi_only : Bool, anchored : Bool }
 
     ## Build both DFAs at compile time (folds when the pattern is constant), or
     ## say why not. `HasLook` -> `^`/`$` assertions (still PikeVM); `TooBig` ->
@@ -161,11 +160,31 @@ Rev := [].{
             Err(e) => Err(e)
             Ok(st) => {
                 n_states = List.len(st.hit)
-                atable = if n_states * 128 <= Rev.atable_budget { Rev.fuse_ascii(st.table, classes.ascii, nc.to_u64(), n_states) } else { [] }
-                Ok({ table: st.table, atable, accept_on: [], accept_eoi: st.hit, nc, eoi_only: False, anchored: False })
+                # Fused path is used only for <=64-state DFAs so the ASCII table
+                # and the accept bitset are valid together (a match state's id
+                # must fit in the U64). Larger DFAs fall back to the class path.
+                atable = if n_states <= 64 { Rev.fuse_ascii(st.table, classes.ascii, nc.to_u64(), n_states) } else { [] }
+                Ok({ table: st.table, atable, accept_bits: Rev.accept_bitset(st.hit, n_states), accept_on: [], accept_eoi: st.hit, nc, eoi_only: False, anchored: False })
             }
         }
     }
+
+    # Pack the per-state accept flags into a single U64 (bit s set iff state s is
+    # a match state), so the scan's per-byte accept test is a register shift-mask
+    # instead of a bounds-checked list load. Only when the DFA fits in 64 states;
+    # `accept_bits_valid` is the sentinel `>64 states -> fall back to the list`.
+    accept_bitset : List(U8), U64 -> U64
+    accept_bitset = |hit, n_states|
+        if n_states > 64 {
+            Rev.accept_bits_invalid
+        } else {
+            List.fold(Rev.upto(n_states), 0, |acc, i|
+                if (List.get(hit, i) ?? 0) == 1 { acc.bitwise_or(1.U64.shl_wrap(i.to_u8_wrap())) } else { acc })
+        }
+
+    # sentinel: not a valid bitset (DFA too large) -> scans use `accept_eoi`.
+    accept_bits_invalid : U64
+    accept_bits_invalid = 0xFFFF_FFFF_FFFF_FFFF
 
     # Build the ASCII-fused transition table: for each state and each ASCII byte,
     # look up its class in `ascii` and pre-resolve the `table[state*nc + class]`
@@ -226,7 +245,7 @@ Rev := [].{
         ciw = List.map(Rev.upto(nc.to_u64()), |a| Trie.accepts_atom(classes, word_set.to_u32_wrap(), a.to_u32_wrap()))
         match Rev.explore_wb(prog, splits, classes, nc, ciw, max_states, [s0f, s0t], { table: [], acc_on: [], acc_eoi: [], smap: [s0f, s0t], next: 2 }) {
             Err(e) => Err(e)
-            Ok(st) => Ok({ table: st.table, atable: [], accept_on: st.acc_on, accept_eoi: st.acc_eoi, nc, eoi_only: False, anchored: False })
+            Ok(st) => Ok({ table: st.table, atable: [], accept_bits: Rev.accept_bits_invalid, accept_on: st.acc_on, accept_eoi: st.acc_eoi, nc, eoi_only: False, anchored: False })
         }
     }
 
@@ -436,7 +455,7 @@ Rev := [].{
 
     fwd : Rev.D, Trie.T, List(U8), U64, U32, Try(U64, [NoMatch]) -> Try(U64, [NoMatch])
     fwd = |d, classes, hay, pos, state, best| {
-        best2 = if (List.get(d.accept_eoi, state.to_u64()) ?? 0) == 1 { Ok(pos) } else { best }
+        best2 = if d.accept_bits.shr_wrap(state.to_u8_wrap()).bitwise_and(1) == 1 { Ok(pos) } else { best }
         if pos >= List.len(hay) {
             best2
         } else {
@@ -532,7 +551,7 @@ Rev := [].{
 
     rev : Rev.D, Trie.T, List(U8), U64, U64, U32, U64 -> U64
     rev = |d, classes, hay, pos, lo, state, best| {
-        best2 = if (List.get(d.accept_eoi, state.to_u64()) ?? 0) == 1 { pos } else { best }
+        best2 = if d.accept_bits.shr_wrap(state.to_u8_wrap()).bitwise_and(1) == 1 { pos } else { best }
         if pos <= lo {
             best2
         } else {
