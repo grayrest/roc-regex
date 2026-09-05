@@ -19,7 +19,31 @@ Regex := [].{
     ## The `engine` field records M3's outcome (D10): `Three` carries the D5
     ## forward+reverse DFAs for a look-free pattern within budget, else `Pike`.
     ## Documented-unstable.
-    T : { prog : List(U32), splits : List(U32), classes : Trie.T, n_groups : U32, prefix : List(U8), rprog : List(U32), rsplits : List(U32), uprog : List(U32), usplits : List(U32), fbytes : List(U8), frange : [NoRange, Range(U8, U8)], exact : Bool, exact_alt : Bool, tlits : List(List(U8)), word_set : U64, engine : [Pike, Three({ fwd : Rev.D, rev : Rev.D, averify : [NoVerify, Verify(Rev.D)], inner : [NoInner, Inner({ lit : List(U8), lrev : Rev.D, end : [FromStart(Rev.D), FromLit(Rev.D)] })] })] }
+    T : { comp : Comp.Compiled, engine : Regex.Engine, plan : Regex.Plan }
+
+    ## M3's outcome (D10): `Three` carries the D5 forward+reverse DFAs for a
+    ## look-free pattern within budget, else the PikeVM.
+    Engine : [Pike, Three(Rev.Engine)]
+
+    ## How a search runs, decided ONCE at compile time and shared by `find`,
+    ## `is_match` and `find_all` — they used to pick their own prefilters, so an
+    ## improvement landed on one and not the others, and the two could disagree.
+    ##
+    ## `scan` produces candidate offsets, `verify` turns a candidate into a span
+    ## or rejects it, and `k` is the selectivity gate: the scan bails to the
+    ## plain engine once it produces more than `len / k` candidates, because past
+    ## that density verifying every candidate costs more than a straight DFA
+    ## pass. `k` therefore tracks the VERIFY cost — an anchored-DFA verify
+    ## rejects in a step or two (~ns) and keeps the loose gate, while a PikeVM
+    ## verify (~µs) keeps the tight one.
+    ##
+    ## Any Teddy tables are built here rather than per call, so a literal pattern
+    ## folds them into the artifact.
+    Plan : {
+        scan : [ScanNone, ScanByte(U8), ScanTeddy(Teddy.T), ScanRange(U8, U8)],
+        verify : [VerEngine, VerMemcmp(List(U8)), VerMemcmpAlt(Teddy.T), VerDfa(Rev.D), VerPike, VerInner(Rev.InnerD)],
+        k : U64,
+    }
 
     ## A match, as half-open BYTE offsets into the haystack (D3, D15).
     Span : { start : U64, end : U64 }
@@ -36,7 +60,7 @@ Regex := [].{
                         Ok(d) => Three(d)
                         Err(_) => Pike
                     }
-                Ok({ prog: c.prog, splits: c.splits, classes: c.classes, n_groups: c.n_groups, prefix: c.prefix, rprog: c.rprog, rsplits: c.rsplits, uprog: c.uprog, usplits: c.usplits, fbytes: c.fbytes, frange: c.frange, exact: c.exact, exact_alt: c.exact_alt, tlits: c.tlits, word_set: c.word_set, engine })
+                Ok({ comp: c, engine, plan: Regex.plan_of(c, engine) })
             }
         }
 
@@ -58,77 +82,37 @@ Regex := [].{
             Err(e) => crash "[${label}] ${Err.render(e)}"
         }
 
-    ## Leftmost-first search over a byte haystack. When a required-literal prefix
-    ## was extracted (M4, D6), scan for it and run the engine anchored at each
-    ## candidate; otherwise the PikeVM's own unanchored search.
+    ## Leftmost-first search over a byte haystack: the first match, or NoMatch.
+    ## Runs the same plan as `find_all` and stops at the first verified
+    ## candidate, so every prefilter reaches this entry point too.
     find : Regex.T, List(U8) -> Try(Regex.Span, [NoMatch])
     find = |re, hay|
-        if !List.is_empty(re.tlits) {
-            # SIMD Teddy over the leading-literal set (M4, D6)
-            match Teddy.build(re.tlits) {
-                Ok(t) => Regex.find_teddy(Regex.base(re), hay, Teddy.candidates(t, hay), 0)
-                Err(_) => Regex.find_engine(re, hay)
-            }
-        } else {
-            Regex.find_engine(re, hay)
+        match re.plan.verify {
+            VerEngine => Regex.find_engine(re, hay)
+            _ =>
+                match Regex.scan_candidates(re.plan, hay) {
+                    Err(_) => Regex.find_engine(re, hay)
+                    Ok(cands) =>
+                        match List.first(Regex.verify_candidates(re, hay, cands, True)) {
+                            Ok(span) => Ok(span)
+                            Err(_) => Err(NoMatch)
+                        }
+                }
         }
 
+    # no prefilter: the engine's own unanchored search
     find_engine : Regex.T, List(U8) -> Try(Regex.Span, [NoMatch])
     find_engine = |re, hay|
         match re.engine {
-            Three(d) => Rev.find(d, re.classes, hay)
-            Pike =>
-                if !List.is_empty(re.prefix) {
-                    Regex.find_pf(Regex.base(re), hay, re.prefix, 0)
-                } else if !List.is_empty(re.fbytes) {
-                    Regex.find_fb(Regex.base(re), hay, re.fbytes, 0)
-                } else {
-                    Pike.wfind(Regex.base(re), hay)
-                }
-        }
-
-    # run the engine anchored at each Teddy candidate, in order; first match wins
-    # (leftmost-first, since every match starts with a leading literal)
-    find_teddy : Comp.Compiled, List(U8), List(U64), U64 -> Try(Regex.Span, [NoMatch])
-    find_teddy = |c, hay, cands, i|
-        match List.get(cands, i) {
-            Err(_) => Err(NoMatch)
-            Ok(at) =>
-                match Pike.wmatch_at(c, hay, at) {
-                    Ok(span) => Ok(span)
-                    Err(_) => Regex.find_teddy(c, hay, cands, i + 1)
-                }
-        }
-
-    # first-byte-set prefilter (D6 second rung): scan for a byte in the set, run
-    # the engine anchored there; every match starts with one of these bytes.
-    find_fb : Comp.Compiled, List(U8), List(U8), U64 -> Try(Regex.Span, [NoMatch])
-    find_fb = |c, hay, set, at|
-        match Lit.find_in_set(hay, at, set) {
-            Err(_) => Err(NoMatch)
-            Ok(cand) =>
-                match Pike.wmatch_at(c, hay, cand) {
-                    Ok(span) => Ok(span)
-                    Err(_) => Regex.find_fb(c, hay, set, cand + 1)
-                }
-        }
-
-    find_pf : Comp.Compiled, List(U8), List(U8), U64 -> Try(Regex.Span, [NoMatch])
-    find_pf = |c, hay, prefix, at|
-        match Lit.find_candidate(hay, at, prefix) {
-            Err(_) => Err(NoMatch)
-            Ok(cand) =>
-                match Pike.wmatch_at(c, hay, cand) {
-                    Ok(span) => Ok(span)
-                    Err(_) => Regex.find_pf(c, hay, prefix, cand + 1)
-                }
+            Three(d) => Rev.find(d, re.comp.classes, hay)
+            Pike => Pike.wfind(re.comp, hay)
         }
 
     ## All capture spans: index 0 is the whole match, i is group i. An
     ## unset/non-participating group is `Err(NoGroup)`.
     captures : Regex.T, List(U8) -> Try(List(Try(Regex.Span, [NoGroup])), [NoMatch])
     captures = |re, hay|
-        match Pike.captures(Regex.base(re), hay) {
+        match Pike.captures(re.comp, hay) {
             Err(_) => Err(NoMatch)
             Ok(slots) => Ok(Regex.pair_slots(slots, 0, []))
         }
@@ -147,16 +131,23 @@ Regex := [].{
     ## PikeVM find, bypassing the engine choice — for differential validation of
     ## the three-pass against the reference simulator.
     find_pike : Regex.T, List(U8) -> Try(Regex.Span, [NoMatch])
-    find_pike = |re, hay| Pike.wfind(Regex.base(re), hay)
+    find_pike = |re, hay| Pike.wfind(re.comp, hay)
 
     ## Whether the pattern matches anywhere in the haystack.
     is_match : Regex.T, List(U8) -> Bool
     is_match = |re, hay|
         match re.engine {
-            # an outermost `$` skips the forward end-scan (see Rev.find_from), so
-            # is_match goes through the full span finder for that case; otherwise
-            # the forward-only DFA suffices.
-            Three(d) => if d.fwd.eoi_only { (match Rev.find(d, re.classes, hay) { Ok(_) => True Err(_) => False }) } else { Rev.is_match(d.fwd, re.classes, hay) }
+            # A forward-only DFA pass answers this without finding the start —
+            # cheaper than `find` when there is no prefilter. But an outermost
+            # `$` (`eoi_only`) skips the forward end-scan entirely (see
+            # `Rev.find_from`), and a prefiltered pattern is better served by its
+            # plan, so both of those go through `find`.
+            Three(d) =>
+                if d.fwd.eoi_only or !(Regex.is_plain(re.plan)) {
+                    match Regex.find(re, hay) { Ok(_) => True Err(_) => False }
+                } else {
+                    Rev.is_match(d.fwd, re.comp.classes, hay)
+                }
             Pike =>
                 match Regex.find(re, hay) {
                     Ok(_) => True
@@ -164,13 +155,8 @@ Regex := [].{
                 }
         }
 
-    # the Comp.Compiled view (drop the engine field) for Pike, which is
-    # engine-agnostic.
-    base : Regex.T -> Comp.Compiled
-    # `anchored_start`/`accept_eoi_only` matter only to the DFA build (they are
-    # baked into the engine there); the PikeVM view keeps the anchors in `prog`,
-    # so they default to False here.
-    base = |re| { prog: re.prog, splits: re.splits, classes: re.classes, n_groups: re.n_groups, prefix: re.prefix, rprog: re.rprog, rsplits: re.rsplits, uprog: re.uprog, usplits: re.usplits, fbytes: re.fbytes, frange: re.frange, exact: re.exact, inline_start: False, exact_alt: False, tlits: re.tlits, word_set: re.word_set, anchored_start: False, accept_eoi_only: False, inner: NoInner }
+    is_plain : Regex.Plan -> Bool
+    is_plain = |plan| match plan.verify { VerEngine => True, _ => False }
 
 
     ## --- iteration and rewriting (D15, D14) ---------------------------------
@@ -187,7 +173,6 @@ Regex := [].{
     ## stack use O(1) regardless of match count.
     all_caps : Regex.T, List(U8) -> List(List(U64))
     all_caps = |re, hay| {
-        comp = Regex.base(re)
         len = List.len(hay)
         var at = 0
         var last_end = Regex.sentinel
@@ -197,7 +182,7 @@ Regex := [].{
             if at > len {
                 running = False
             } else {
-                match Pike.captures_from(comp, hay, at) {
+                match Pike.captures_from(re.comp, hay, at) {
                     Err(_) => {
                         running = False
                     }
@@ -253,197 +238,161 @@ Regex := [].{
     inner_prefilter_k : U64
     inner_prefilter_k = 4
 
-    # Candidate scan for a required literal prefix. A multi-byte prefix uses a
-    # Teddy fingerprint (m<=3 bytes) so candidates ~= actual literal occurrences
-    # rather than every position of a common first byte — e.g. `\bthe\b` (prefix
-    # "the") scans the "the" fingerprint (~2.4k) instead of every `t` (~18k). A
-    # single-byte prefix, or an unsuitable Teddy, keeps the leaner first-byte
-    # memchr.
-    prefix_candidates : List(U8), List(U8), U64 -> Try(List(U64), [TooMany])
-    prefix_candidates = |prefix, hay, cap|
-        if List.len(prefix) >= 2 {
-            match Teddy.build([prefix]) {
-                Ok(t) => Teddy.candidates_capped(t, hay, cap)
-                Err(_) => Teddy.byte_candidates_capped(List.get(prefix, 0) ?? 0, hay, cap)
+    # the plan for a pattern with no usable prefilter
+    plan_engine : Regex.Plan
+    plan_engine = { scan: ScanNone, verify: VerEngine, k: 1 }
+
+    # Choose the search plan. Runs once, at compile time, so for a literal
+    # pattern the whole thing — Teddy tables included — folds into the artifact.
+    # The order is by selectivity: a required prefix beats a leading-literal set,
+    # which beats a first-byte class, which beats a required interior literal.
+    plan_of : Comp.Compiled, Regex.Engine -> Regex.Plan
+    plan_of = |c, engine| {
+        av = match engine { Three(d) => d.averify, Pike => NoVerify }
+        # the verify kind sets the density gate: see `Plan`
+        dv = match av { Verify(d) => VerDfa(d), NoVerify => VerPike }
+        dk = match av { Verify(_) => Regex.inner_prefilter_k, NoVerify => Regex.prefilter_k }
+        if !List.is_empty(c.prefix) {
+            fb = List.get(c.prefix, 0) ?? 0
+            if c.exact {
+                # the match IS the prefix: memcmp verify, fixed-length span, no
+                # DFA and no per-byte trie lookup
+                { scan: ScanByte(fb), verify: VerMemcmp(c.prefix), k: Regex.inner_prefilter_k }
+            } else {
+                # A multi-byte prefix scans a Teddy fingerprint (m<=3), so
+                # candidates ~= actual literal occurrences rather than every
+                # position of a common first byte — `\bthe\b` scans the "the"
+                # fingerprint (~2.4k hits) instead of every `t` (~18k). A
+                # single-byte prefix keeps the leaner first-byte memchr.
+                scan =
+                    if List.len(c.prefix) >= 2 {
+                        match Teddy.build([c.prefix]) {
+                            Ok(t) => ScanTeddy(t)
+                            Err(_) => ScanByte(fb)
+                        }
+                    } else {
+                        ScanByte(fb)
+                    }
+                { scan, verify: dv, k: dk }
+            }
+        } else if !List.is_empty(c.tlits) {
+            # alternation of leading literals (`Sherlock|Holmes|…`): Teddy over
+            # the literal SET
+            match Teddy.build(c.tlits) {
+                Err(_) => Regex.plan_engine
+                Ok(t) =>
+                    if c.exact_alt {
+                        { scan: ScanTeddy(t), verify: VerMemcmpAlt(t), k: Regex.inner_prefilter_k }
+                    } else {
+                        { scan: ScanTeddy(t), verify: dv, k: dk }
+                    }
             }
         } else {
-            Teddy.byte_candidates_capped(List.get(prefix, 0) ?? 0, hay, cap)
+            match engine {
+                # No DFA was built (buried anchors, or over budget). A first-byte
+                # SET still prefilters the PikeVM: one-byte literals give a Teddy
+                # whose fingerprint is exact, so candidates are exactly the
+                # positions holding one of those bytes.
+                Pike =>
+                    if List.len(c.fbytes) == 1 {
+                        { scan: ScanByte(List.get(c.fbytes, 0) ?? 0), verify: VerPike, k: Regex.prefilter_k }
+                    } else if !List.is_empty(c.fbytes) {
+                        match Teddy.build(List.map(c.fbytes, |b| [b])) {
+                            Ok(t) => { scan: ScanTeddy(t), verify: VerPike, k: Regex.prefilter_k }
+                            Err(_) => Regex.plan_engine
+                        }
+                    } else {
+                        Regex.plan_engine
+                    }
+                Three(d) =>
+                    match c.frange {
+                        # First-byte class prefilter: SIMD range-scan for the next
+                        # byte in [lo,hi]. Turns a sparse class (`[0-9]{2,4}`)
+                        # from a full per-byte DFA pass into a scan over just the
+                        # candidate bytes.
+                        Range(lo, hi) =>
+                            match av {
+                                Verify(x) => { scan: ScanRange(lo, hi), verify: VerDfa(x), k: Regex.inner_prefilter_k }
+                                NoVerify => Regex.plan_engine
+                            }
+                        # No leading literal or class — but maybe a required
+                        # INTERIOR literal (`\w+@\w+`): memchr it, then a local
+                        # reverse/forward search per hit.
+                        NoRange =>
+                            match d.inner {
+                                Inner(inr) => { scan: ScanByte(List.get(inr.lit, 0) ?? 0), verify: VerInner(inr), k: Regex.inner_prefilter_k }
+                                NoInner => Regex.plan_engine
+                            }
+                    }
+            }
         }
+    }
 
     find_all : Regex.T, List(U8) -> List(Regex.Span)
     find_all = |re, hay|
-        # With a required literal prefix, SIMD-scan for candidates and verify each
-        # — a big win when the literal is rare. The capped scan bails to the DFA
-        # when the literal is dense (candidates > len/prefilter_k), where scanning
-        # every byte with the DFA is cheaper than verifying at every candidate.
-        if !List.is_empty(re.prefix) {
-            # memchr-style scan for the prefix's FIRST byte, then verify each
-            # candidate. Leaner than a Teddy fingerprint (one eq per window, no
-            # dedup). The cap tracks the verify cost: an anchored-DFA verify
-            # rejects a false positive in a step or two (~ns), so it keeps the
-            # loose `inner_prefilter_k` gate — a selective-but-frequent first byte
-            # like Holmes's `H` (one per match, but >len/512) still prefilters
-            # rather than falling to a full DFA pass. The PikeVM verify is ~µs, so
-            # it keeps the tight `prefilter_k` gate.
-            fb = List.get(re.prefix, 0) ?? 0
-            if re.exact {
-                # Pure literal: the match IS the prefix, so verify with a memcmp
-                # and emit a fixed-length span — no DFA, no trie lookups per byte.
-                match Teddy.byte_candidates_capped(fb, hay, List.len(hay) // Regex.inner_prefilter_k) {
-                    Ok(cands) => Regex.find_all_literal(re.prefix, hay, cands)
+        match re.plan.verify {
+            VerEngine => Regex.find_all_engine(re, hay)
+            # A pure literal alternation is the one plan whose verify can run
+            # INSIDE the scan: the matches are exactly the branch literals, so
+            # the fused scan never materializes a candidate list. `find` still
+            # runs it through the shared loop, which stops at the first hit.
+            VerMemcmpAlt(t) =>
+                match Teddy.match_lits(t, hay, List.len(hay) // re.plan.k) {
+                    Ok(spans) => spans
                     Err(_) => Regex.find_all_engine(re, hay)
                 }
-            } else {
-                verify = match re.engine {
-                    Three(d) => d.averify
-                    Pike => NoVerify
-                }
-                k = match verify {
-                    Verify(_) => Regex.inner_prefilter_k
-                    NoVerify => Regex.prefilter_k
-                }
-                match Regex.prefix_candidates(re.prefix, hay, List.len(hay) // k) {
-                    Ok(cands) =>
-                        match verify {
-                            Verify(av) => Regex.find_all_teddy_dfa(av, re.classes, hay, cands)
-                            NoVerify => Regex.find_all_teddy(Regex.base(re), hay, cands)
-                        }
+            _ =>
+                match Regex.scan_candidates(re.plan, hay) {
+                    Ok(cands) => Regex.verify_candidates(re, hay, cands, False)
+                    # too many candidates for the prefilter to pay for itself
                     Err(_) => Regex.find_all_engine(re, hay)
                 }
-            }
-        } else if !List.is_empty(re.tlits) {
-            # Alternation of leading literals (e.g. `Sherlock|Holmes|…`): SIMD Teddy
-            # over the literal SET for candidates. A pure literal alternation
-            # (`exact_alt`) verifies each candidate by memcmp — which branch, in
-            # order — and emits a fixed-length span, no DFA. Otherwise the branches
-            # carry more structure, so verify with the anchored DFA (or PikeVM).
-            verify = match re.engine {
-                Three(d) => d.averify
-                Pike => NoVerify
-            }
-            k = if re.exact_alt {
-                Regex.inner_prefilter_k
-            } else {
-                match verify {
-                    Verify(_) => Regex.inner_prefilter_k
-                    NoVerify => Regex.prefilter_k
-                }
-            }
-            match Teddy.build(re.tlits) {
-                Ok(t) =>
-                    if re.exact_alt {
-                        # fused monomorphic scan + memcmp verify (no candidate list,
-                        # no dedup sort) — matches are exactly the branch literals.
-                        match Teddy.match_lits(t, hay, List.len(hay) // k) {
-                            Ok(spans) => spans
-                            Err(_) => Regex.find_all_engine(re, hay)
-                        }
-                    } else {
-                        match Teddy.candidates_capped(t, hay, List.len(hay) // k) {
-                            Ok(cands) =>
-                                match verify {
-                                    Verify(av) => Regex.find_all_teddy_dfa(av, re.classes, hay, cands)
-                                    NoVerify => Regex.find_all_teddy(Regex.base(re), hay, cands)
-                                }
-                            Err(_) => Regex.find_all_engine(re, hay)
-                        }
-                    }
-                Err(_) => Regex.find_all_engine(re, hay)
-            }
-        } else {
-            match re.engine {
-                Three(d) =>
-                    match re.frange {
-                        # First-byte class prefilter: SIMD range-scan for the next
-                        # byte in [lo,hi], verify each with the anchored DFA. Turns
-                        # a sparse class (e.g. `[0-9]{2,4}`) from a full per-byte
-                        # DFA pass into a scan over just the candidate bytes. Same
-                        # short-verify economics as the inner path → same cap.
-                        Range(lo, hi) =>
-                            match d.averify {
-                                Verify(av) =>
-                                    match Teddy.range_candidates_capped(lo, hi, hay, List.len(hay) // Regex.inner_prefilter_k) {
-                                        Ok(cands) => Regex.find_all_teddy_dfa(av, re.classes, hay, cands)
-                                        Err(_) => Regex.find_all_engine(re, hay)
-                                    }
-                                NoVerify => Regex.find_all_engine(re, hay)
-                            }
-                        # No leading literal or class — but maybe a required
-                        # INTERIOR literal (e.g. `\w+@\w+`): memchr it, then a
-                        # local reverse/forward search per hit.
-                        NoRange =>
-                            match d.inner {
-                                Inner(inr) =>
-                                    match Teddy.byte_candidates_capped(List.get(inr.lit, 0) ?? 0, hay, List.len(hay) // Regex.inner_prefilter_k) {
-                                        Ok(cands) => Regex.find_all_inner(inr, re.classes, hay, cands)
-                                        Err(_) => Regex.find_all_engine(re, hay)
-                                    }
-                                NoInner => Regex.find_all_engine(re, hay)
-                            }
-                    }
-                Pike => Regex.find_all_engine(re, hay)
-            }
         }
 
-    # reverse-inner verify: for each interior-literal candidate `p`, run the
-    # reverse DFA of LEFT·lit backward from `p+litlen` (floored at the previous
-    # match end). It both confirms the literal is present at `p` and yields the
-    # leftmost start `s`. The end comes from `end`: `FromStart(full)` runs the
-    # anchored full-pattern DFA from `s` (greedy-correct for a LEFT that can run
-    # past the literal); `FromLit(rfwd)` runs the anchored lit·RIGHT DFA from `p`
-    # (hard separator — the end is RIGHT-determined, so LEFT isn't re-scanned).
-    find_all_inner : { lit : List(U8), lrev : Rev.D, end : [FromStart(Rev.D), FromLit(Rev.D)] }, Trie.T, List(U8), List(U64) -> List(Regex.Span)
-    find_all_inner = |inr, classes, hay, cands| {
-        ncand = List.len(cands)
-        len = List.len(hay)
-        litlen = List.len(inr.lit)
-        var i = 0
-        var last_end = 0
-        var acc = []
-        var running = True
-        while running {
-            if i >= ncand {
-                running = False
-            } else {
-                p = List.get(cands, i) ?? 0
-                pe = p + litlen
-                if p < last_end or pe > len {
-                    i = i + 1
-                } else {
-                    match Rev.run_rev_check(inr.lrev, classes, hay, pe, last_end) {
-                        Err(_) => {
-                            i = i + 1
-                        }
-                        Ok(s) => {
-                            end_r =
-                                match inr.end {
-                                    FromStart(full) => Rev.run_fwd_from(full, classes, hay, s)
-                                    FromLit(rfwd) => Rev.run_fwd_from(rfwd, classes, hay, p)
-                                }
-                            match end_r {
-                                Err(_) => {
-                                    i = i + 1
-                                }
-                                Ok(e) => {
-                                    acc = List.append(acc, { start: s, end: e })
-                                    last_end = e
-                                    i = i + 1
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+    # The candidate scan. Every arm is capped at `len / k`: past that density the
+    # prefilter loses to a straight DFA pass, and `Err(TooMany)` says so.
+    scan_candidates : Regex.Plan, List(U8) -> Try(List(U64), [TooMany])
+    scan_candidates = |plan, hay| {
+        cap = List.len(hay) // plan.k
+        match plan.scan {
+            ScanNone => Ok([])
+            ScanByte(b) => Teddy.byte_candidates_capped(b, hay, cap)
+            ScanTeddy(t) => Teddy.candidates_capped(t, hay, cap)
+            ScanRange(lo, hi) => Teddy.range_candidates_capped(lo, hi, hay, cap)
         }
-        acc
     }
 
-    # pure-literal verify: the whole match is the literal, so a memcmp confirms a
-    # candidate and the span is a fixed length. No DFA, no per-byte trie lookup.
-    # A literal is never empty, so a candidate inside the previous match is
-    # skipped (keeps matches non-overlapping and leftmost-first).
-    find_all_literal : List(U8), List(U8), List(U64) -> List(Regex.Span)
-    find_all_literal = |lit, hay, cands| {
+    # The candidate loop, specialized per verify kind. The plan is matched ONCE,
+    # here, and each loop below is monomorphic.
+    #
+    # A single loop with the `match plan.verify` inside it reads better and was
+    # tried first, but extracting the tag payload every iteration cost 14% on
+    # bounded_num and 6% on word_bound (hoisting the tag to a local did not help
+    # — it is the payload extraction, not the field read). Same lesson as the
+    # closure-fused Teddy scan: in Roc, the hot loop wants nothing polymorphic in
+    # it. What the loops share instead is their SHAPE and this comment: take the
+    # next candidate, skip it if it falls inside the previous match (which is
+    # what keeps matches non-overlapping and leftmost-first), verify, append.
+    # `first_only` stops after one match — that is `find`.
+    #
+    # Every plan that reaches here has a required literal, class or interior
+    # literal, so the pattern cannot match empty and needs no empty-match
+    # advance; that lives in `find_all_engine`, for the patterns that can.
+    verify_candidates : Regex.T, List(U8), List(U64), Bool -> List(Regex.Span)
+    verify_candidates = |re, hay, cands, first_only|
+        match re.plan.verify {
+            VerMemcmp(lit) => Regex.verify_memcmp(lit, hay, cands, first_only)
+            VerMemcmpAlt(t) => Regex.verify_memcmp_alt(t, hay, cands, first_only)
+            VerDfa(av) => Regex.verify_dfa(av, re.comp.classes, hay, cands, first_only)
+            VerPike => Regex.verify_pike(re.comp, hay, cands, first_only)
+            VerInner(inr) => Regex.verify_inner_all(inr, re.comp.classes, hay, cands, first_only)
+            VerEngine => []
+        }
+
+    # the match IS the literal: one memcmp, fixed-length span, no DFA and no
+    # per-byte trie lookup
+    verify_memcmp : List(U8), List(U8), List(U64), Bool -> List(Regex.Span)
+    verify_memcmp = |lit, hay, cands, first_only| {
         ncand = List.len(cands)
         len = List.len(hay)
         plen = List.len(lit)
@@ -466,18 +415,51 @@ Regex := [].{
                     acc = List.append(acc, { start: at, end: at + plen })
                     last_end = at + plen
                     i = i + 1
+                    running = !first_only
                 }
             }
         }
         acc
     }
 
-    # verify literal-prefix candidates with the anchored DFA: run it from each
-    # candidate — matches iff the pattern matches there, a tight table loop with
-    # no per-candidate allocation. A literal-prefixed pattern never matches empty,
-    # so a candidate inside the previous match is skipped.
-    find_all_teddy_dfa : Rev.D, Trie.T, List(U8), List(U64) -> List(Regex.Span)
-    find_all_teddy_dfa = |av, classes, hay, cands| {
+    # pure literal alternation: which branch matches here, in pattern order
+    verify_memcmp_alt : Teddy.T, List(U8), List(U64), Bool -> List(Regex.Span)
+    verify_memcmp_alt = |t, hay, cands, first_only| {
+        ncand = List.len(cands)
+        len = List.len(hay)
+        var i = 0
+        var last_end = 0
+        var acc = []
+        var running = True
+        while running {
+            if i >= ncand {
+                running = False
+            } else {
+                at = List.get(cands, i) ?? 0
+                if at < last_end {
+                    i = i + 1
+                } else {
+                    match Teddy.lit_end(t, hay, at, 0, len) {
+                        Err(_) => {
+                            i = i + 1
+                        }
+                        Ok(e) => {
+                            acc = List.append(acc, { start: at, end: e })
+                            last_end = e
+                            i = i + 1
+                            running = !first_only
+                        }
+                    }
+                }
+            }
+        }
+        acc
+    }
+
+    # anchored DFA from the candidate: it matches iff the pattern matches THERE,
+    # a tight table loop with no per-candidate allocation
+    verify_dfa : Rev.D, Trie.T, List(U8), List(U64), Bool -> List(Regex.Span)
+    verify_dfa = |av, classes, hay, cands, first_only| {
         ncand = List.len(cands)
         var i = 0
         var last_end = 0
@@ -492,13 +474,14 @@ Regex := [].{
                     i = i + 1
                 } else {
                     match Rev.run_fwd_from(av, classes, hay, at) {
-                        Ok(end) => {
-                            acc = List.append(acc, { start: at, end })
-                            last_end = end
-                            i = i + 1
-                        }
                         Err(_) => {
                             i = i + 1
+                        }
+                        Ok(e) => {
+                            acc = List.append(acc, { start: at, end: e })
+                            last_end = e
+                            i = i + 1
+                            running = !first_only
                         }
                     }
                 }
@@ -507,10 +490,9 @@ Regex := [].{
         acc
     }
 
-    # verify literal-prefix candidates with the PikeVM (anchor patterns / Pike
-    # engine, where no anchored verify DFA was built).
-    find_all_teddy : Comp.Compiled, List(U8), List(U64) -> List(Regex.Span)
-    find_all_teddy = |c, hay, cands| {
+    # anchor patterns / PikeVM engine, where no anchored verify DFA was built
+    verify_pike : Comp.Compiled, List(U8), List(U64), Bool -> List(Regex.Span)
+    verify_pike = |c, hay, cands, first_only| {
         ncand = List.len(cands)
         var i = 0
         var last_end = 0
@@ -525,13 +507,14 @@ Regex := [].{
                     i = i + 1
                 } else {
                     match Pike.wmatch_at(c, hay, at) {
+                        Err(_) => {
+                            i = i + 1
+                        }
                         Ok(span) => {
                             acc = List.append(acc, span)
                             last_end = span.end
                             i = i + 1
-                        }
-                        Err(_) => {
-                            i = i + 1
+                            running = !first_only
                         }
                     }
                 }
@@ -540,9 +523,72 @@ Regex := [].{
         acc
     }
 
+    # required interior literal: a local reverse scan for the start, then forward
+    verify_inner_all : Rev.InnerD, Trie.T, List(U8), List(U64), Bool -> List(Regex.Span)
+    verify_inner_all = |inr, classes, hay, cands, first_only| {
+        ncand = List.len(cands)
+        len = List.len(hay)
+        var i = 0
+        var last_end = 0
+        var acc = []
+        var running = True
+        while running {
+            if i >= ncand {
+                running = False
+            } else {
+                at = List.get(cands, i) ?? 0
+                if at < last_end {
+                    i = i + 1
+                } else {
+                    match Regex.verify_inner(inr, classes, hay, at, last_end, len) {
+                        Err(_) => {
+                            i = i + 1
+                        }
+                        Ok(span) => {
+                            acc = List.append(acc, span)
+                            last_end = span.end
+                            i = i + 1
+                            running = !first_only
+                        }
+                    }
+                }
+            }
+        }
+        acc
+    }
+
+    # Reverse-inner verify for an interior-literal candidate `p`: run the reverse
+    # DFA of LEFT·lit backward from `p+litlen` (floored at the previous match
+    # end). It both confirms the literal is at `p` and yields the leftmost start
+    # `s`. The end comes from `end`: `FromStart(full)` runs the anchored
+    # full-pattern DFA from `s` (greedy-correct for a LEFT that can run past the
+    # literal); `FromLit(rfwd)` runs the anchored lit·RIGHT DFA from `p` (hard
+    # separator — the end is RIGHT-determined, so LEFT isn't re-scanned).
+    verify_inner : Rev.InnerD, Trie.T, List(U8), U64, U64, U64 -> Try(Regex.Span, [NoMatch])
+    verify_inner = |inr, classes, hay, p, floor, len| {
+        pe = p + List.len(inr.lit)
+        if pe > len {
+            Err(NoMatch)
+        } else {
+            match Rev.run_rev_check(inr.lrev, classes, hay, pe, floor) {
+                Err(_) => Err(NoMatch)
+                Ok(s) => {
+                    end_r =
+                        match inr.end {
+                            FromStart(full) => Rev.run_fwd_from(full, classes, hay, s)
+                            FromLit(rfwd) => Rev.run_fwd_from(rfwd, classes, hay, p)
+                        }
+                    match end_r {
+                        Err(_) => Err(NoMatch)
+                        Ok(e) => Ok({ start: s, end: e })
+                    }
+                }
+            }
+        }
+    }
+
     find_all_engine : Regex.T, List(U8) -> List(Regex.Span)
     find_all_engine = |re, hay| {
-        comp = Regex.base(re)
         len = List.len(hay)
         var at = 0
         var last_end = Regex.sentinel
@@ -556,8 +602,8 @@ Regex := [].{
                 # the PikeVM otherwise. Same empty-match advancement either way.
                 next =
                     match re.engine {
-                        Three(d) => Rev.find_from(d, re.classes, hay, at)
-                        Pike => Pike.wfind_from(comp, hay, at)
+                        Three(d) => Rev.find_from(d, re.comp.classes, hay, at)
+                        Pike => Pike.wfind_from(re.comp, hay, at)
                     }
                 match next {
                     Err(_) => {

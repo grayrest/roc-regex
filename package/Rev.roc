@@ -43,12 +43,24 @@ Rev := [].{
     ## or when over the fuse budget (scan falls back to `fwd_wb_c`/`rev_wb_c`).
     D : { table : List(U32), atable : List(U32), awb : List(U32), accept_bits : U64, accept_on : List(U8), accept_eoi : List(U8), nc : U32, eoi_only : Bool, anchored : Bool, inline_start : Bool }
 
+    ## The reverse-inner literal prefilter: `lrev` is the reverse DFA of LEFT·lit
+    ## (run backward from `p+litlen` it confirms the literal and yields the
+    ## leftmost start) and `end` says where the match end comes from.
+    InnerD : { lit : List(U8), lrev : Rev.D, end : [FromStart(Rev.D), FromLit(Rev.D)] }
+
+    ## Everything the three-pass search needs: the forward and reverse DFAs, an
+    ## anchored verify DFA for prefilter candidates when one could be built, and
+    ## the reverse-inner prefilter when the pattern has a required interior
+    ## literal. Named once — it used to be spelled out at every signature that
+    ## carried it, in this module and in `Regex`.
+    Engine : { fwd : Rev.D, rev : Rev.D, averify : [NoVerify, Verify(Rev.D)], inner : [NoInner, Inner(Rev.InnerD)] }
+
     ## Build both DFAs at compile time (folds when the pattern is constant), or
     ## say why not. `HasLook` -> `^`/`$` assertions (still PikeVM); `TooBig` ->
     ## over budget; either downgrades to the PikeVM (D10). `\b`/`\B` are handled
     ## in the determinizer (word boundaries baked into the transition function
     ## over the codepoint alphabet).
-    build : Comp.Compiled, U64 -> Try({ fwd : Rev.D, rev : Rev.D, averify : [NoVerify, Verify(Rev.D)], inner : [NoInner, Inner({ lit : List(U8), lrev : Rev.D, end : [FromStart(Rev.D), FromLit(Rev.D)] })] }, [HasLook, TooBig])
+    build : Comp.Compiled, U64 -> Try(Rev.Engine, [HasLook, TooBig])
     build = |c, max_states|
         # `uprog`/`rprog` have outermost `^`/`$` stripped (Comp), so an anchor
         # remaining here is a *buried* one -> bail to the PikeVM.
@@ -136,7 +148,7 @@ Rev := [].{
         }
 
     ## Run prebuilt DFAs: leftmost-first span, or NoMatch.
-    find : { fwd : Rev.D, rev : Rev.D, averify : [NoVerify, Verify(Rev.D)], inner : [NoInner, Inner({ lit : List(U8), lrev : Rev.D, end : [FromStart(Rev.D), FromLit(Rev.D)] })] }, Trie.T, List(U8) -> Try({ start : U64, end : U64 }, [NoMatch])
+    find : Rev.Engine, Trie.T, List(U8) -> Try({ start : U64, end : U64 }, [NoMatch])
     find = |d, classes, hay| Rev.find_from(d, classes, hay, 0)
 
     ## Leftmost-first span at-or-after `at` — the iterator step for `find_all`.
@@ -147,7 +159,7 @@ Rev := [].{
     ## is `len` by definition, so we only run the reverse from `len` to find the
     ## leftmost start (>= `at`), reporting NoMatch when no match ends at `len`.
     ## An outermost `^` (`anchored`) additionally requires that start to be 0.
-    find_from : { fwd : Rev.D, rev : Rev.D, averify : [NoVerify, Verify(Rev.D)], inner : [NoInner, Inner({ lit : List(U8), lrev : Rev.D, end : [FromStart(Rev.D), FromLit(Rev.D)] })] }, Trie.T, List(U8), U64 -> Try({ start : U64, end : U64 }, [NoMatch])
+    find_from : Rev.Engine, Trie.T, List(U8), U64 -> Try({ start : U64, end : U64 }, [NoMatch])
     find_from = |d, classes, hay, at|
         if d.fwd.eoi_only {
             len = List.len(hay)
