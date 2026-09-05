@@ -29,7 +29,7 @@ Rev := [].{
     ## class-lookup path.
     ## `accept_bits` packs the per-state accept flags (bit s = state s is a match)
     ## for <=64-state DFAs, so the scan tests acceptance with a register shift-mask
-    ## instead of a list load; `accept_bits_invalid` marks a DFA too large for it
+    ## instead of a list load; a DFA too large for it leaves the bitset 0 and
     ## (the scan then reads `accept_eoi`). Valid exactly when `atable` is non-empty.
     ## `inline_start` (forward D only): the pattern is a single-class run, so the
     ## forward scan can recover the match start itself (last exit from the start
@@ -192,7 +192,7 @@ Rev := [].{
                 # Fused path is used only for <=64-state DFAs so the ASCII table
                 # and the accept bitset are valid together (a match state's id
                 # must fit in the U64). Larger DFAs fall back to the class path.
-                atable = if n_states <= 64 { Rev.fuse_ascii(st.table, classes.ascii, nc.to_u64(), n_states) } else { [] }
+                atable = if n_states <= Rev.max_bitset_states { Rev.fuse_ascii(st.table, classes.ascii, nc.to_u64(), n_states) } else { [] }
                 Ok({ table: st.table, atable, awb: [], accept_bits: Rev.accept_bitset(st.hit, n_states), accept_on: [], accept_eoi: st.hit, nc, eoi_only: False, anchored: False, inline_start: False })
             }
         }
@@ -204,23 +204,31 @@ Rev := [].{
     # `accept_bits_valid` is the sentinel `>64 states -> fall back to the list`.
     accept_bitset : List(U8), U64 -> U64
     accept_bitset = |hit, n_states|
-        if n_states > 64 {
-            Rev.accept_bits_invalid
+        if n_states > Rev.max_bitset_states {
+            0
         } else {
-            List.fold(Rev.upto(n_states), 0, |acc, i|
+            List.fold(Trie.upto(n_states), 0, |acc, i|
                 if (List.get(hit, i) ?? 0) == 1 { acc.bitwise_or(1.U64.shl_wrap(i.to_u8_wrap())) } else { acc })
         }
 
-    # sentinel: not a valid bitset (DFA too large) -> scans use `accept_eoi`.
-    accept_bits_invalid : U64
-    accept_bits_invalid = 0xFFFF_FFFF_FFFF_FFFF
+    # A state id has to fit in the U64 accept bitset for the fused scan to use
+    # it, so the fused ASCII table and the bitset share this bound. Over the
+    # bound the bitset is 0 and unused: every scan that reads it is selected by a
+    # non-empty `atable`, which the same bound gates.
+    max_bitset_states : U64
+    max_bitset_states = 64
+
+    # The word-boundary fused table has no bitset (accept rides in the entry), so
+    # it is bounded by the artifact budget instead: 128 entries/state * 4 bytes.
+    max_fused_wb_states : U64
+    max_fused_wb_states = 512
 
     # Build the ASCII-fused transition table: for each state and each ASCII byte,
     # look up its class in `ascii` and pre-resolve the `table[state*nc + class]`
     # transition, so the scan indexes `atable[state*128 + byte]` directly.
     fuse_ascii : List(U32), List(U32), U64, U64 -> List(U32)
     fuse_ascii = |table, ascii, nc, n_states|
-        List.map(Rev.upto(n_states * 128), |i| {
+        List.map(Trie.upto(n_states * 128), |i| {
             s = i // 128
             b = i % 128
             cls = List.get(ascii, b) ?? 0
@@ -234,7 +242,7 @@ Rev := [].{
     # class_of + two list loads.
     fuse_wb_ascii : List(U32), List(U8), List(U32), U64, U64 -> List(U32)
     fuse_wb_ascii = |table, accept_on, ascii, nc, n_states|
-        List.map(Rev.upto(n_states * 128), |i| {
+        List.map(Trie.upto(n_states * 128), |i| {
             s = i // 128
             b = i % 128
             cls = List.get(ascii, b) ?? 0
@@ -252,8 +260,8 @@ Rev := [].{
                 if (List.len(st.smap)).to_u64() > max_states {
                     Err(TooBig)
                 } else {
-                is_m = List.any(set, |pc| Comp.inst_op(List.get(prog, pc.to_u64()) ?? 0) == Comp.op_match)
-                r = List.fold(Rev.upto(nc.to_u64()), { st, work: rest, ids: [] }, |acc, cls| {
+                is_m = Rev.is_match_pc(prog, set)
+                r = List.fold(Trie.upto(nc.to_u64()), { st, work: rest, ids: [] }, |acc, cls| {
                     tset = Rev.step(prog, splits, classes, set, cls.to_u32_wrap(), keep_all)
                     if List.is_empty(tset) {
                         { st: acc.st, work: acc.work, ids: List.append(acc.ids, 0) }
@@ -288,15 +296,15 @@ Rev := [].{
         pcs0 = Rev.close_pri(prog, splits, [0], [], keep_all)
         s0f = { pcs: pcs0, lw: False }
         s0t = { pcs: pcs0, lw: True }
-        ciw = List.map(Rev.upto(nc.to_u64()), |a| Trie.accepts_atom(classes, word_set.to_u32_wrap(), a.to_u32_wrap()))
+        ciw = List.map(Trie.upto(nc.to_u64()), |a| Trie.accepts_atom(classes, word_set.to_u32_wrap(), a.to_u32_wrap()))
         match Rev.explore_wb(prog, splits, classes, nc, ciw, max_states, [s0f, s0t], { table: [], acc_on: [], acc_eoi: [], smap: [s0f, s0t], next: 2 }, keep_all) {
             Err(e) => Err(e)
             Ok(st) => {
                 n_states = List.len(st.acc_eoi)
                 # fuse transition + per-transition accept into one ASCII table
                 # (256 KB budget: 128 entries/state * 4 bytes).
-                awb = if n_states <= 512 { Rev.fuse_wb_ascii(st.table, st.acc_on, classes.ascii, nc.to_u64(), n_states) } else { [] }
-                Ok({ table: st.table, atable: [], awb, accept_bits: Rev.accept_bits_invalid, accept_on: st.acc_on, accept_eoi: st.acc_eoi, nc, eoi_only: False, anchored: False, inline_start: False })
+                awb = if n_states <= Rev.max_fused_wb_states { Rev.fuse_wb_ascii(st.table, st.acc_on, classes.ascii, nc.to_u64(), n_states) } else { [] }
+                Ok({ table: st.table, atable: [], awb, accept_bits: 0, accept_on: st.acc_on, accept_eoi: st.acc_eoi, nc, eoi_only: False, anchored: False, inline_start: False })
             }
         }
     }
@@ -314,28 +322,20 @@ Rev := [].{
                 } else {
                     lw = state.lw
                     # accept at end-of-input: right side is non-word
-                    eoi = Rev.close_resolve(prog, splits, state.pcs, [], [], lw != False, lw == False, keep_all)
+                    eoi = Rev.close_resolve(prog, splits, state.pcs, lw != False, lw == False, keep_all)
                     is_eoi = Rev.is_match_pc(prog, eoi)
-                    r = List.fold(Rev.upto(nc.to_u64()), { st, work: rest, ids: [], accs: [] }, |acc, cls| {
+                    r = List.fold(Trie.upto(nc.to_u64()), { st, work: rest, ids: [], accs: [] }, |acc, cls| {
                         rw = List.get(ciw, cls) ?? False
                         wok = lw != rw
-                        resolved = Rev.close_resolve(prog, splits, state.pcs, [], [], wok, !wok, keep_all)
+                        resolved = Rev.close_resolve(prog, splits, state.pcs, wok, !wok, keep_all)
                         accept = if Rev.is_match_pc(prog, resolved) { 1 } else { 0 }
-                        moved = List.fold(resolved, [], |m, pc| {
-                            w = List.get(prog, pc.to_u64()) ?? 0
-                            if Comp.inst_op(w) == Comp.op_char and Trie.accepts_atom(classes, Comp.inst_arg(w), cls.to_u32_wrap()) {
-                                List.append(m, pc + 1)
-                            } else {
-                                m
-                            }
-                        })
-                        tset = Rev.close_pri(prog, splits, moved, [], keep_all)
+                        tset = Rev.step(prog, splits, classes, resolved, cls.to_u32_wrap(), keep_all)
                         accs2 = List.append(acc.accs, accept)
                         if List.is_empty(tset) {
                             { st: acc.st, work: acc.work, ids: List.append(acc.ids, 0), accs: accs2 }
                         } else {
                             tstate = { pcs: tset, lw: rw }
-                            match Rev.index_of_wb(acc.st.smap, tstate) {
+                            match Rev.index_of(acc.st.smap, tstate) {
                                 Ok(id) => { st: acc.st, work: acc.work, ids: List.append(acc.ids, id + 1), accs: accs2 }
                                 Err(_) => {
                                     nid = acc.st.next
@@ -350,25 +350,26 @@ Rev := [].{
             }
         }
 
-    index_of_wb : List(Rev.WbState), Rev.WbState -> Try(U32, [NotFound])
-    index_of_wb = |states, target| Rev.iw_loop(states, target, 0)
-    iw_loop = |states, target, i|
-        match List.get(states, i.to_u64()) {
-            Err(_) => Err(NotFound)
-            Ok(s) => if s.lw == target.lw and s.pcs == target.pcs { Ok(i) } else { Rev.iw_loop(states, target, i + 1) }
-        }
 
-    # resolve pending Looks in `stack` at a position with the given
-    # word-boundary / non-word-boundary flags, following satisfied assertions and
-    # dropping unsatisfied ones; yields Char/Match pcs in priority order.
-    close_resolve : List(U32), List(U32), List(U32), List(U32), List(U32), Bool, Bool, Bool -> List(U32)
-    close_resolve = |prog, splits, stack, seen, out, wok, nwok, keep_all|
+    # How a pending `\b`/`\B` is handled during the closure. `Pending` leaves the
+    # assertion in the set for a later transition to resolve once both sides'
+    # word-ness are known; `Resolve(wok, nwok)` is that later transition, at a
+    # boundary whose word-ness is known, following satisfied assertions and
+    # dropping unsatisfied ones. Look-free programs never reach either arm.
+    Looks : [Pending, Resolve(Bool, Bool)]
+
+    # Priority-preserving epsilon closure, processed front-to-back (DFS, higher
+    # priority first). Returns Char/Match pcs in priority order, deduped keeping
+    # the first. `seen` tracks EVERY visited pc (split/jmp/save included), so an
+    # epsilon cycle through a nullable loop (`(a*)+`) terminates.
+    close : List(U32), List(U32), List(U32), List(U32), List(U32), Rev.Looks, Bool -> List(U32)
+    close = |prog, splits, stack, seen, out, looks, keep_all|
         match List.first(stack) {
             Err(_) => out
             Ok(pc) => {
                 rest = List.drop_first(stack, 1)
                 if List.contains(seen, pc) {
-                    Rev.close_resolve(prog, splits, rest, seen, out, wok, nwok, keep_all)
+                    Rev.close(prog, splits, rest, seen, out, looks, keep_all)
                 } else {
                     seen2 = List.append(seen, pc)
                     w = List.get(prog, pc.to_u64()) ?? 0
@@ -377,34 +378,51 @@ Rev := [].{
                     if op == Comp.op_split {
                         t1 = List.get(splits, arg.to_u64()) ?? 0
                         t2 = List.get(splits, (arg + 1).to_u64()) ?? 0
-                        Rev.close_resolve(prog, splits, List.concat([t1, t2], rest), seen2, out, wok, nwok, keep_all)
+                        Rev.close(prog, splits, List.concat([t1, t2], rest), seen2, out, looks, keep_all)
                     } else if op == Comp.op_jmp {
-                        Rev.close_resolve(prog, splits, List.prepend(rest, arg), seen2, out, wok, nwok, keep_all)
+                        Rev.close(prog, splits, List.prepend(rest, arg), seen2, out, looks, keep_all)
                     } else if op == Comp.op_save {
-                        Rev.close_resolve(prog, splits, List.prepend(rest, pc + 1), seen2, out, wok, nwok, keep_all)
+                        Rev.close(prog, splits, List.prepend(rest, pc + 1), seen2, out, looks, keep_all)
                     } else if op == Comp.op_look {
-                        pass = if arg == Comp.look_wordb { wok } else if arg == Comp.look_nwordb { nwok } else { False }
-                        if pass {
-                            Rev.close_resolve(prog, splits, List.prepend(rest, pc + 1), seen2, out, wok, nwok, keep_all)
-                        } else {
-                            Rev.close_resolve(prog, splits, rest, seen2, out, wok, nwok, keep_all)
+                        match looks {
+                            Pending => Rev.close(prog, splits, rest, seen2, List.append(out, pc), looks, keep_all)
+                            Resolve(wok, nwok) => {
+                                pass = if arg == Comp.look_wordb { wok } else if arg == Comp.look_nwordb { nwok } else { False }
+                                if pass {
+                                    Rev.close(prog, splits, List.prepend(rest, pc + 1), seen2, out, looks, keep_all)
+                                } else {
+                                    Rev.close(prog, splits, rest, seen2, out, looks, keep_all)
+                                }
+                            }
                         }
                     } else if op == Comp.op_match {
-                        # see `close_go`: reverse DFAs keep all alternatives
+                        # Leftmost-FIRST truncates here: every lower-priority
+                        # thread (a later-starting attempt) is cut. A REVERSE
+                        # scan instead needs the leftmost start, so it must keep
+                        # the longer-backward alternatives alive — `keep_all` is
+                        # Rust's `MatchKind::All` for reverse DFAs.
                         if keep_all {
-                            Rev.close_resolve(prog, splits, rest, seen2, List.append(out, pc), wok, nwok, keep_all)
+                            Rev.close(prog, splits, rest, seen2, List.append(out, pc), looks, keep_all)
                         } else {
                             List.append(out, pc)
                         }
                     } else {
-                        Rev.close_resolve(prog, splits, rest, seen2, List.append(out, pc), wok, nwok, keep_all)
+                        Rev.close(prog, splits, rest, seen2, List.append(out, pc), looks, keep_all)
                     }
                 }
             }
         }
 
+    # closure with assertions left pending (look-free and forward-of-a-wb use)
+    close_pri : List(U32), List(U32), List(U32), List(U32), Bool -> List(U32)
+    close_pri = |prog, splits, stack, out, keep_all| Rev.close(prog, splits, stack, [], out, Pending, keep_all)
+
+    # closure at a boundary whose word-ness is known, resolving assertions
+    close_resolve : List(U32), List(U32), List(U32), Bool, Bool, Bool -> List(U32)
+    close_resolve = |prog, splits, stack, wok, nwok, keep_all| Rev.close(prog, splits, stack, [], [], Resolve(wok, nwok), keep_all)
+
     # advance the Char pcs that accept `cls` (priority order preserved), then
-    # epsilon-close with truncation
+    # epsilon-close with the leftmost-first / all-matches rule
     step : List(U32), List(U32), Trie.T, List(U32), U32, Bool -> List(U32)
     step = |prog, splits, classes, set, cls, keep_all| {
         moved = List.fold(set, [], |m, pc| {
@@ -418,59 +436,6 @@ Rev := [].{
         Rev.close_pri(prog, splits, moved, [], keep_all)
     }
 
-    # priority-preserving epsilon closure, truncating at (and including) the
-    # first Match. `stack` is processed front-to-back (DFS, higher priority
-    # first). Returns Char/Match pcs in priority order, deduped keeping first.
-    close_pri : List(U32), List(U32), List(U32), List(U32), Bool -> List(U32)
-    close_pri = |prog, splits, stack, out, keep_all| Rev.close_go(prog, splits, stack, [], out, keep_all)
-
-    # `seen` tracks EVERY visited pc (split/jmp/save included), so an epsilon
-    # cycle through a nullable loop (e.g. `(a*)+`) terminates. `out` is the
-    # priority-ordered Char/Match result; truncated at the first Match.
-    close_go : List(U32), List(U32), List(U32), List(U32), List(U32), Bool -> List(U32)
-    close_go = |prog, splits, stack, seen, out, keep_all|
-        match List.first(stack) {
-            Err(_) => out
-            Ok(pc) => {
-                rest = List.drop_first(stack, 1)
-                if List.contains(seen, pc) {
-                    Rev.close_go(prog, splits, rest, seen, out, keep_all)
-                } else {
-                    seen2 = List.append(seen, pc)
-                    w = List.get(prog, pc.to_u64()) ?? 0
-                    op = Comp.inst_op(w)
-                    arg = Comp.inst_arg(w)
-                    if op == Comp.op_split {
-                        t1 = List.get(splits, arg.to_u64()) ?? 0
-                        t2 = List.get(splits, (arg + 1).to_u64()) ?? 0
-                        Rev.close_go(prog, splits, List.concat([t1, t2], rest), seen2, out, keep_all)
-                    } else if op == Comp.op_jmp {
-                        Rev.close_go(prog, splits, List.prepend(rest, arg), seen2, out, keep_all)
-                    } else if op == Comp.op_save {
-                        Rev.close_go(prog, splits, List.prepend(rest, pc + 1), seen2, out, keep_all)
-                    } else if op == Comp.op_look {
-                        # leave the assertion pending in the set; a transition
-                        # resolves it once both sides' word-ness are known
-                        # (`close_resolve`). Look-free progs never reach this.
-                        Rev.close_go(prog, splits, rest, seen2, List.append(out, pc), keep_all)
-                    } else if op == Comp.op_match {
-                        # Leftmost-FIRST truncates here: every lower-priority
-                        # thread (a later-starting attempt) is cut. A REVERSE
-                        # scan instead needs the leftmost start, so it must keep
-                        # the longer-backward alternatives alive — `keep_all` is
-                        # Rust's `MatchKind::All` for reverse DFAs.
-                        if keep_all {
-                            Rev.close_go(prog, splits, rest, seen2, List.append(out, pc), keep_all)
-                        } else {
-                            List.append(out, pc)
-                        }
-                    } else {
-                        Rev.close_go(prog, splits, rest, seen2, List.append(out, pc), keep_all)
-                    }
-                }
-            }
-        }
-
     index_of = |sets, target| Rev.index_loop(sets, target, 0)
     index_loop = |sets, target, i|
         match List.get(sets, i.to_u64()) {
@@ -478,9 +443,6 @@ Rev := [].{
             Ok(s) => if s == target { Ok(i) } else { Rev.index_loop(sets, target, i + 1) }
         }
 
-    upto : U64 -> List(U64)
-    upto = |n| Rev.upto_loop(n, 0, [])
-    upto_loop = |n, i, acc| if i >= n { acc } else { Rev.upto_loop(n, i + 1, List.append(acc, i)) }
 
     # --- searches -------------------------------------------------------------
 
@@ -659,9 +621,6 @@ Rev := [].{
 
     # reverse DFA anchored at `end`, stepping backward; the smallest reached
     # position that is a match state is the leftmost start.
-    run_rev : Rev.D, Trie.T, List(U8), U64 -> U64
-    run_rev = |d, classes, hay, end| Rev.run_rev_from(d, classes, hay, end, 0)
-
     # sentinel "no start found" for the existence-reporting reverse
     no_start : U64
     no_start = 0xFFFF_FFFF_FFFF_FFFF
@@ -676,7 +635,7 @@ Rev := [].{
         if r == Rev.no_start { Err(NoMatch) } else { Ok(r) }
     }
 
-    # as `run_rev`, but the backward scan stops at floor `lo` (so the leftmost
+    # as `run_rev_from`, but the backward scan stops at floor `lo` (so the leftmost
     # start it can report is `lo`) — used by `find_from` to keep matches
     # non-overlapping across iteration.
     run_rev_from : Rev.D, Trie.T, List(U8), U64, U64 -> U64

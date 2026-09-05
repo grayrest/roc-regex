@@ -9,6 +9,14 @@
 ## positions where some literal could start; the caller verifies each. AVX2 "fat"
 ## Teddy (256-bit) is out — Roc has only 128-bit vectors.
 Teddy := [].{
+    ## Most literals one fingerprint can carry: each nibble bucket is a bitmask
+    ## with one bit per literal, so 8 is the structural limit. `Comp` reads this
+    ## when it decides whether an alternation can use the Teddy path — the two
+    ## must agree, or a pattern passes `Comp`'s check and then silently falls off
+    ## the SIMD path in `build`.
+    max_lits : U64
+    max_lits = 8
+
     ## Built prefilter: the M nibble-table pairs (unused ones are splat 0), the
     ## fingerprint length m, and the literals (for the caller's verification and
     ## a scalar tail scan).
@@ -24,7 +32,7 @@ Teddy := [].{
     ## either makes Teddy inapplicable and the caller keeps its scalar rung).
     build : List(List(U8)) -> Try(Teddy.T, [Unsuitable])
     build = |lits|
-        if List.len(lits) == 0 or List.len(lits) > 8 or List.any(lits, List.is_empty) {
+        if List.len(lits) == 0 or List.len(lits) > Teddy.max_lits or List.any(lits, List.is_empty) {
             Err(Unsuitable)
         } else {
             m = List.fold(lits, 3, |acc, l| if List.len(l) < acc { List.len(l) } else { acc })

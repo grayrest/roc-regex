@@ -29,9 +29,8 @@ Regex := [].{
         match Comp.compile(src) {
             Err(e) => Err(e)
             Ok(c) => {
-                # budget: max_artifact_bytes / (n_classes * 4); provisional 256 KB
                 nc = if c.classes.n_classes == 0 { 1 } else { c.classes.n_classes }
-                max_states = 262144 // (nc.to_u64() * 4)
+                max_states = Regex.dfa_table_budget // (nc.to_u64() * Regex.dfa_entry_bytes)
                 engine =
                     match Rev.build(c, max_states) {
                         Ok(d) => Three(d)
@@ -229,6 +228,15 @@ Regex := [].{
     ## All whole-match spans. Uses the start-only whole-match engine (no
     ## per-thread slot allocation), with the same D14 empty-match advance as
     ## `all_caps`. `all_caps` (full slots) is kept for `captures`/`replace`/`split`.
+    # Artifact budget for one DFA transition table: entries are U32, and the
+    # table is `n_states * n_classes` of them, so a build over this many states
+    # is refused (`TooBig`) and the pattern falls back to the PikeVM.
+    dfa_table_budget : U64
+    dfa_table_budget = 262144
+
+    dfa_entry_bytes : U64
+    dfa_entry_bytes = 4
+
     # Adaptive-prefilter selectivity gate: use the literal prefilter only while
     # candidates stay below len/K, where K is the point at which per-candidate
     # verification (~a couple µs) overtakes a straight DFA byte-scan (~ns/byte).

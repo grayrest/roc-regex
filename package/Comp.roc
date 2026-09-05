@@ -7,6 +7,7 @@
 import Err
 import Trie
 import Uni
+import Teddy
 
 ## The AST is the module's nominal type, so its `Cat(List(Comp))` recursion goes
 ## through the nominal (as roc-markdown's `Inl` does). Destructured only with
@@ -307,6 +308,11 @@ Comp := [
             }
         }
 
+    # How many distinct first bytes a scalar/SIMD first-byte prefilter is worth:
+    # past this the scan hits too often to pay for itself and the DFA is better.
+    max_first_bytes : U64
+    max_first_bytes = 4
+
     # first-set of atoms[j..]: class(Aj), plus class(Aj+1).. while nullable.
     # `known` is False when a NEGATED class was dropped: the ranges are then an
     # under-approximation, which is safe for an `F subset-of ...` test (it can
@@ -408,7 +414,7 @@ Comp := [
     is_exact_alt = |ast|
         match ast {
             Group(x, _) => Comp.is_exact_alt(x)
-            Alt(xs) => List.len(xs) >= 2 and List.len(xs) <= 8 and List.all(xs, Comp.is_exact_literal)
+            Alt(xs) => List.len(xs) >= 2 and List.len(xs) <= Teddy.max_lits and List.all(xs, Comp.is_exact_literal)
             _ => False
         }
 
@@ -1306,7 +1312,7 @@ Comp := [
         match ast {
             Group(x, _) => Comp.lead_literals(x)
             Alt(xs) =>
-                if List.len(xs) >= 2 and List.len(xs) <= 8 {
+                if List.len(xs) >= 2 and List.len(xs) <= Teddy.max_lits {
                     lits = List.map(xs, Comp.prefix_of)
                     if List.any(lits, List.is_empty) { [] } else { lits }
                 } else {
@@ -1327,7 +1333,7 @@ Comp := [
         fs = Comp.first_set(ast)
         match fs {
             Wide => []
-            Bytes(bs) => if List.len(bs) == 0 or List.len(bs) > 4 { [] } else { bs }
+            Bytes(bs) => if List.len(bs) == 0 or List.len(bs) > Comp.max_first_bytes { [] } else { bs }
         }
     }
 
@@ -1393,7 +1399,7 @@ Comp := [
         match List.first(ranges) {
             Err(_) => Bytes(acc)
             Ok(r) =>
-                if r.hi >= 128 or (r.hi - r.lo) > 4 or List.len(acc) > 4 {
+                if r.hi >= 128 or (r.hi - r.lo).to_u64() > Comp.max_first_bytes or List.len(acc) > Comp.max_first_bytes {
                     Wide
                 } else {
                     Comp.ranges_bytes(List.drop_first(ranges, 1), List.concat(acc, Comp.byte_span(r.lo, r.hi, [])))
