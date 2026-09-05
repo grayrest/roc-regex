@@ -83,9 +83,9 @@ Comp := [
         # including the literal). `find_all` `memchr`s `lit`, runs `lrev` backward
         # from `p+litlen` to confirm the literal and find the leftmost start. The
         # end comes from `end`: `EndFull` runs the anchored full-pattern DFA from
-        # the start; `EndRight` (hard separator) runs an anchored `lit·RIGHT` DFA
-        # from `p`, avoiding a re-scan of LEFT. `NoInner` when the shape doesn't
-        # apply.
+        # the start (needed when a greedy LEFT can run past the literal, `.*foo`);
+        # `EndRight` (hard separator) runs an anchored `lit·RIGHT` DFA from `p`,
+        # avoiding a re-scan of LEFT. `NoInner` when the shape doesn't apply.
         inner : [NoInner, Inner({ lit : List(U8), lrev_prog : List(U32), lrev_splits : List(U32), end : [EndFull, EndRight({ rfwd_prog : List(U32), rfwd_splits : List(U32) })] })],
         # Outermost text anchors, stripped from the DFA progs (`uprog`/`rprog`)
         # and re-imposed as scan constraints (approach B): `anchored_start` (`^`)
@@ -164,17 +164,48 @@ Comp := [
                 } else {
                     lit = List.fold(List.sublist(xs, { start: run.start, len: run.len }), [], |acc, x| List.concat(acc, Comp.item_lit(x)))
                     left = List.sublist(xs, { start: 0, len: run.start })
+                    # The reverse scan is anchored at the FIRST occurrence of the
+                    # literal, so it only finds starts whose LEFT ends there. That
+                    # is the leftmost start only if LEFT can always stop at the
+                    # first occurrence — either because it cannot match a literal
+                    # byte at all (`hard_sep`), or because it is a single
+                    # quantified class (`left_stops_early`). Otherwise the first
+                    # occurrence can sit INSIDE a longer match's LEFT and the scan
+                    # commits to a later, shorter match: `(?:xab)*ab` on "xabab"
+                    # gave [1,3),[3,5) instead of [0,5).
                     hard_sep = List.all(lit, |b| b < 0x80 and !(List.any(left, |a| Comp.ast_can_match_byte(a, b))))
-                    Inner({
-                        lpre: List.sublist(xs, { start: 0, len: run.start + run.len }),
-                        lit,
-                        rlit: List.sublist(xs, { start: run.start, len: List.len(xs) - run.start }),
-                        hard_sep,
-                    })
+                    if !hard_sep and !(Comp.left_stops_early(left)) {
+                        NoInner
+                    } else {
+                        Inner({
+                            lpre: List.sublist(xs, { start: 0, len: run.start + run.len }),
+                            lit,
+                            rlit: List.sublist(xs, { start: run.start, len: List.len(xs) - run.start }),
+                            hard_sep,
+                        })
+                    }
                 }
             }
             _ => NoInner
         }
+        }
+
+    # Can LEFT always stop at the FIRST occurrence of the literal? A single
+    # quantified CLASS (`.*`, `\w+`, `[a-z]?`, or one bare class) can: it matches
+    # any span of its members, so if it covers [s, q) for a later occurrence q it
+    # covers the shorter [s, p) too, and the reverse scan from p still yields the
+    # leftmost start. A quantified SEQUENCE cannot — `(?:xab)*` has to consume
+    # whole "xab" groups, so on "xabab" the first "ab" is reachable only from 1,
+    # while the real match starts at 0 and uses the second "ab".
+    left_stops_early : List(Comp) -> Bool
+    left_stops_early = |left|
+        if List.len(left) != 1 {
+            False
+        } else {
+            match Comp.class_atom(List.get(left, 0) ?? Empty) {
+                Ok(_) => True
+                Err(_) => False
+            }
         }
 
     # Can `ast` match a codepoint equal to byte `b` anywhere within it? Used to
@@ -245,7 +276,8 @@ Comp := [
             if a1.nullable or f.neg {
                 False
             } else {
-                Comp.boundaries_absorb(atoms, f.ranges, 0, List.len(atoms))
+                n = List.len(atoms)
+                Comp.boundaries_absorb(atoms, f.ranges, 0, n) and Comp.alive_uniform(atoms, n)
             }
         }
     }
@@ -266,7 +298,8 @@ Comp := [
             dummy = { class: { neg: False, ranges: [] }, nullable: True, repeatable: False }
             ai = List.get(atoms, i) ?? dummy
             extend_ok = ai.repeatable and !(ai.class.neg) and Comp.ranges_subset(f, ai.class.ranges)
-            advance_ok = Comp.ranges_subset(f, Comp.suffix_first(atoms, i + 1, n))
+            sf = Comp.suffix_first(atoms, i + 1, n)
+            advance_ok = Comp.ranges_subset(f, sf.ranges)
             if extend_ok or advance_ok {
                 Comp.boundaries_absorb(atoms, f, i + 1, n)
             } else {
@@ -275,15 +308,70 @@ Comp := [
         }
 
     # first-set of atoms[j..]: class(Aj), plus class(Aj+1).. while nullable.
-    suffix_first : List(Comp.ClassInfo), U64, U64 -> List(Comp.Rng)
+    # `known` is False when a NEGATED class was dropped: the ranges are then an
+    # under-approximation, which is safe for an `F subset-of ...` test (it can
+    # only reject) but NOT for the set-equality test in `alive_uniform`.
+    RangeSet : { known : Bool, ranges : List(Comp.Rng) }
+    suffix_first : List(Comp.ClassInfo), U64, U64 -> Comp.RangeSet
     suffix_first = |atoms, j, n|
         if j >= n {
-            []
+            { known: True, ranges: [] }
         } else {
             dummy = { class: { neg: False, ranges: [] }, nullable: False, repeatable: False }
             aj = List.get(atoms, j) ?? dummy
-            rest = if aj.nullable { Comp.suffix_first(atoms, j + 1, n) } else { [] }
-            if aj.class.neg { rest } else { List.concat(aj.class.ranges, rest) }
+            rest = if aj.nullable { Comp.suffix_first(atoms, j + 1, n) } else { { known: True, ranges: [] } }
+            if aj.class.neg {
+                { known: False, ranges: rest.ranges }
+            } else {
+                { known: rest.known, ranges: List.concat(aj.class.ranges, rest.ranges) }
+            }
+        }
+
+    # Bytes that keep an attempt alive at the boundary AFTER atom `i`: extend Ai
+    # (only when Ai repeats) or start the continuation A(i+1)...
+    alive_set : List(Comp.ClassInfo), U64, U64 -> Comp.RangeSet
+    alive_set = |atoms, i, n| {
+        dummy = { class: { neg: False, ranges: [] }, nullable: True, repeatable: False }
+        ai = List.get(atoms, i) ?? dummy
+        sf = Comp.suffix_first(atoms, i + 1, n)
+        if ai.repeatable and ai.class.neg {
+            { known: False, ranges: sf.ranges }
+        } else {
+            ext = if ai.repeatable { ai.class.ranges } else { [] }
+            { known: sf.known, ranges: List.concat(ext, sf.ranges) }
+        }
+    }
+
+    # Absorption alone is not enough: it keeps an F-byte from killing a live
+    # attempt, but says nothing about a NON-F byte, which may kill an older
+    # attempt while a younger one (sitting at a different boundary) survives.
+    # The DFA then never returns to the start state and `fwd_span` reports the
+    # older, wrong start — `[ax][ab]?[axc]+[de]` on "aabcd" yields 0, not 1.
+    # Requiring every boundary to accept the SAME byte set removes that: a byte
+    # either keeps every attempt alive or kills every one (and cannot start a
+    # fresh attempt, since F is a subset of that set), which is exactly a return
+    # to the start state. With at most one boundary (n <= 2) every live attempt
+    # sits at it, so there is nothing to compare.
+    alive_uniform : List(Comp.ClassInfo), U64 -> Bool
+    alive_uniform = |atoms, n|
+        if n <= 2 {
+            True
+        } else {
+            s0 = Comp.alive_set(atoms, 0, n)
+            if s0.known { Comp.alive_same(atoms, s0.ranges, 1, n) } else { False }
+        }
+
+    alive_same : List(Comp.ClassInfo), List(Comp.Rng), U64, U64 -> Bool
+    alive_same = |atoms, s0, i, n|
+        if i + 1 >= n {
+            True
+        } else {
+            si = Comp.alive_set(atoms, i, n)
+            if si.known and Comp.ranges_subset(s0, si.ranges) and Comp.ranges_subset(si.ranges, s0) {
+                Comp.alive_same(atoms, s0, i + 1, n)
+            } else {
+                False
+            }
         }
 
     # every range of `a` is contained in some single range of `b`
@@ -507,6 +595,8 @@ Comp := [
                                         ri = Comp.emit({ ..li, prog: [], splits: [] }, Cat(s.rlit), 0)
                                         { p: ri, inner: Inner({ lit: s.lit, lrev_prog, lrev_splits: li.splits, end: EndRight({ rfwd_prog: List.append(ri.prog, Comp.inst(Comp.op_match, 0)), rfwd_splits: ri.splits }) }) }
                                     } else {
+                                        # greedy LEFT may run past the literal, so
+                                        # the end has to come from the full pattern.
                                         { p: li, inner: Inner({ lit: s.lit, lrev_prog, lrev_splits: li.splits, end: EndFull }) }
                                     }
                                 }
@@ -550,20 +640,35 @@ Comp := [
         b0 = Comp.at(b, i)
         if b0 < 0x80 {
             { cp: b0.to_u32(), len: 1 }
-        } else if b0.bitwise_and(0xE0) == 0xC0 {
+        } else if b0.bitwise_and(0xE0) == 0xC0 and Comp.is_cont(b, i + 1) {
             hi = b0.bitwise_and(0x1F).to_u32().shl_wrap(6)
             { cp: hi.bitwise_or(Comp.cont(b, i + 1)), len: 2 }
-        } else if b0.bitwise_and(0xF0) == 0xE0 {
+        } else if b0.bitwise_and(0xF0) == 0xE0 and Comp.is_cont(b, i + 1) and Comp.is_cont(b, i + 2) {
             hi = b0.bitwise_and(0x0F).to_u32().shl_wrap(12)
             mid = Comp.cont(b, i + 1).shl_wrap(6)
             { cp: hi.bitwise_or(mid).bitwise_or(Comp.cont(b, i + 2)), len: 3 }
-        } else {
+        } else if b0.bitwise_and(0xF8) == 0xF0 and Comp.is_cont(b, i + 1) and Comp.is_cont(b, i + 2) and Comp.is_cont(b, i + 3) {
             hi = b0.bitwise_and(0x07).to_u32().shl_wrap(18)
             m1 = Comp.cont(b, i + 1).shl_wrap(12)
             m2 = Comp.cont(b, i + 2).shl_wrap(6)
             { cp: hi.bitwise_or(m1).bitwise_or(m2).bitwise_or(Comp.cont(b, i + 3)), len: 4 }
+        } else {
+            # Malformed lead byte, bad continuation, or a sequence truncated by
+            # the end of the haystack: ONE byte, its own value. Reporting the
+            # nominal 2/3/4 length here let a scan step past the end of the
+            # haystack (spans with `end > len`, and an underflow in `split`) and
+            # skip up to three valid bytes after a stray byte.
+            { cp: b0.to_u32(), len: 1 }
         }
     }
+
+    # is there a UTF-8 continuation byte (10xxxxxx) at `i`? False past the end.
+    is_cont : List(U8), U64 -> Bool
+    is_cont = |b, i|
+        match List.get(b, i) {
+            Ok(v) => v.bitwise_and(0xC0) == 0x80
+            Err(_) => False
+        }
 
     cont : List(U8), U64 -> U32
     cont = |b, i| Comp.at(b, i).bitwise_and(0x3F).to_u32()
@@ -701,8 +806,8 @@ Comp := [
 
     parse_brace : Str, List(Comp.Tok), U64, Comp -> Try(Comp.Out, Err.Error)
     parse_brace = |src, toks, i, ast| {
-        lo = Comp.read_int(toks, i, 0, False)
-        if !lo.any {
+        lo = Comp.read_int(toks, i, 0, False, False)
+        if !lo.any or lo.over {
             Err(Comp.err_at(src, toks, i, RepetitionCountInvalid))
         } else {
             al = lo.i
@@ -711,11 +816,18 @@ Comp := [
                 g = Comp.greedy(toks, al + 1)
                 Ok({ ast: Comp.repeat_exact(ast, lo.n, g.greedy), i: g.i })
             } else if cc == Ok(0x2C) {
-                hi = Comp.read_int(toks, al + 1, 0, False)
+                hi = Comp.read_int(toks, al + 1, 0, False, False)
                 if Comp.cp_at(toks, hi.i) == Ok(0x7D) {
                     g = Comp.greedy(toks, hi.i + 1)
                     if hi.any {
-                        Ok({ ast: Comp.repeat_range(ast, lo.n, hi.n, g.greedy), i: g.i })
+                        # `{n,m}` with m < n is an error, not a wrapping
+                        # subtraction in `repeat_range` (`a{2,1}` used to abort
+                        # the process on the U32 underflow).
+                        if hi.over or hi.n < lo.n {
+                            Err(Comp.err_at(src, toks, al + 1, RepetitionCountInvalid))
+                        } else {
+                            Ok({ ast: Comp.repeat_range(ast, lo.n, hi.n, g.greedy), i: g.i })
+                        }
                     } else {
                         Ok({ ast: Comp.repeat_atleast(ast, lo.n, g.greedy), i: g.i })
                     }
@@ -728,11 +840,25 @@ Comp := [
         }
     }
 
-    read_int : List(Comp.Tok), U64, U32, Bool -> { n : U32, i : U64, any : Bool }
-    read_int = |toks, i, acc, any|
+    # Largest `{n,m}` count, as in the Rust crate. The expansion is one AST copy
+    # per repeat, so a count beyond this is refused rather than attempted.
+    repeat_limit : U32
+    repeat_limit = 65535
+
+    # Decimal count for `{n,m}`. `over` marks a count above `repeat_limit`; the
+    # digits are still consumed (so the caller reports the error at the right
+    # offset) but the accumulator stops, which is what keeps `acc * 10` from
+    # overflowing U32 on a pattern like `a{99999999999}`.
+    read_int : List(Comp.Tok), U64, U32, Bool, Bool -> { n : U32, i : U64, any : Bool, over : Bool }
+    read_int = |toks, i, acc, any, over|
         match Comp.cp_at(toks, i) {
-            Ok(c) if c >= 48 and c <= 57 => Comp.read_int(toks, i + 1, acc * 10 + (c - 48), True)
-            _ => { n: acc, i, any }
+            Ok(c) if c >= 48 and c <= 57 =>
+                if over or acc > Comp.repeat_limit {
+                    Comp.read_int(toks, i + 1, acc, True, True)
+                } else {
+                    Comp.read_int(toks, i + 1, acc * 10 + (c - 48), True, False)
+                }
+            _ => { n: acc, i, any, over: over or acc > Comp.repeat_limit }
         }
 
     repeat_exact : Comp, U32, Bool -> Comp
@@ -759,6 +885,9 @@ Comp := [
         } else if c == Ok(0x28) {
             # (?<flags>:...) non-capturing with flags, (?:...), or (...) capturing
             grp = Comp.group_head(st.toks, st.i)
+            if grp.bad {
+                Err(Comp.err_at(st.src, st.toks, st.i + 2, FlagUnsupported))
+            } else {
             match Comp.parse_alt({ src: st.src, toks: st.toks, i: grp.inner }) {
                 Ok(inner) =>
                     if Comp.cp_at(st.toks, inner.i) == Ok(0x29) {
@@ -769,6 +898,7 @@ Comp := [
                         Err(Comp.err_at(st.src, st.toks, st.i, GroupUnclosed))
                     }
                 Err(e) => Err(e)
+            }
             }
         } else if c == Ok(0x5B) {
             Comp.parse_class(st.src, st.toks, st.i + 1)
@@ -790,23 +920,27 @@ Comp := [
 
     # classify a group opener at `i` ('('): returns whether it captures, whether
     # it is case-insensitive, and the index where the inner alternation starts.
-    group_head : List(Comp.Tok), U64 -> { cap : Bool, ci : Bool, inner : U64 }
+    group_head : List(Comp.Tok), U64 -> { cap : Bool, ci : Bool, inner : U64, bad : Bool }
     group_head = |toks, i|
         if Comp.cp_at(toks, i + 1) == Ok(0x3F) {
             # (? ... : or )  — read flag letters until ':' or ')'
-            f = Comp.read_flags(toks, i + 2, { ci: False })
-            { cap: False, ci: f.ci, inner: f.i + 1 }
+            f = Comp.read_flags(toks, i + 2, { ci: False, bad: False })
+            { cap: False, ci: f.ci, inner: f.i + 1, bad: f.bad }
         } else {
-            { cap: True, ci: False, inner: i + 1 }
+            { cap: True, ci: False, inner: i + 1, bad: False }
         }
 
-    read_flags : List(Comp.Tok), U64, { ci : Bool } -> { ci : Bool, i : U64 }
+    # Only `i` is implemented. `s`, `m`, `x`, `u`, `U` and the `-` negation used
+    # to be SKIPPED, so `(?s:.)`, `(?U:a+)` and `(?i)(?-i:a)` compiled with the
+    # wrong semantics; `bad` turns them into a parse error instead.
+    read_flags : List(Comp.Tok), U64, { ci : Bool, bad : Bool } -> { ci : Bool, i : U64, bad : Bool }
     read_flags = |toks, i, acc|
         match Comp.cp_at(toks, i) {
-            Ok(0x69) => Comp.read_flags(toks, i + 1, { ci: True })
-            Ok(0x3A) => { ci: acc.ci, i }
-            Ok(0x29) => { ci: acc.ci, i }
-            _ => Comp.read_flags(toks, i + 1, acc)
+            Ok(0x69) => Comp.read_flags(toks, i + 1, { ci: True, bad: acc.bad })
+            Ok(0x3A) => { ci: acc.ci, i, bad: acc.bad }
+            Ok(0x29) => { ci: acc.ci, i, bad: acc.bad }
+            Err(_) => { ci: acc.ci, i, bad: acc.bad }
+            _ => Comp.read_flags(toks, i + 1, { ci: acc.ci, bad: True })
         }
 
     parse_escape : Str, List(Comp.Tok), U64 -> Try(Comp.Out, Err.Error)
@@ -831,8 +965,11 @@ Comp := [
             Ok(0x72) => lit(13)
             Ok(0x66) => lit(12)
             Ok(0x76) => lit(11)
-            Ok(0x30) => lit(0)
-            Ok(v) if (v >= 0x41 and v <= 0x5A) or (v >= 0x61 and v <= 0x7A) => Err(Comp.err_at(src, toks, i, EscapeUnrecognized))
+            # A letter escape that isn't implemented, and any digit escape
+            # (`\0`, and `\1`.. which would be a backreference), is an error.
+            # Decoding them as the bare character silently changed what the
+            # pattern means.
+            Ok(v) if (v >= 0x41 and v <= 0x5A) or (v >= 0x61 and v <= 0x7A) or (v >= 0x30 and v <= 0x39) => Err(Comp.err_at(src, toks, i, EscapeUnrecognized))
             Ok(v) => lit(v)
         }
     }
@@ -913,23 +1050,14 @@ Comp := [
             Group(x, gi) => Group(Comp.fold_ast(x), gi)
         }
 
+    # Add the case partners of every member of every range. Driven by ONE pass
+    # over the orbit table per range (`Uni.fold_partners_in`) rather than a
+    # lookup per codepoint, so width costs nothing — a previous 1024-codepoint
+    # cap silently left wide `(?i)` classes unfolded (`(?i)[a-\u{d7a3}]` did not
+    # match "A") and every downstream analysis then saw the wrong class.
     fold_ranges : List(Comp.Rng) -> List(Comp.Rng)
     fold_ranges = |ranges|
-        List.fold(ranges, ranges, |acc, r|
-            if r.hi - r.lo < 1024 {
-                List.concat(acc, Comp.fold_range_members(r.lo, r.hi, []))
-            } else {
-                acc
-            })
-
-    fold_range_members : U32, U32, List(Comp.Rng) -> List(Comp.Rng)
-    fold_range_members = |cp, hi, acc|
-        if cp > hi {
-            acc
-        } else {
-            partners = Uni.fold_of(cp) |> List.map(|fp| { lo: fp, hi: fp })
-            Comp.fold_range_members(cp + 1, hi, List.concat(acc, partners))
-        }
+        List.fold(ranges, ranges, |acc, r| List.concat(acc, Uni.fold_partners_in(r.lo, r.hi)))
 
     parse_class : Str, List(Comp.Tok), U64 -> Try(Comp.Out, Err.Error)
     parse_class = |src, toks, i0| {
@@ -988,6 +1116,11 @@ Comp := [
             Ok(0x6E) => one(10)
             Ok(0x74) => one(9)
             Ok(0x72) => one(13)
+            Ok(0x66) => one(12)
+            Ok(0x76) => one(11)
+            # as at the top level: an unimplemented letter or digit escape is an
+            # error rather than the bare character (`[\b]` matched "b").
+            Ok(v) if (v >= 0x41 and v <= 0x5A) or (v >= 0x61 and v <= 0x7A) or (v >= 0x30 and v <= 0x39) => Err(Comp.err_at(src, toks, i, EscapeUnrecognized))
             Ok(v) => one(v)
         }
     }
@@ -1099,10 +1232,14 @@ Comp := [
                     Comp.prefix_cat(List.drop_first(xs, 1), acc)
                 } else {
                     b = Comp.lit_prefix_node(x)
-                    if List.is_empty(b) {
+                    if List.is_empty(b.bytes) {
                         acc
+                    } else if b.whole {
+                        Comp.prefix_cat(List.drop_first(xs, 1), List.concat(acc, b.bytes))
                     } else {
-                        Comp.prefix_cat(List.drop_first(xs, 1), List.concat(acc, b))
+                        # only a PREFIX of this node — nothing after it can be
+                        # appended, since the node may match more bytes first.
+                        List.concat(acc, b.bytes)
                     }
                 }
         }
@@ -1114,13 +1251,17 @@ Comp := [
             _ => False
         }
 
-    # bytes contributed by a node if it is an exact literal, else []
-    lit_prefix_node : Comp -> List(U8)
+    # Bytes a node contributes to the required prefix, and whether they are ALL
+    # it can match (`whole`) — only then may the concatenation continue past it.
+    # A group whose content is not an exact literal contributes just its own
+    # prefix: `(ab?)c` used to yield "ac", a string no match begins with, so the
+    # prefilter scanned for it and `find_all` reported no matches at all.
+    lit_prefix_node : Comp -> { bytes : List(U8), whole : Bool }
     lit_prefix_node = |ast|
         match ast {
-            Chars(cs) => Comp.lit_byte(cs)
-            Group(x, _) => Comp.prefix_of(x)
-            _ => []
+            Chars(cs) => { bytes: Comp.lit_byte(cs), whole: True }
+            Group(x, _) => { bytes: Comp.prefix_of(x), whole: Comp.is_exact_literal(x) }
+            _ => { bytes: [], whole: False }
         }
 
     # a Chars node that is exactly one codepoint (not negated, single range lo==hi)

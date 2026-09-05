@@ -247,30 +247,35 @@ Teddy := [].{
     }
 
     # verify one candidate against the literals (in order), threading MState
-    step_m : Teddy.T, List(U8), Teddy.MState, U64, U64 -> Try(Teddy.MState, [TooMany])
-    step_m = |t, hay, st, at, cap|
+    step_m : Teddy.T, List(U8), Teddy.MState, U64, U64, U64 -> Try(Teddy.MState, [TooMany])
+    step_m = |t, hay, st, at, cap, len|
         if st.seen + 1 > cap {
             Err(TooMany)
         } else if at < st.last_end {
             Ok({ ..st, seen: st.seen + 1 })
         } else {
-            match Teddy.lit_end(t, hay, at, 0) {
+            match Teddy.lit_end(t, hay, at, 0, len) {
                 Ok(end) => Ok({ last_end: end, spans: List.append(st.spans, { start: at, end }), seen: st.seen + 1 })
                 Err(_) => Ok({ ..st, seen: st.seen + 1 })
             }
         }
 
     # end (`at + len`) of the first literal that fully matches at `at`, else NoMatch
-    lit_end : Teddy.T, List(U8), U64, U64 -> Try(U64, [NoMatch])
-    lit_end = |t, hay, at, li|
+    lit_end : Teddy.T, List(U8), U64, U64, U64 -> Try(U64, [NoMatch])
+    lit_end = |t, hay, at, li, len|
         match List.get(t.lits, li) {
             Err(_) => Err(NoMatch)
-            Ok(lit) =>
-                if Teddy.eqm(hay, at, lit, 0, List.len(lit)) {
-                    Ok(at + List.len(lit))
+            Ok(lit) => {
+                # the literal must FIT: `eqm` reads a missing haystack byte as
+                # 1, so an overhanging literal whose tail is 0x01 would verify
+                # and emit a span past the end of the haystack.
+                e = at + List.len(lit)
+                if e <= len and Teddy.eqm(hay, at, lit, 0, List.len(lit)) {
+                    Ok(e)
                 } else {
-                    Teddy.lit_end(t, hay, at, li + 1)
+                    Teddy.lit_end(t, hay, at, li + 1, len)
                 }
+            }
         }
 
     # windowed fused scan (mirrors `scan`, verifying literals instead of collecting)
@@ -300,7 +305,7 @@ Teddy := [].{
             if bm == 0 {
                 Teddy.scan_m(t, hay, len, w + 16, res0, res1, cap, st)
             } else {
-                match Teddy.bits_m(t, hay, bm, w, t.m - 1, 0, cap, st) {
+                match Teddy.bits_m(t, hay, bm, w, t.m - 1, 0, cap, st, len) {
                     Err(e) => Err(e)
                     Ok(st2) => Teddy.scan_m(t, hay, len, w + 16, res0, res1, cap, st2)
                 }
@@ -308,19 +313,19 @@ Teddy := [].{
         }
 
     # verify each set bit's candidate (mirrors `bits`)
-    bits_m : Teddy.T, List(U8), U16, U64, U64, U64, U64, Teddy.MState -> Try(Teddy.MState, [TooMany])
-    bits_m = |t, hay, bm, w, back, j, cap, st|
+    bits_m : Teddy.T, List(U8), U16, U64, U64, U64, U64, Teddy.MState, U64 -> Try(Teddy.MState, [TooMany])
+    bits_m = |t, hay, bm, w, back, j, cap, st, len|
         if j >= 16 {
             Ok(st)
         } else {
             set = bm.bitwise_and(1.U16.shl_wrap(j.to_u8_wrap())) != 0
             if set and w + j >= back {
-                match Teddy.step_m(t, hay, st, w + j - back, cap) {
+                match Teddy.step_m(t, hay, st, w + j - back, cap, len) {
                     Err(e) => Err(e)
-                    Ok(st2) => Teddy.bits_m(t, hay, bm, w, back, j + 1, cap, st2)
+                    Ok(st2) => Teddy.bits_m(t, hay, bm, w, back, j + 1, cap, st2, len)
                 }
             } else {
-                Teddy.bits_m(t, hay, bm, w, back, j + 1, cap, st)
+                Teddy.bits_m(t, hay, bm, w, back, j + 1, cap, st, len)
             }
         }
 
@@ -330,7 +335,7 @@ Teddy := [].{
         if at >= len {
             Ok(st)
         } else if List.any(t.lits, |l| Teddy.starts(hay, at, l, t.m)) {
-            match Teddy.step_m(t, hay, st, at, cap) {
+            match Teddy.step_m(t, hay, st, at, cap, len) {
                 Err(e) => Err(e)
                 Ok(st2) => Teddy.tail_m(t, hay, at + 1, len, cap, st2)
             }
