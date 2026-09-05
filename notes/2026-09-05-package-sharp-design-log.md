@@ -157,3 +157,59 @@ Options: reference-first; automaton-first; lazy-first. **Choice: reference-first
   recursive nominal types are destructured only with `match`.
 - Every RE# rewrite rule ported keeps RE#'s comment tag (`sub 01` … `sub 07`,
   `merge loops 2/3`) so the two codebases can be diffed rule by rule.
+
+## M1 findings (2026-09-05)
+
+Gate: `tools/sharp-corpus/gen.py` → 331/331 (285 executed through the
+reference alone, 46 `nullable_positions` cases skipped until M2's reverse
+sweep exists, `tests07_unsupported` all rejected); `tools/sharp-corpus/nodes.roc`
+→ 57/57 of RE#'s `_02_NodeTests` / `_03_SubsumptionTests` /
+`_04_DerivativeTests` transcribed against our printer.
+
+### RE# divergences (corpus expectations overridden in `gen.py`)
+
+Two corpus cases record RE# output that contradicts RE#'s own leftmost-longest
+specification. The reference and this engine follow the specification; the
+generator carries the spec-correct spans in `KNOWN_RESHARP_DIVERGENCES`.
+
+1. `(ab){1,3}(?=.*c)` on `__ababab_c`: RE# `[2,6],[6,8]`; spec `[2,8]`
+   (`ababab` at 2 is followed by `_c`). Cause found in `mergeOrLookaheads`: a
+   fresh lookahead (`rel` 0, EMPTY pending set — "one candidate end, right
+   here") merged with pending ones contributes nothing to the unioned set, so
+   the just-ended candidate is lost. `Build.merge_or_lookaheads` reads an empty
+   pending set as `{(0,0)}`, which is what it denotes. Report upstream.
+2. The `tests08` "lookback 2" log-line pattern
+   `(?<=6|8\(.*).*&(?<=6|8\(|4|8|0\().*&~(.*\)\:.*)&\w.*&.*\w&.*(?=.*\)\:)&.*(?=\)\:|\)\:)`:
+   RE# `577-604` for the last match; spec `568-604`. Byte 568 (`8`) is preceded
+   by `6`, both lookbehinds hold, 568–604 contains no `):` and is followed by
+   `):`; 568 is leftmost. The "lookback 1" variant without the first lookbehind
+   term gives 568 in RE# too. Cause not isolated (no `dotnet` here); first item
+   for the M3 differential.
+
+### Deliberate deviations from RE#'s code
+
+- `mkAnd` over three or more singletons: RE# unions their sets
+  (`solver.Or`); an intersection of singletons is their intersection.
+- `mkConcat2`'s `LookBehind · Concat(LookBehind, rest)` rule: RE# takes the
+  rest from `SplitTail`, which drops every element but the last; ours keeps
+  the concat's tail. RE# never reaches this branch because
+  `mkConcatChecked` merges adjacent lookbehinds first.
+- `[\s\S]` is not `_`: it excludes the `Invalid` symbol (S6/D8), so
+  `[\s\S]*` prints as `[\s\S]*`, not `_*`. RE#'s "identity true star" test is
+  therefore expected to differ.
+- `\B` is unsupported, as in RE# (a union of lookarounds).
+
+### Normalizations that .NET's parser did for RE#
+
+`Ast.simplify` splices nested `|`/`&`/concatenation into the parent and turns
+an alternation of positive classes into one class, so `a|b|c` has two
+minterms and `(.*|(.*11.*|1.*))` collapses to `.*` under star-subsumption.
+Without it the corpus still passed; the node-layer tests exposed the gap.
+
+### Unknown 4 (fold cost), first data point
+
+`smoke.roc` (17 constant cases) folded the compile AND the reference search
+at build time in ~9 s, ~140 MB. The corpus runner threads an argv-derived
+filler into every haystack so its 331 cases evaluate at runtime (build 22 s,
+run 5.6 s under `--opt=dev`). A per-pattern fold-cost measurement waits for
+M2's tables, which are what the artifact will actually carry.
