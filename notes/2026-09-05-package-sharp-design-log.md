@@ -814,12 +814,9 @@ that uses a literal as its baseline is therefore wrong, which is how the first
 version of this tool produced a table of identical numbers.
 
 **Unicode class data dominates everything else.** Adding `\w` costs about 490
-KB where its derived trie accounts for 200 KB of that, and the residue tracks
-the source range tables in `Uni`. A runtime-compiled `\bthe\b`, which must
-keep those tables by definition, has 270 KB of constants against the folded
-build's roughly 514 KB. So the folded binary appears to carry the derived trie
-AND the ranges it was derived from. Roughly 200 KB per Unicode pattern looks
-recoverable; not yet chased.
+KB where its derived trie accounts for 200 KB of that. The residue is chased
+below; the guess recorded here first, that it was `Uni`'s source range tables
+being retained, was wrong.
 
 **Transition tables are small.** The largest complete fold here is the
 alternation at 48 KB across 69 states. Tables only become a term at all in the
@@ -831,3 +828,44 @@ An app that only asks for `List.len` of the folded lists gets constant-folded
 answers and the data is dropped, so every binary comes out byte-identical. The
 tool therefore scans a real runtime haystack, as `probe.sh` does. That is also
 a clean demonstration that the fold is genuine and dead-code-eliminated.
+
+## Correction: the artifact overhead is not retained `Uni` tables (2026-09-05)
+
+The size breakdown above noted that a Unicode class costs about 2.4x its
+derived trie and guessed the excess was `Uni`'s source ranges surviving the
+fold. That guess was wrong, and the entry has been corrected.
+
+`Uni` stores its tables as hex strings decoded at parse time. All sixteen of
+them total 62328 bytes, and `w_hex` is 9552. That cannot account for 274016
+bytes, and the excess scales with the trie rather than being a fixed addend:
+`\d+` adds 68728 bytes of table and 76904 of excess, `\w+` adds 200096 and
+274016.
+
+What is actually happening, measured on `[A-Za-z]+` against `\w+`, which
+differ only in that class:
+
+| section | `[A-Za-z]+` | `\w+` | delta |
+|---|---|---|---|
+| `__TEXT,__const` | 43504 | 243600 | +200096 |
+| `__DATA_CONST,__const` | 62224 | 336240 | +274016 |
+| `__TEXT,__text` | 442012 | 443056 | +1044 |
+
+The `__TEXT,__const` delta is exactly the trie's 50024 `U32` elements times
+four, to the byte, which also confirms the tool's logical formula. The
+`__DATA_CONST,__const` delta then sits on top of that, and the two sections
+overlap in content: of 52 blocks of `__TEXT,__const` carrying at least 24
+distinct byte values, so that a coincidental match on repetitive class indices
+is excluded, 14 appear verbatim in `__DATA_CONST,__const`.
+
+A control isolates this from the engine. A folded bare `List(U32)` of 50000
+elements costs exactly 4 bytes per element, all in `__DATA_CONST,__const` and
+none in `__TEXT,__const`, and wrapping it in a record or nesting it two deep
+changes nothing. So a simple folded list is stored once at its data size in one
+section, while the folded regex is stored across both at about 2.2x.
+
+What in the larger structure triggers the second copy is not established. It is
+a Roc codegen question rather than an engine one, so it is recorded as a
+reproducer in `upstream/2026-09-05-sharp-folded-constant-sections/` with the
+four apps and the section tables. The earlier claim that roughly 200 KB per
+Unicode pattern is recoverable stands as a rough size for the prize, but only
+upstream can collect it.
