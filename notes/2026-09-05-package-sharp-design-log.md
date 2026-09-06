@@ -1389,3 +1389,51 @@ Which puts `\bthe\b` at about 1.26x of Rust, from 1.68x. The general lesson,
 and the second time this session: measure which half of a loop costs, do not
 infer it from the operation count. The rejected candidates were cheap because
 they early-out; finding them was not.
+
+## The range kernel for `[0-9]{2,4}`, tried and reverted (2026-09-06)
+
+The entry above left a `[0-9]`-shaped range kernel as "the obvious thing to
+try". Tried, measured, reverted. Recording it so it is not tried again.
+
+**The kernel itself works and is faster.** `U8x16.lt_lanes` is UNSIGNED (probed:
+lanes 120..255 compare correctly against a splat of 100), so a contiguous ASCII
+range is `c -w lo` then one `lt_lanes` against `span`, or-ed with the high-bit
+mask as everywhere in `Bset` — five ops a window against the table kernel's
+two `table_lookup`s, an and, a zero-compare, a negate and two bitmasks. Walking
+every digit of the 256 KB haystack, one call a hit as the skip loop does:
+
+| kernel | ns |
+|---|---|
+| nibble tables | 211000 |
+| range | 172000 |
+
+1.23x, same 14454 hits. (Both measurements need min-of-300 in-process; at
+min-of-20 the same binary reads anywhere from 211000 to 451000 run to run.)
+
+**It does not convert.** Two wirings, both net losses:
+
+1. Encoding the range in `skip_ok`/`skip_lo` and dispatching the per-byte
+   membership test on it: `bounded_num` 0.97x, but `caps_email` 1.04x,
+   `class_plus` 1.03-1.05x, `two_words` 1.04x, `word_bound` 1.02x. The extra
+   branch is in the per-byte loop, and it costs patterns that have no range at
+   all -- including ones with no skip states, where the only change is that
+   `skip_ok[s]` is now bound to a local instead of compared in place.
+2. Keeping the per-byte path byte-identical and dispatching only inside the
+   skip, off a new `skip_rng` field: `bounded_num` 0.94-0.96x, but
+   `literal_sparse` 1.25-1.29x, `literal_dense` 1.11-1.12x, `teddy_alt`
+   1.03-1.06x. One more field on `Dfa.E` is what does that -- the record is
+   threaded through every entry point, and this is the same record-size effect
+   the hot-loop notes have hit repeatedly.
+
+**Why 1.23x on the kernel is only 3-6% on the row.** Because the skip scan is
+not most of `bounded_num`. Back out the fraction from the measurement itself:
+7000 ns saved on the row for 39000 ns saved on a full walk of the digits puts
+the scan at roughly 20% of the row's 185000. The other 80% is the automaton
+stepping the digits it lands on -- 14454 of them, 5.5% of the haystack, at
+several ns each -- plus the length lookup and the collect.
+
+So `[0-9]{2,4}`'s 1.72x is not the `Bset` kernel, and it is not vector width
+either (that claim was corrected in the entry above). It is that we visit every
+digit and Rust's lazy DFA visits every byte more cheaply than we visit a
+twentieth of them. Closing it means a cheaper step, not a cheaper scan.
+
