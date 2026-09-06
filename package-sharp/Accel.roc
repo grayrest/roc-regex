@@ -366,7 +366,8 @@ Accel := [].{
                     { e: { ..e, a: applied.a }, init: NoInit }
                 } else {
                     st = Dfa.get_state({ ..e, a: applied.a }, applied.id, False)
-                    { e: st.e, init: Prefix({ sets, anchor: anchor.i, single: anchor.single, anchor_byte: anchor.b, anchor_tab: anchor.tab, state: st.id, land: True }) }
+                    r = Accel.run_of(t, sets, anchor.i)
+                    { e: st.e, init: Prefix({ sets, anchor: anchor.i, single: anchor.single, anchor_byte: anchor.b, anchor_tab: anchor.tab, state: st.id, land: True, pair: r.pair, pair_byte: r.byte, pair_back: r.back, pair_dist: r.dist }) }
                 }
             }
         }
@@ -411,7 +412,10 @@ Accel := [].{
                     if anchor.i == 0 or anchor.w * 2 > Bset.weight(Accel.ascii_bytes(t, List.get(sets, 0) ?? 0)) {
                         NoInit
                     } else {
-                        Potential({ sets, anchor: anchor.i, single: anchor.single, anchor_byte: anchor.b, anchor_tab: anchor.tab, state: rev_ts_state, land: False })
+                        {
+                            r = Accel.run_of(t, sets, anchor.i)
+                            Potential({ sets, anchor: anchor.i, single: anchor.single, anchor_byte: anchor.b, anchor_tab: anchor.tab, state: rev_ts_state, land: False, pair: r.pair, pair_byte: r.byte, pair_back: r.back, pair_dist: r.dist })
+                        }
                     }
             }
         }
@@ -419,6 +423,65 @@ Accel := [].{
     # the ASCII bytes of a minterm set
     ascii_bytes : Trie.T, U64 -> List(U8)
     ascii_bytes = |t, s| List.keep_if(Arena.upto(128), |b| TSet.contains(s, (List.get(t.ascii, b) ?? 0).to_u32())) |> List.map(|b| b.to_u8_wrap())
+
+    ## A second byte the anchor's occurrence must be accompanied by, at a fixed
+    ## distance: `pair` is False when there is none.
+    Run : { pair : Bool, byte : U8, back : Bool, dist : U64 }
+
+    ## `\bthe\b` anchors on `h`, which occurs 13473 times on the bench haystack
+    ## against 1216 matches, so nearly every hit is rejected and the sweep is
+    ## mostly the cost of finding and rejecting them. When the sets around the
+    ## anchor are single ASCII codepoints they spell a literal run, and a second
+    ## byte of that run can be folded into the search itself (memchr's rare byte
+    ## pair): one more window compare rejects `h` that is not preceded by `t`
+    ## before it ever reaches verification.
+    ##
+    ## Returns the rarest OTHER byte of the maximal run containing the anchor,
+    ## as a signed distance from it, or `pair: False` when the run is shorter
+    ## than two.
+    run_of : Trie.T, List(U64), U64 -> Accel.Run
+    run_of = |t, sets, anchor| {
+        m = List.len(sets)
+        ja = m - 1 - anchor
+        no_pair = { pair: False, byte: 0, back: False, dist: 0 }
+        match Accel.byte_at(t, sets, m, ja) {
+            Err(_) => no_pair
+            Ok(_) => {
+                lo = Accel.run_down(t, sets, m, ja)
+                hi = Accel.run_up(t, sets, m, ja)
+                if hi == lo {
+                    no_pair
+                } else {
+                    best = List.fold(Arena.upto(hi - lo + 1), { j: ja, rank: 255 }, |acc, i| {
+                        j = lo + i
+                        r = Rlit.rank(Accel.byte_at(t, sets, m, j) ?? 0)
+                        if j != ja and r < acc.rank { { j, rank: r } } else { acc }
+                    })
+                    { pair: True, byte: Accel.byte_at(t, sets, m, best.j) ?? 0, back: best.j < ja, dist: if best.j < ja { ja - best.j } else { best.j - ja } }
+                }
+            }
+        }
+    }
+
+    # the byte of forward index `j`, when its set is one ASCII codepoint
+    byte_at : Trie.T, List(U64), U64, U64 -> Try(U8, [NotSingle])
+    byte_at = |t, sets, m, j|
+        if j >= m {
+            Err(NotSingle)
+        } else {
+            match Accel.single_cp(t, List.get(sets, m - 1 - j) ?? 0) {
+                Ok(cp) if cp < 0x80 => Ok(cp.to_u8_wrap())
+                _ => Err(NotSingle)
+            }
+        }
+
+    run_down : Trie.T, List(U64), U64, U64 -> U64
+    run_down = |t, sets, m, j|
+        if j == 0 { 0 } else if Accel.byte_at(t, sets, m, j - 1) == Err(NotSingle) { j } else { Accel.run_down(t, sets, m, j - 1) }
+
+    run_up : Trie.T, List(U64), U64, U64 -> U64
+    run_up = |t, sets, m, j|
+        if Accel.byte_at(t, sets, m, j + 1) == Err(NotSingle) { j } else { Accel.run_up(t, sets, m, j + 1) }
 
     Anchor : { i : U64, single : Bool, b : U8, tab : List(U8), w : U64 }
 

@@ -17,7 +17,11 @@ Rlit := [].{
     ## the sweep lands in after consuming all of them. `land` is False for RE#'s
     ## potential-start sets: the occurrence only says a match may start here, so
     ## the sweep resumes at its end in the initial state and re-reads it.
-    Prefix : { sets : List(U64), anchor : U64, single : Bool, anchor_byte : U8, anchor_tab : List(U8), state : U32, land : Bool }
+    ## `pair`: the anchor sits in a run of single-codepoint sets, so a second
+    ## byte of that run is folded into the search (`pair_byte` at `pair_dist`
+    ## before the anchor when `pair_back`, after it otherwise). It only filters
+    ## candidates; verification below still checks every set.
+    Prefix : { sets : List(U64), anchor : U64, single : Bool, anchor_byte : U8, anchor_tab : List(U8), state : U32, land : Bool, pair : Bool, pair_byte : U8, pair_back : Bool, pair_dist : U64 }
 
     Occ : { start : U64, end : U64 }
 
@@ -41,11 +45,22 @@ Rlit := [].{
         ja = m - 1 - pf.anchor
         after = m - 1 - ja
         n = List.len(hay)
+        pair = pf.pair
+        pb = pf.pair_byte
+        pback = pf.pair_back
+        pdist = pf.pair_dist
         var end = end0
         var result = Err(NotFound)
         var searching = end >= m
         while searching {
-            hit = if single { Rlit.rfind_byte(hay, ab, end - after) } else { Bset.rfind(hay, tab, 0, end - after) }
+            hit =
+                if pair {
+                    Rlit.rfind_pair(hay, ab, pb, pback, pdist, n, end - after)
+                } else if single {
+                    Rlit.rfind_byte(hay, ab, end - after)
+                } else {
+                    Bset.rfind(hay, tab, 0, end - after)
+                }
             match hit {
                 Err(_) => {
                     searching = False
@@ -126,6 +141,43 @@ Rlit := [].{
         d = Utf8.decode(hay, pos)
         if d.ok { Trie.class_of(t, d.cp) } else { t.invalid }
     }
+
+    ## The position of the last `b` strictly before `end` that also has `pb` at
+    ## `dist` bytes before it (`back`) or after it. Two window compares ANDed:
+    ## a window whose `b` lanes all fail the pair keeps scanning instead of
+    ## returning a candidate the caller would only reject. Windows too close to
+    ## an edge for the second load fall back to the `b`-only mask, which is
+    ## sound because the pair is a filter, never a requirement.
+    rfind_pair : List(U8), U8, U8, Bool, U64, U64, U64 -> Try(U64, [NotFound])
+    rfind_pair = |hay, b, pb, back, dist, n, end|
+        if end >= 16 {
+            w = end - 16
+            bv = U8x16.splat(b)
+            m0 = (U8x16.load(hay, w) ?? bv).eq_lanes(bv).to_bitmask()
+            m =
+                if m0 == 0 {
+                    0
+                } else if back {
+                    if w >= dist {
+                        pv = U8x16.splat(pb)
+                        m0.bitwise_and((U8x16.load(hay, w - dist) ?? pv).eq_lanes(pv).to_bitmask())
+                    } else {
+                        m0
+                    }
+                } else if w + dist + 16 <= n {
+                    pv = U8x16.splat(pb)
+                    m0.bitwise_and((U8x16.load(hay, w + dist) ?? pv).eq_lanes(pv).to_bitmask())
+                } else {
+                    m0
+                }
+            if m == 0 {
+                Rlit.rfind_pair(hay, b, pb, back, dist, n, w)
+            } else {
+                Ok(w + 15 - (m.count_leading_zero_bits()).to_u64())
+            }
+        } else {
+            Rlit.rfind_tail(hay, b, end)
+        }
 
     ## the position of the last `b` strictly before `end`
     rfind_byte : List(U8), U8, U64 -> Try(U64, [NotFound])

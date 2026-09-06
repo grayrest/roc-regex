@@ -1316,8 +1316,10 @@ to 30050.
 59 matches it is almost entirely the byte scan, and that was already near the
 floor. Decomposing `Holmes`, the scan accounts for about 11000 of its 30050 and
 the remaining 19000 covers 1219 matches, so roughly 15 ns each against Rust's
-14 ns. What is left is vector width, not overhead: Roc has 128-bit vectors, so
-the scan reads 16 bytes a window where Rust's reads 32.
+14 ns, which is parity. (An earlier draft of this paragraph blamed vector
+width, claiming Rust reads 32 bytes a window to Roc's 16. That is wrong: Rust's
+meta engine uses 128-bit vectors on this machine, so both read 16. Corrected
+2026-09-06.)
 
 ## `[0-9]{2,4}` and `\bthe\b`, the last two gaps (2026-09-06)
 
@@ -1331,31 +1333,59 @@ on the 256 KB haystack:
 
 **`[0-9]{2,4}` is essentially all reverse sweep.** Its `RemainingSets` length
 lookup makes the forward pass free, and its skip set already earns 3x: 614000
-without, 224000 with. What is left is 0.85 ns a byte against Rust's 0.42. The
-skip kernel runs two `table_lookup`s plus a compare, a negate, a bitmask and an
-or per 16-byte window, where Rust scans 32 bytes at a time over a ten-value
-byte set. That is vector width and ops per byte, not overhead, and I do not see
-a way to close it in Roc: the language has 128-bit vectors only, which the
-Teddy header has noted since M4.
+without, 224000 with. What is left is 0.85 ns a byte against Rust's 0.42.
 
-**`\bthe\b` splits differently.** One fix landed: the fixed-length end pass
-called `Utf8.advance`, a call per symbol wrapping a call per decode, costing
-145 ns a match to advance three ASCII bytes. Inlined, the row went 373350 to
-342450, so 1.78x to 1.68x, with every other row unchanged.
+That is NOT vector width. Rust's meta engine uses 128-bit vectors on this
+machine, the same as Roc, so both kernels read 16 bytes a window and the gap is
+work per window. Ours is the general `Bset` kernel: two `table_lookup`s, an
+and, a compare against zero, a negate, a bitmask and an or for the high bit,
+over a bounds-checked load. A contiguous ten-value set like `[0-9]` does not
+need any of that — two range compares and an and decide it. I have not
+confirmed which kernel Rust actually picks here, so the 2x is consistent with
+ops per window but not yet attributed; a `[0-9]`-shaped range kernel in `Bset`
+is the obvious thing to try and has not been tried.
 
-The rest is the sweep, and its cost is prefix VERIFICATION rather than
-scanning. The accelerator anchors on `h`, which occurs 13473 times where the
-pattern matches 1216, so 12257 of those hits are verified and rejected. Each
-verification checks the three other prefix sets, and each set check is a
-haystack load, an `ascii` load, a `sets` load and a bit test. Roughly 40000 set
-checks at four memory operations each accounts for the 341000.
+**`\bthe\b`: the cost was candidates, not verification.** One fix landed
+first: the fixed-length end pass called `Utf8.advance`, a call per symbol
+wrapping a call per decode, costing 145 ns a match to advance three ASCII
+bytes. Inlined, the row went 373350 to 342450, so 1.78x to 1.68x, with every
+other row unchanged.
 
-The fix, not yet built: the prefix sets for this pattern are a word-boundary
-class followed by the single codepoints `t`, `h`, `e`. A contiguous run of
-single-codepoint sets can be compared as one padded vector against a length
-mask, exactly as `find_all_literal` now verifies a literal, leaving only the
-boundary class scalar. That turns three set checks into one compare and should
-take the sweep near 200000, which would put the row at parity with Rust. The
-work is in `Rlit.Prefix` and `rfind_sets`, and the vector has to be built once
-per scan in `collect_prefix` rather than per candidate, since folded constants
-cannot hold `U8x16`.
+The rest is the sweep. The accelerator anchors on `h`, which occurs 13473 times
+on this haystack where the pattern matches 1216, so 12257 hits are found and
+rejected. I first read that as a VERIFICATION cost — three further set checks
+per rejection at four memory operations each — and built the fix that reading
+implies: the prefix sets here are a word-boundary class followed by the single
+codepoints `t`, `h`, `e`, so the contiguous run of single-codepoint sets was
+compared as one padded vector against a length mask, the way `find_all_literal`
+verifies a literal.
+
+That made the row 10% SLOWER (338700 to 372650), which falsified the reading.
+Measuring the halves separately: `Rlit.rfind_byte` for `h` over the haystack,
+one call per hit as the sweep does it, is about 210000 ns of the 341000 sweep
+on its own. So the scan is 60% of it, and the 12257 rejections share the other
+130000 — about 10 ns each, which is one or two checks, not three. Verification
+already early-outs on the first set that fails; replacing a 10 ns early-out
+with a 16-byte load, compare and mask is strictly more work.
+
+The cost is the candidate RATE, so the run belongs in the search, not the
+verification. `Accel.run_of` now returns the rarest OTHER byte of the run as a
+signed distance from the anchor, and `Rlit.rfind_pair` ANDs a second window
+compare at that distance into the anchor mask (memchr's rare byte pair): an `h`
+not preceded by `t` never leaves the scan loop. `\bthe\b` verifies `th`,
+`.*Holmes` verifies `H` with `m` three bytes on (the run's rarest pair), and
+`(\w+)@(\w+)` has no single-codepoint run so nothing changes.
+
+The pair is a filter and never a requirement: a window too close to an edge for
+the second load falls back to the anchor-only mask, and verification below
+still checks every set. That is what keeps it sound.
+
+| pattern | before | after | |
+|---|---|---|---|
+| `\bthe\b` | 338700 | 254350 | 0.75x |
+| every other row | | | 0.92x-1.00x |
+
+Which puts `\bthe\b` at about 1.26x of Rust, from 1.68x. The general lesson,
+and the second time this session: measure which half of a loop costs, do not
+infer it from the operation count. The rejected candidates were cheap because
+they early-out; finding them was not.
