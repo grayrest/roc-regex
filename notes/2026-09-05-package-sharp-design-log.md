@@ -917,11 +917,34 @@ Isolating `class_of` in a loop over 262 KB of mixed-script text, per lookup:
 | uniform bit, then search | 1860000 | one extra branch |
 | the same lookup written in the caller | 1365000 | data layout is fine |
 
-The last row is the finding. Writing the new layout's lookup directly in the
-calling loop costs what the original did, so the tables were never the
-problem. Adding a loop, or a call, or even one more branch to `class_of` stops
-it being inlined, and it runs per non-ASCII symbol on the hot path. This is
-the same inlining boundary recorded under M4 stage 2 for the scan loops.
+Two separate causes, separated by writing each lookup inline in the caller so
+that no call boundary exists, then comparing the same lookup inline against
+called. Same haystack, same checksum from all of them:
+
+| variant | ns per pass |
+|---|---|
+| shipped two-read lookup, inline in caller | 1397000 |
+| cut-point binary search, inline in caller | 2750000 |
+| shipped lookup, called as `Trie.class_of` | 2093000 |
+| old lookup, called as `Trie.class_of` | 1342000 |
+
+- **The search really does more work**: +1353000 between the two inline
+  probes, about 13.7 ns per lookup, with no call involved.
+- **Inlining is separately lost**: +696000 for the identical lookup once it
+  sits behind `Trie.class_of`, about 7.1 ns per lookup. The old lookup called
+  through the package matches the inline baseline, so it was being inlined and
+  the new one is not.
+
+The version that regressed 1.5x narrowed its search to one block with `l1`,
+so its +1363000 splits roughly half into call overhead and half into search
+steps. It was not predominantly an inlining artifact, which an earlier draft
+of this entry claimed.
+
+The shipped design still pays the 7 ns of call overhead. That does not appear
+end to end, where non-ASCII text measures 0.96x to 1.03x, which reads as the
+4x smaller tables repaying it in cache pressure the micro-benchmark cannot
+see. The inlining boundary itself is the same one recorded under M4 stage 2
+for the scan loops.
 
 So the shipped design keeps the original two-read shape exactly and takes its
 size from the element widths and the shared constant leaves. The cut-search
