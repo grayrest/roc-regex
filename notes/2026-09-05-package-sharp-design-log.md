@@ -1284,3 +1284,37 @@ version was 1.84x FASTER on the same row, so the cap came out. Its own
 measurement had been read against `find_all_plain`, which disables every
 accelerator, not just this one; that comparison flattered Teddy early on and
 hid the regression until the like-for-like A/B against the previous commit.
+
+## The short-literal overhead (2026-09-06)
+
+`Holmes` sat at 1.81x of Rust's meta engine and `Moriarty` at 1.17x, the two
+widest rows left. The difference between them is the tell: 1219 matches against
+59, on the same haystack, so the gap was per match rather than per byte.
+
+Counting first: on this haystack every `H` starts `Holmes` and every `M` starts
+`Moriarty`, so there is not one false candidate. Selectivity was not the
+problem, which ruled out reaching for Teddy's three-byte fingerprint.
+
+Two fixes, both the shapes this log keeps returning to.
+
+**Fusing the scan.** `find_all_literal` collected every candidate offset into a
+`List(U64)` and then folded over it. Scanning and verifying in one loop, with
+inline appends, took `Holmes` from 48150 to 42650.
+
+**Vectorizing the verification.** Confirming a 6-byte literal meant five
+bounds-checked byte loads. With the literal padded into a lane and a mask of
+its length, it is one load, one compare and one masked test, on the common path
+where the literal fits 16 bytes and the window is in bounds. That took `Holmes`
+to 30050.
+
+| pattern | before | after | vs Rust before | after |
+|---|---|---|---|---|
+| `Holmes` | 48150 | 30050 | 1.81x | 1.11x |
+| `Moriarty` | 11250 | 10650 | 1.17x | 1.08x |
+
+`Moriarty` barely moved, which is the expected result and a useful check: with
+59 matches it is almost entirely the byte scan, and that was already near the
+floor. Decomposing `Holmes`, the scan accounts for about 11000 of its 30050 and
+the remaining 19000 covers 1219 matches, so roughly 15 ns each against Rust's
+14 ns. What is left is vector width, not overhead: Roc has 128-bit vectors, so
+the scan reads 16 bytes a window where Rust's reads 32.

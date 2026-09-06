@@ -815,17 +815,75 @@ Dfa := [].{
         spans
     }
 
+    ## The pattern IS `lit` (RE#'s `FixedLengthString`): scan for its first byte
+    ## 16 at a time and verify in place.
+    ##
+    ## Fused, like `Teddy.match_lits`. Collecting candidate offsets into a list
+    ## and folding over it afterwards cost about 18 ns a match against Rust on
+    ## `Holmes`, which has 1219 matches and, on this haystack, not one false
+    ## candidate: the overhead was the list and the fold closure, not selectivity.
     find_all_literal : List(U8), List(U8) -> List({ start : U64, end : U64 })
     find_all_literal = |hay, lit| {
+        n = List.len(hay)
         plen = List.len(lit)
-        cands = Teddy.byte_candidates_capped(List.get(lit, 0) ?? 0, hay, List.len(hay) + 1) ?? []
-        fin = List.fold(cands, { spans: [], last_end: 0 }, |acc, at|
-            if at < acc.last_end or !(Lit.matches(hay, at, lit, plen)) {
-                acc
-            } else {
-                { spans: List.append(acc.spans, { start: at, end: at + plen }), last_end: at + plen }
-            })
-        fin.spans
+        b0 = List.get(lit, 0) ?? 0
+        bv = U8x16.splat(b0)
+        # verify with one vector compare when the literal fits a lane and the
+        # window is in bounds: `lit` padded to 16 bytes, and a mask of its length
+        # so the pad bytes are ignored. Byte-at-a-time verification cost about
+        # 12 ns a match against Rust, which compares the whole literal at once.
+        litv = U8x16.from_list(List.take_first(List.concat(lit, List.repeat(0, 16)), 16)) ?? bv
+        want = if plen >= 16 { 0xFFFF } else { (1.U16.shl_wrap(plen.to_u8_wrap())) - 1 }
+        wide = plen <= 16
+        var spans = []
+        var last_end = 0
+        var w = 0
+        while w + 16 <= n {
+            bm = (U8x16.load(hay, w) ?? bv).eq_lanes(bv).to_bitmask()
+            if bm != 0 {
+                var j = 0
+                while j < 16 {
+                    if bm.bitwise_and(1.U16.shl_wrap(j.to_u8_wrap())) != 0 {
+                        at = w + j
+                        if at >= last_end and at + plen <= n {
+                            ok =
+                                if wide and at + 16 <= n {
+                                    ((U8x16.load(hay, at) ?? bv).eq_lanes(litv).to_bitmask()).bitwise_and(want) == want
+                                } else {
+                                    var i = 1
+                                    var ok2 = True
+                                    while ok2 and i < plen {
+                                        if (List.get(hay, at + i) ?? 1) == (List.get(lit, i) ?? 2) { i = i + 1 } else { ok2 = False }
+                                    }
+                                    ok2
+                                }
+                            if ok {
+                                spans = List.append(spans, { start: at, end: at + plen })
+                                last_end = at + plen
+                            }
+                        }
+                    }
+                    j = j + 1
+                }
+            }
+            w = w + 16
+        }
+        var at2 = w
+        while at2 < n {
+            if (List.get(hay, at2) ?? 1) == b0 and at2 >= last_end and at2 + plen <= n {
+                var i = 1
+                var ok = True
+                while ok and i < plen {
+                    if (List.get(hay, at2 + i) ?? 1) == (List.get(lit, i) ?? 2) { i = i + 1 } else { ok = False }
+                }
+                if ok {
+                    spans = List.append(spans, { start: at2, end: at2 + plen })
+                    last_end = at2 + plen
+                }
+            }
+            at2 = at2 + 1
+        }
+        spans
     }
 
     # next state on the symbol ending at `pos`; returns the state and the symbol's start
