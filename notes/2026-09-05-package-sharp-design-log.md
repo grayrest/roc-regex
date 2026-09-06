@@ -1425,15 +1425,41 @@ min-of-20 the same binary reads anywhere from 211000 to 451000 run to run.)
    threaded through every entry point, and this is the same record-size effect
    the hot-loop notes have hit repeatedly.
 
-**Why 1.23x on the kernel is only 3-6% on the row.** Because the skip scan is
-not most of `bounded_num`. Back out the fraction from the measurement itself:
-7000 ns saved on the row for 39000 ns saved on a full walk of the digits puts
-the scan at roughly 20% of the row's 185000. The other 80% is the automaton
-stepping the digits it lands on -- 14454 of them, 5.5% of the haystack, at
-several ns each -- plus the length lookup and the collect.
+**Why 1.23x on the kernel is only 3-6% on the row.** I first wrote that the
+scan is 20% of the row and the other 80% is the automaton stepping "the 14454
+digits it lands on". Both halves of that are wrong, and counting the haystack
+says why:
 
-So `[0-9]{2,4}`'s 1.72x is not the `Bset` kernel, and it is not vector width
-either (that claim was corrected in the entry above). It is that we visit every
-digit and Rust's lazy DFA visits every byte more cheaply than we visit a
-twentieth of them. Closing it means a cheaper step, not a cheaper scan.
+| | count |
+|---|---|
+| bytes | 262144 |
+| digits | 4554 |
+| digit runs | 1691 |
+| non-ASCII bytes | 9900 |
+| non-ASCII symbols | 4950 |
+| `Bset.rfind` hits for `[0-9]` | 14454 |
+
+14454 = 4554 + 9900. The digit skip stops at every digit AND at every non-ASCII
+BYTE, because `Bset` or-s the high bit into the member mask -- "a skip must
+stop at any multibyte symbol and let the automaton decode it", as the header
+there says. So of the roughly 9500 symbol steps the sweep takes, 4950 are
+non-ASCII symbols that cannot possibly be digits, and each of those is the
+expensive step: `Utf8.decode_rev`, `Trie.class_of`, a full `table` lookup on
+the minterm, where a digit step is one `atable` read.
+
+Fresh decomposition of the row, min-of-200 in process:
+
+| | ns |
+|---|---|
+| reverse sweep | 153000 |
+| forward end pass | 17000 |
+| `find_all` | 170000 |
+| sweep with no skip sets | 546000 |
+
+The sweep is 90% of the row, and over half of the sweep is spent on symbols
+that are in the haystack's other alphabet.
+
+So `[0-9]{2,4}`'s 1.72x is not vector width (corrected above), not the `Bset`
+kernel, and not the cost of a step in general. It is the number of steps, and
+specifically the non-ASCII ones the skip refuses to pass.
 
