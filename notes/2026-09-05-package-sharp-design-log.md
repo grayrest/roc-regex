@@ -726,3 +726,51 @@ the reference and fails only when both disagree with us.
 
 Performance is unchanged within noise (A/B after the changes: class_plus
 2.17 ms, two_words 1.89, compl 1.49, bounded_num 0.40, caps_email 0.09).
+
+## Three-way benchmark (2026-09-05): Sharp, Regex, Rust meta
+
+`tools/bench/run.sh`, 256 KB generated haystack, ns per `find_all` over the
+whole haystack, all ten rows agreeing on match counts.
+
+| pattern | Regex | Sharp | Rust meta | Regex/meta | Sharp/meta | Sharp vs Regex |
+|---|---|---|---|---|---|---|
+| `Holmes` | 51650 | 45600 | 27102 | 1.91x | 1.68x | 1.13x faster |
+| `Moriarty` | 11400 | 11050 | 10023 | 1.14x | 1.10x | 1.03x faster |
+| `Sherlock\|Holmes\|…` | 1009050 | 934550 | 426359 | 2.37x | 2.19x | 1.08x faster |
+| `[A-Za-z]+` | 3382900 | 2556000 | 2226193 | 1.52x | 1.15x | 1.32x faster |
+| `[0-9]{2,4}` | 157150 | 193350 | 109584 | 1.43x | 1.76x | 1.23x slower |
+| `\bthe\b` | 333500 | 357000 | 204681 | 1.63x | 1.74x | 1.07x slower |
+| `\w+\s+\w+` | 2383800 | 2676050 | 1547382 | 1.54x | 1.73x | 1.12x slower |
+| `(\w+)@(\w+)` | 133250 | 89100 | 69035 | 1.93x | 1.29x | 1.50x faster |
+| `\p{L}+` | 3408300 | 2648000 | 2052761 | 1.66x | 1.29x | 1.29x faster |
+| `.*Holmes` | 536200 | 372900 | 644486 | 0.83x | 0.58x | 1.44x faster |
+
+Sharp is ahead on seven of ten and behind on three. Rust's PikeVM, the
+engine-matched comparison from the original note, is 3.4 ms to 8.7 ms on
+these patterns, so both Roc engines are an order of magnitude past it and the
+lazy-DFA meta engine is the only meaningful target left.
+
+The split follows the accelerators exactly. Sharp wins where the reverse
+sweep can skip or the pattern reduces to a literal search: dense classes
+(1.15x and 1.29x of Rust against Regex's 1.52x and 1.66x), the email pattern
+with its `@` anchor, and `.*Holmes`, where both Roc engines beat Rust because
+a leading `.*` denies its prefilter a start anchor while our reverse sweep
+finds the literal directly. Sharp loses on the three patterns where nothing
+skips and RE#'s design pays its structural cost of two passes over every
+byte: `\w+\s+\w+` has no accelerator at all, and `[0-9]{2,4}` and `\bthe\b`
+skip on only one state each. Those three are also the patterns Regex was
+tuned on most recently (its inline-start and hard-separator end-scan work),
+so the comparison there is against a well-optimized forward scan.
+
+### Harness fix
+
+`run.sh` ran each binary exactly once, immediately after building it. A
+freshly built binary reads about 80% slow on its first execution: repeated
+runs of the same `bench_sharp` gave 87050, 49800, 49350, 46450 ns for
+`Holmes`. Every fast-pattern row in earlier three-way runs was inflated by
+that. The harness now discards a warmup run and takes the per-pattern
+minimum of five, as `probe.sh` already did inside one process. Numbers above
+reproduce across runs to within 2%.
+
+Roc's `--opt=speed` is the build default, so the harness was always
+optimizing; an explicit flag changes nothing.
