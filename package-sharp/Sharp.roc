@@ -130,12 +130,12 @@ Sharp := [].{
     ## `find_all` on the fast scan with every accelerator off (A/B measurement)
     find_all_plain : Sharp.T, List(U8) -> List(Sharp.Span)
     find_all_plain = |re, hay|
-        if re.e.complete { Dfa.find_all_fast_opts(re.e, re.trie, Accel.none, hay, False) } else { Sharp.find_all_threaded(re, hay) }
+        if re.e.complete { Dfa.find_all_fast_opts(re.e, re.trie, Accel.none, hay, False, False) } else { Sharp.find_all_threaded(re, hay) }
 
     ## `find_all` with the compile-time accelerators but no per-state skips
     find_all_noskip : Sharp.T, List(U8) -> List(Sharp.Span)
     find_all_noskip = |re, hay|
-        if re.e.complete { Dfa.find_all_fast_opts(re.e, re.trie, re.accel, hay, False) } else { Sharp.find_all_threaded(re, hay) }
+        if re.e.complete { Dfa.find_all_fast_opts(re.e, re.trie, re.accel, hay, False, False) } else { Sharp.find_all_threaded(re, hay) }
 
     ## `find_all` on the threaded (extensible) scan regardless of completeness —
     ## the corpus cross-checks it against the fast path
@@ -219,15 +219,22 @@ Sharp := [].{
 
     ## The first match. Documented as a full sweep: the reverse pass has to reach
     ## the haystack start before the leftmost start is known (S11).
+    ## The leftmost match, as a list of zero or one. `find` and `is_match` share
+    ## it so that neither computes every match to answer about one: on a dense
+    ## class that was 40056 spans for a question about the first.
+    find_first : Sharp.T, List(U8) -> List(Sharp.Span)
+    find_first = |re, hay|
+        if re.e.complete { Dfa.find_first_fast(re.e, re.trie, re.accel, hay) } else { Sharp.find_all_threaded(re, hay) }
+
     find : Sharp.T, List(U8) -> Try(Sharp.Span, [NoMatch])
     find = |re, hay|
-        match List.first(Sharp.find_all(re, hay)) {
+        match List.first(Sharp.find_first(re, hay)) {
             Ok(s) => Ok(s)
             Err(_) => Err(NoMatch)
         }
 
     is_match : Sharp.T, List(U8) -> Bool
-    is_match = |re, hay| !List.is_empty(Sharp.find_all(re, hay))
+    is_match = |re, hay| List.len(Sharp.find_first(re, hay)) > 0
 
     count : Sharp.T, List(U8) -> U64
     count = |re, hay| List.len(Sharp.find_all(re, hay))

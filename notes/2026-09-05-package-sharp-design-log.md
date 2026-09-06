@@ -1103,3 +1103,52 @@ patterns each about 17%.
 
 The lesson generalises past this change: the accumulator is O(haystack) on
 dense patterns, so anything that touches it a second time costs a full pass.
+
+## Two more redundant passes (2026-09-06)
+
+Auditing the scan paths for the same shape as the ordering copy found three
+more, two of them worth fixing now.
+
+**`find` and `is_match` computed every match.** Both were defined as
+`find_all` plus a pick, so on a dense class they ran the forward pass over all
+40056 matches to answer about one. The reverse sweep is unavoidable, since the
+leftmost start is not known until the sweep reaches the haystack start, but
+everything after it was waste. `find_all_fast_opts` now takes `first_only` and
+stops the forward loop after the first span; `find` and `is_match` share it
+through `Sharp.find_first`.
+
+| pattern | is_match before | after | find before | after | reverse sweep |
+|---|---|---|---|---|---|
+| `[A-Za-z]+` | 2089000 | 1175000 | 2063000 | 1140000 | ~1074000 |
+| `\w+\s+\w+` | 2659000 | 1158000 | 2596000 | 1140000 | ~1040000 |
+| `(\w+)@(\w+)` | 88000 | 40000 | 88000 | 40000 | ~39000 |
+
+Both now sit at the reverse-sweep floor, which is the design's lower bound for
+a leftmost answer. 1.8x to 2.3x.
+
+**The threaded scan still sorted unconditionally.** The previous entry fixed
+the ordering copy in `find_all_fast` and left the identical code in
+`Dfa.find_all`, which incomplete folds use. Same fix: check for order, read
+backwards when ordered, sort only when lookarounds resolved out of order. Worth
+3% on `a(?=.*b)`, 12220000 to 11860000, because the threaded path's cost is
+dominated by `Ref.prepare` and the per-symbol stepping rather than the sort.
+
+**`count` is left alone.** It genuinely needs every match, because match
+boundaries decide which later starts get skipped, so only the span allocation
+is recoverable.
+
+### The gates did not cover what changed
+
+Nothing in the corpus, the differential or the fuzz runner exercised `find` or
+`is_match`; they all go through `find_all`. So the fuzz runner now checks
+`find` against the first of `find_all`, and `is_match` against whether
+`find_all` is empty, on every case: 27396 of them across both tiers, zero
+divergences. That check should have existed before the API had two entry
+points whose agreement was assumed rather than tested.
+
+### Still open
+
+`Ref.prepare` materializes a class and a byte offset per symbol before the
+threaded scan runs, two haystack-sized lists that the fast path does without
+and that RE# does not build at all. That is structural rather than a stray
+pass, so it is a larger change than these.

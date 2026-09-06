@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("ResharpBench")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+7af453b5bbade6a2a1baba4f4d51c6fdfcc0bb5f")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+8314668b1482331ecfe231a26753ab3edc75cc51")]
 [assembly: System.Reflection.AssemblyProductAttribute("ResharpBench")]
 [assembly: System.Reflection.AssemblyTitleAttribute("ResharpBench")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

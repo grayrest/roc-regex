@@ -524,24 +524,42 @@ Dfa := [].{
     Spans : { e : Dfa.E, spans : List({ start : U64, end : U64 }) }
 
     find_all : Dfa.E, Ref.Hay -> Dfa.Spans
-    find_all = |e, h| {
-        st = Dfa.starts(e, h)
-        # RE# walks `starts` backwards assuming it is right-to-left, but lookaround
-        # resolutions record positions out of order (log, "RE# divergences" 2), so
-        # sort ascending first; skip starts inside the previous match
-        sorted_starts = List.sort_with(st.acc, |x, y| U64.order_relative_to(x, y)) |> Dfa.dedup
-        fin = List.fold(sorted_starts, { e: st.e, spans: [], next_valid: 0 }, |acc, s|
-            if s < acc.next_valid {
-                acc
+    find_all = |e0, h| {
+        st = Dfa.starts(e0, h)
+        # As in `find_all_fast`: RE# walks `starts` backwards assuming right-to-left
+        # order, which lookaround resolutions can break (log, "RE# divergences" 2).
+        # Read it backwards when it IS ordered, sort only when it is not, and let
+        # the duplicate check below stand in for a separate dedup pass.
+        raw = st.acc
+        desc = Dfa.is_descending(raw)
+        sts = if desc { raw } else { List.sort_with(raw, |x, y| U64.order_relative_to(x, y)) }
+        n = List.len(sts)
+        var e = st.e
+        var spans = []
+        var next_valid = 0
+        var prev = 0xFFFF_FFFF_FFFF_FFFF
+        var i = 0
+        while i < n {
+            s2 = if desc { List.get(sts, n - 1 - i) ?? 0 } else { List.get(sts, i) ?? 0 }
+            i = i + 1
+            dup = s2 == prev
+            prev = s2
+            if dup or s2 < next_valid {
+                {}
             } else {
-                r = Dfa.ends_from(acc.e, h, s)
+                r = Dfa.ends_from(e, h, s2)
+                e = r.e
                 match r.end {
-                    Ok(en) => { e: r.e, spans: List.append(acc.spans, { start: s, end: en }), next_valid: en }
+                    Ok(en) => {
+                        spans = List.append(spans, { start: s2, end: en })
+                        next_valid = en
+                    }
                     # a recorded start always has an end; keep going if it somehow does not
-                    Err(_) => { ..acc, e: r.e }
+                    Err(_) => {}
                 }
-            })
-        { e: fin.e, spans: fin.spans }
+            }
+        }
+        { e, spans }
     }
 
     ## Is the reverse sweep's output already in descending position order? It is
@@ -583,13 +601,24 @@ Dfa := [].{
 
     ## RE#'s llmatch on a complete fold, as byte spans
     find_all_fast : Dfa.E, Trie.T, Dfa.Accels, List(U8) -> List({ start : U64, end : U64 })
-    find_all_fast = |e, t, ac, hay| Dfa.find_all_fast_opts(e, t, ac, hay, True)
+    find_all_fast = |e, t, ac, hay| Dfa.find_all_fast_opts(e, t, ac, hay, True, False)
 
-    ## `skip` turns the per-state skip sets off (A/B measurement)
-    find_all_fast_opts : Dfa.E, Trie.T, Dfa.Accels, List(U8), Bool -> List({ start : U64, end : U64 })
-    find_all_fast_opts = |e, t, ac, hay, skip|
+    ## The leftmost match only, as a list of zero or one. The reverse sweep still
+    ## has to reach the haystack start before the leftmost start is known, but the
+    ## forward pass stops at the first start that yields an end, which is all
+    ## `find` and `is_match` need.
+    find_first_fast : Dfa.E, Trie.T, Dfa.Accels, List(U8) -> List({ start : U64, end : U64 })
+    find_first_fast = |e, t, ac, hay| Dfa.find_all_fast_opts(e, t, ac, hay, True, True)
+
+    ## `skip` turns the per-state skip sets off (A/B measurement); `first_only`
+    ## stops after one match
+    find_all_fast_opts : Dfa.E, Trie.T, Dfa.Accels, List(U8), Bool, Bool -> List({ start : U64, end : U64 })
+    find_all_fast_opts = |e, t, ac, hay, skip, first_only|
         match ac.override {
-            Literal(lit) => Dfa.find_all_literal(hay, lit)
+            Literal(lit) => {
+                r = Dfa.find_all_literal(hay, lit)
+                if first_only { List.take_first(r, 1) } else { r }
+            }
             NoOverride => {
                 sk = skip and e.any_skip
                 raw = Dfa.starts_fast_opts(e, t, ac.init, hay, sk)
@@ -600,7 +629,7 @@ Dfa := [].{
                 # sort is still needed when lookarounds resolved out of order.
                 desc = Dfa.is_descending(raw)
                 sts = if desc { raw } else { List.sort_with(raw, |x, y| U64.order_relative_to(x, y)) }
-                Dfa.ends_fast(e, t, ac.len, hay, sts, sk, desc)
+                Dfa.ends_fast(e, t, ac.len, hay, sts, sk, desc, first_only)
             }
         }
 
@@ -611,8 +640,8 @@ Dfa := [].{
     ## once: calling `end_fast` per start passed the engine record each time
     ## (4.9 ms against 0.5 ms for 40k matches), and a `List.fold` closure over
     ## the starts copied its captured environment per start (8 ms for 262k).
-    ends_fast : Dfa.E, Trie.T, Dfa.Len, List(U8), List(U64), Bool, Bool -> List({ start : U64, end : U64 })
-    ends_fast = |e, t, len, hay, sts, skip, descending| {
+    ends_fast : Dfa.E, Trie.T, Dfa.Len, List(U8), List(U64), Bool, Bool, Bool -> List({ start : U64, end : U64 })
+    ends_fast = |e, t, len, hay, sts, skip, descending, first_only| {
         n = List.len(hay)
         at = e.atable
         nks = e.st_nk
@@ -781,6 +810,7 @@ Dfa := [].{
                     }
                 }
             }
+            if first_only and List.len(spans) > 0 { i = n_sts } else { {} }
         }
         spans
     }

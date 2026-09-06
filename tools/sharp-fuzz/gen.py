@@ -153,17 +153,25 @@ spans = |sp| sp |> List.map(|s| "${s.start.to_str()}-${s.end.to_str()}") |> Str.
 
 Outcome : { rejected : U64, incomplete : U64, cases : U64, fails : List(Str), known : List(Str) }
 
+one : List(Sharp.Span) -> Str
+one = |sp| match List.first(sp) { Ok(s) => "${s.start.to_str()}-${s.end.to_str()}", Err(_) => "-" }
+
 check : Sharp.T, Str, List(U8), Outcome -> Outcome
 check = |re, pat, hay, o| {
-	fast = spans(Sharp.find_all(re, hay))
+	all = Sharp.find_all(re, hay)
+	fast = spans(all)
 	ref = spans(Sharp.find_all_ref(re, hay))
 	thr = spans(Sharp.find_all_threaded(re, hay))
 	ev = spans(Sharp.find_all(Sharp.with_runtime_cap(re, 6), hay))
+	# `find` and `is_match` stop the forward pass at the first match, so they are
+	# checked against taking the first of `find_all` rather than assumed equal
+	fst = match Sharp.find(re, hay) { Ok(s) => "${s.start.to_str()}-${s.end.to_str()}", Err(_) => "-" }
+	ism = Sharp.is_match(re, hay)
 	o2 = { ..o, cases: o.cases + 1 }
-	if fast == ref and thr == ref and ev == ref {
+	if fast == ref and thr == ref and ev == ref and fst == one(all) and ism == (List.len(all) > 0) {
 		o2
 	} else {
-		{ ..o2, fails: List.append(o2.fails, "/${pat}/ on ${hay |> List.map(|b| b.to_str()) |> Str.join_with(" ")}: fast=[${fast}] threaded=[${thr}] evict=[${ev}] ref=[${ref}]") }
+		{ ..o2, fails: List.append(o2.fails, "/${pat}/ on ${hay |> List.map(|b| b.to_str()) |> Str.join_with(" ")}: fast=[${fast}] threaded=[${thr}] evict=[${ev}] ref=[${ref}] find=${fst} want_find=${one(all)} is_match=${if ism { "y" } else { "n" }}") }
 	}
 }
 
