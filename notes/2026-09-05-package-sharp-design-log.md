@@ -1227,3 +1227,60 @@ they gained slightly from not ordering starts or building a span list.
 
 `find_all` is untouched, as the bench confirms: `[A-Za-z]+` 2174650 against
 Rust's 2229288, still 0.98x.
+
+## A literal-set accelerator for alternations (2026-09-06)
+
+The alternation was the worst row against Rust, 2.07x, because RE#'s design has
+no literal-set accelerator: its sweep skips only to the eight capitals where
+Rust runs Teddy over the literals themselves. We already had Teddy, so the gap
+was ours to close.
+
+`Accel.literal_set` recognises a pattern whose language is a finite set of two
+to eight non-empty strings, with no anchor or lookaround, and orders them
+LONGEST FIRST, because `Teddy.lit_end` returns the first literal that matches
+at a position and leftmost-longest wants the longest. `Sharp` carries the set
+and dispatches before the scan.
+
+| case, 256 KB of prose | Teddy | ordinary scan |
+|---|---|---|
+| 8 common names, 9630 matches | 467000 | 1004000 |
+| 3 rare names, 59 matches | 28000 | 549000 |
+| 3 absent names | 24000 | 545000 |
+
+On the bench the alternation went from 903250 to 490200, so 1.84x, and from
+2.43x of Rust's meta engine to 1.14x. Every other row moved 0.96x to 1.03x,
+which is noise.
+
+### Four things that went wrong first
+
+**Detection has to be recursive.** A flat walk over the union's children found
+only 5 of the 8 literals, because the builder merges shared affixes:
+`Watson|Norton` is stored as a concat whose head is a union, not as two literal
+chains. `Accel.literal_lang` computes the language as a set of strings through
+concat, union and singleton, with the member count capped so it cannot blow up.
+
+**Putting the branch in the hot function cost 3-25% on EVERY pattern**,
+including the one it was meant to help. Adding a `LiteralSet` arm to
+`Dfa.find_all_fast_opts` slowed `two_words` by 1.21x and `caps_email` by 1.22x,
+patterns that never take the branch. Extracting the general scan into its own
+function did not help, so it was not the call: the hot function simply got
+bigger. `Sharp` dispatches instead, and `Dfa` never learns about literal sets.
+Same inlining boundary as the trie lookup and the scan loops.
+
+**Teddy's verification cost about 150 ns a candidate**, enough to lose to the
+ordinary scan on a dense alternation. Two causes, both the familiar shape:
+`lit_end` walked `List(List(U8))`, refcounting a nested list per literal per
+candidate, and `scan_m` -> `bits_m` -> `step_m` passed the 6-vector `Teddy.T`
+and the accumulator record per window, per set bit and per candidate.
+Flattening the literals into one buffer with offsets took it from 1.21x to
+1.13x; rewriting the fused scan as a single function of `while` loops with the
+tables in locals took it to 0.54x.
+
+**A defensive cap made things worse.** With verification still slow, a
+candidate cap looked necessary so a dense alternation could fall back. It was
+measured at 1.03x on that row, because bailing means paying for a partial Teddy
+scan and then the whole ordinary one. Once the loop was rewritten the uncapped
+version was 1.84x FASTER on the same row, so the cap came out. Its own
+measurement had been read against `find_all_plain`, which disables every
+accelerator, not just this one; that comparison flattered Teddy early on and
+hid the regression until the like-for-like A/B against the previous commit.

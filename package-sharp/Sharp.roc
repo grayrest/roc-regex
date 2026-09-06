@@ -18,6 +18,7 @@ import Deriv
 import Dfa
 import Err
 import Ref
+import Teddy
 import Show
 import Trie
 import TSet
@@ -27,7 +28,7 @@ Sharp := [].{
     ## The compiled pattern. `root` is the raw pattern node, `rev` its reversal,
     ## `rev_ts` `_*·rev` (the reverse search start), `noprefix` the pattern with
     ## its lookbehind prefix stripped (the forward end pass). Documented-unstable.
-    T : { a : Arena.A, trie : Trie.T, root : U32, rev : U32, rev_ts : U32, ts : U32, noprefix : U32, e : Dfa.E, accel : Accel.T }
+    T : { a : Arena.A, trie : Trie.T, root : U32, rev : U32, rev_ts : U32, ts : U32, noprefix : U32, e : Dfa.E, accel : Accel.T, lits : List(List(U8)) }
 
     ## D13 budget 4: states the fold may explore — the artifact budget (256 KB
     ## provisional) over the table stride, capped at `fold_state_cap`. The cap is
@@ -90,7 +91,12 @@ Sharp := [].{
                                 e0 = Dfa.init(np.a, rts.id, np.id, Sharp.max_states(trie.n_classes))
                                 ac = Accel.analyze(e0, trie, root.id, rv.id, rts.id, np.id)
                                 e = Dfa.freeze(Dfa.explore(ac.e), trie.ascii)
-                                Ok({ a: e.a, trie, root: root.id, rev: rv.id, rev_ts: rts.id, ts: ts.id, noprefix: np.id, e, accel: ac.accel })
+                                lits =
+                                    match ac.accel.override {
+                                        NoOverride => Accel.literal_set(e.a, trie, root.id) ?? []
+                                        _ => []
+                                    }
+                                Ok({ a: e.a, trie, root: root.id, rev: rv.id, rev_ts: rts.id, ts: ts.id, noprefix: np.id, e, accel: ac.accel, lits })
                             }
                         }
                     }
@@ -116,15 +122,48 @@ Sharp := [].{
         }
 
     ## All non-overlapping leftmost-longest matches.
+    ## A union of literals is Teddy over all of them at once, with the literals
+    ## ordered longest-first at compile time so the first one matching at a
+    ## position is the longest, which is what leftmost-longest asks for. `Err`
+    ## when the pattern is not such a union, or when Teddy declines the set, in
+    ## which case the ordinary scan runs.
+    ##
+    ## Dispatched here rather than inside `Dfa.find_all_fast_opts`: putting
+    ## another arm in that function cost 3-25% on every pattern, the target row
+    ## included, so the hot scan does not learn about this at all.
+    lit_set_spans : List(List(U8)), List(U8) -> Try(List(Sharp.Span), [NoSet])
+    lit_set_spans = |lits, hay|
+        if List.is_empty(lits) {
+            Err(NoSet)
+        } else {
+            match Teddy.build(lits) {
+                Err(_) => Err(NoSet)
+                Ok(td) =>
+                    # Uncapped. A candidate cap was tried, to protect the case
+                    # where matches are so dense that Teddy stops paying, but once
+                    # its scan was rewritten as one loop the dense case became
+                    # 1.84x FASTER than the ordinary scan, and the cap only made
+                    # it pay for a partial scan before giving up.
+                    match Teddy.match_lits(td, hay, List.len(hay) + 1) {
+                        Ok(sp) => Ok(sp)
+                        Err(_) => Err(NoSet)
+                    }
+            }
+        }
+
     find_all : Sharp.T, List(U8) -> List(Sharp.Span)
     find_all = |re, hay|
-        if re.e.complete {
-            # a complete fold is a read-only table: the byte-loop scans
-            Dfa.find_all_fast(re.e, re.trie, re.accel, hay)
-        } else {
-            h = Ref.prepare(re.trie, hay)
-            r = Dfa.find_all(re.e, h)
-            List.map(r.spans, |sp| { start: (List.get(h.pos, sp.start) ?? 0).to_u64(), end: (List.get(h.pos, sp.end) ?? 0).to_u64() })
+        match Sharp.lit_set_spans(re.lits, hay) {
+            Ok(sp) => sp
+            Err(_) =>
+                if re.e.complete {
+                    # a complete fold is a read-only table: the byte-loop scans
+                    Dfa.find_all_fast(re.e, re.trie, re.accel, hay)
+                } else {
+                    h = Ref.prepare(re.trie, hay)
+                    r = Dfa.find_all(re.e, h)
+                    List.map(r.spans, |sp| { start: (List.get(h.pos, sp.start) ?? 0).to_u64(), end: (List.get(h.pos, sp.end) ?? 0).to_u64() })
+                }
         }
 
     ## `find_all` on the fast scan with every accelerator off (A/B measurement)
@@ -193,7 +232,11 @@ Sharp := [].{
                 RemainingSets(k, c, m) => "len=prefix${k.to_str()}+upto${m.to_str()}x${c.to_str()}"
                 MatchEnd => "len=any"
             }
-        ov = match re.accel.override { Literal(l) => "override=${Str.from_utf8_lossy(l)}", NoOverride => "override=none" }
+        ov =
+            match re.accel.override {
+                Literal(l) => "override=${Str.from_utf8_lossy(l)}"
+                NoOverride => if List.is_empty(re.lits) { "override=none" } else { "override=set[${re.lits |> List.map(|l| Str.from_utf8_lossy(l)) |> Str.join_with("|")}]" }
+            }
         "${init} ${len} ${ov}"
     }
 
@@ -224,7 +267,10 @@ Sharp := [].{
     ## class that was 40056 spans for a question about the first.
     find_first : Sharp.T, List(U8) -> List(Sharp.Span)
     find_first = |re, hay|
-        if re.e.complete { Dfa.find_first_fast(re.e, re.trie, re.accel, hay) } else { Sharp.find_all_threaded(re, hay) }
+        match Sharp.lit_set_spans(re.lits, hay) {
+            Ok(sp) => List.take_first(sp, 1)
+            Err(_) => if re.e.complete { Dfa.find_first_fast(re.e, re.trie, re.accel, hay) } else { Sharp.find_all_threaded(re, hay) }
+        }
 
     find : Sharp.T, List(U8) -> Try(Sharp.Span, [NoMatch])
     find = |re, hay|

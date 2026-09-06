@@ -16,6 +16,7 @@ import Build
 import Deriv
 import Dfa
 import Rlit
+import Teddy
 import TSet
 import Trie
 import Utf8
@@ -184,6 +185,70 @@ Accel := [].{
 
     count_cps : List(U8) -> U64
     count_cps = |b| List.count_if(b, |x| x < 0x80 or x >= 0xC0)
+
+    ## The pattern as a set of literal alternatives, when its language is a
+    ## finite set of two to eight non-empty strings and it holds no anchor or
+    ## lookaround. Ordered LONGEST FIRST, because `Teddy.lit_end` takes the first
+    ## literal that matches at a position and leftmost-longest wants the longest.
+    ##
+    ## Not part of `Accel.T`: threading it through `Dfa.Accels` put another arm
+    ## in `find_all_fast_opts` and cost 3-25% on every pattern, so `Sharp` holds
+    ## it and dispatches before the scan.
+    literal_set : Arena.A, Trie.T, U32 -> Try(List(List(U8)), [NotLiteralSet])
+    literal_set = |a, t, root|
+        if Arena.depends_anchor(a, root) or Arena.contains_look(a, root) {
+            Err(NotLiteralSet)
+        } else {
+            match Accel.literal_lang(a, t, root, 8) {
+                Err(e) => Err(e)
+                Ok(ls) =>
+                    if List.len(ls) < 2 or List.any(ls, List.is_empty) {
+                        # one literal is the `Literal` override's job, and Teddy
+                        # cannot bucket an empty one
+                        Err(NotLiteralSet)
+                    } else {
+                        ordered = List.sort_with(ls, |x, y| U64.order_relative_to(List.len(y), List.len(x)))
+                        match Teddy.build(ordered) {
+                            Ok(_) => Ok(ordered)
+                            Err(_) => Err(NotLiteralSet)
+                        }
+                    }
+            }
+        }
+
+    ## The language of a node as a finite set of strings, or `Err` once it is not
+    ## one or exceeds `max` members. Recursive because the builder merges shared
+    ## affixes: `Watson|Norton` is stored as a concat whose head is a union, not
+    ## as two literal chains, which a flat walk misses.
+    literal_lang : Arena.A, Trie.T, U32, U64 -> Try(List(List(U8)), [NotLiteralSet])
+    literal_lang = |a, t, id, max|
+        if id == Arena.eps {
+            Ok([[]])
+        } else if Arena.is_singleton(a, id) {
+            match Accel.single_cp(t, Arena.tset(a, id)) {
+                Ok(cp) => Ok([Utf8.encode(cp)])
+                Err(_) => Err(NotLiteralSet)
+            }
+        } else if Arena.is_concat(a, id) {
+            match (Accel.literal_lang(a, t, Arena.head(a, id), max), Accel.literal_lang(a, t, Arena.tail(a, id), max)) {
+                (Ok(hs), Ok(ts)) =>
+                    if List.len(hs) * List.len(ts) > max {
+                        Err(NotLiteralSet)
+                    } else {
+                        Ok(List.fold(hs, [], |acc, h| List.concat(acc, List.map(ts, |tl| List.concat(h, tl)))))
+                    }
+                _ => Err(NotLiteralSet)
+            }
+        } else if Arena.is_or(a, id) {
+            List.fold(Arena.children(a, id), Ok([]), |acc, c|
+                match (acc, Accel.literal_lang(a, t, c, max)) {
+                    (Ok(ls), Ok(cs)) =>
+                        if List.len(ls) + List.len(cs) > max { Err(NotLiteralSet) } else { Ok(List.concat(ls, cs)) }
+                    _ => Err(NotLiteralSet)
+                })
+        } else {
+            Err(NotLiteralSet)
+        }
 
     # --- calcPrefixSets --------------------------------------------------------------
 

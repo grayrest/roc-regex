@@ -18,6 +18,14 @@ Teddy := [].{
         lo1 : U8x16, hi1 : U8x16,
         lo2 : U8x16, hi2 : U8x16,
         lits : List(List(U8)),
+        # the same literals end to end, with each one's offset and length, so
+        # verification reads bytes out of a flat buffer. Walking `lits` instead
+        # refcounts a nested list per literal per candidate, which measured
+        # ~161 ns a candidate and made Teddy lose to the plain scan on a dense
+        # alternation.
+        flat : List(U8),
+        offs : List(U32),
+        lens : List(U32),
     }
 
     ## Build from ≤8 non-empty literals, or `Err` (too many, or an empty literal —
@@ -31,7 +39,9 @@ Teddy := [].{
             t0 = Teddy.tables(lits, 0)
             t1 = if m >= 2 { Teddy.tables(lits, 1) } else { { lo: U8x16.splat(0), hi: U8x16.splat(0) } }
             t2 = if m >= 3 { Teddy.tables(lits, 2) } else { { lo: U8x16.splat(0), hi: U8x16.splat(0) } }
-            Ok({ m, lo0: t0.lo, hi0: t0.hi, lo1: t1.lo, hi1: t1.hi, lo2: t2.lo, hi2: t2.hi, lits })
+            f = List.fold(lits, { flat: [], offs: [], lens: [] }, |acc, l|
+                { flat: List.concat(acc.flat, l), offs: List.append(acc.offs, (List.len(acc.flat)).to_u32_wrap()), lens: List.append(acc.lens, (List.len(l)).to_u32_wrap()) })
+            Ok({ m, lo0: t0.lo, hi0: t0.hi, lo1: t1.lo, hi1: t1.hi, lo2: t2.lo, hi2: t2.hi, lits, flat: f.flat, offs: f.offs, lens: f.lens })
         }
 
     # nibble→bucket-mask tables for fingerprint position `p`: bit (1<<i) is set in
@@ -225,118 +235,151 @@ Teddy := [].{
     Span : { start : U64, end : U64 }
     MState : { last_end : U64, spans : List(Teddy.Span), seen : U64 }
 
+    ## Fused scan and verify for a pure-literal alternation, as ONE function:
+    ## every table, every literal buffer and every accumulator is a local, and
+    ## the window, bit and candidate loops are `while`s with inline appends.
+    ##
+    ## It was written as `scan_m` -> `bits_m` -> `step_m`, which passed the
+    ## 6-vector `Teddy.T` and the accumulator record per window, per set bit and
+    ## per candidate. That cost about 150 ns a candidate and made a dense
+    ## alternation lose to the ordinary two-pass scan.
     match_lits : Teddy.T, List(U8), U64 -> Try(List(Teddy.Span), [TooMany])
     match_lits = |t, hay, cap| {
         len = List.len(hay)
-        st0 = { last_end: 0, spans: [], seen: 0 }
+        m = t.m
+        lo0 = t.lo0
+        hi0 = t.hi0
+        lo1 = t.lo1
+        hi1 = t.hi1
+        lo2 = t.lo2
+        hi2 = t.hi2
+        flat = t.flat
+        offs = t.offs
+        lens = t.lens
+        nlit = List.len(lens)
+        back = m - 1
+        lomask = U8x16.splat(0x0F)
+        zero = U8x16.splat(0)
+
+        var spans = []
+        var last_end = 0
+        var seen = 0
+        var bail = False
+
         if len < 16 {
-            match Teddy.tail_m(t, hay, 0, len, cap, st0) {
-                Ok(st) => Ok(st.spans)
-                Err(e) => Err(e)
-            }
-        } else {
-            match Teddy.scan_m(t, hay, len, t.m - 1, U8x16.splat(0xFF), U8x16.splat(0xFF), cap, st0) {
-                Err(e) => Err(e)
-                Ok(st1) =>
-                    match Teddy.scan_m(t, hay, len, len - 16, U8x16.splat(0xFF), U8x16.splat(0xFF), cap, st1) {
-                        Err(e) => Err(e)
-                        Ok(st2) => Ok(st2.spans)
+            # scalar tail: try every position
+            var at = 0
+            while bail == False and at < len {
+                var li0 = 0
+                var hit = False
+                while hit == False and li0 < nlit {
+                    off = (List.get(offs, li0) ?? 0).to_u64()
+                    var i0 = 0
+                    var ok0 = True
+                    while ok0 and i0 < m {
+                        if (List.get(hay, at + i0) ?? 1) == (List.get(flat, off + i0) ?? 2) { i0 = i0 + 1 } else { ok0 = False }
                     }
+                    if ok0 { hit = True } else { li0 = li0 + 1 }
+                }
+                if hit {
+                    seen = seen + 1
+                    if seen > cap {
+                        bail = True
+                    } else if at >= last_end {
+                        var li = 0
+                        var found = 0
+                        while li < nlit and found == 0 {
+                            off = (List.get(offs, li) ?? 0).to_u64()
+                            ln = (List.get(lens, li) ?? 0).to_u64()
+                            var i = 0
+                            var ok = True
+                            while ok and i < ln {
+                                if (List.get(hay, at + i) ?? 1) == (List.get(flat, off + i) ?? 2) { i = i + 1 } else { ok = False }
+                            }
+                            if ok { found = at + ln } else { li = li + 1 }
+                        }
+                        if found != 0 {
+                            spans = List.append(spans, { start: at, end: found })
+                            last_end = found
+                        }
+                    }
+                }
+                at = at + 1
+            }
+        } else {
+            # 16-byte windows from `back`, then one more at `len - 16` so the
+            # final bytes are covered; `last_end` absorbs the overlap
+            var w = back
+            var prev0 = U8x16.splat(0xFF)
+            var prev1 = U8x16.splat(0xFF)
+            var tail_done = False
+            var done = False
+            while done == False {
+                if bail {
+                    done = True
+                } else if w + 16 > len {
+                    if tail_done {
+                        done = True
+                    } else {
+                        w = len - 16
+                        prev0 = U8x16.splat(0xFF)
+                        prev1 = U8x16.splat(0xFF)
+                        tail_done = True
+                    }
+                } else {
+                    chunk = U8x16.load(hay, w) ?? zero
+                    hlo = chunk.bitwise_and(lomask)
+                    hhi = chunk.shr_zf_wrap(4).bitwise_and(lomask)
+                    res0 = lo0.table_lookup(hlo).bitwise_and(hi0.table_lookup(hhi))
+                    res1 = if m >= 2 { lo1.table_lookup(hlo).bitwise_and(hi1.table_lookup(hhi)) } else { zero }
+                    cand =
+                        if m == 1 {
+                            res0
+                        } else if m == 2 {
+                            prev0.concat_shift_bytes(res0, 15).bitwise_and(res1)
+                        } else {
+                            res2 = lo2.table_lookup(hlo).bitwise_and(hi2.table_lookup(hhi))
+                            prev0.concat_shift_bytes(res0, 14).bitwise_and(prev1.concat_shift_bytes(res1, 15)).bitwise_and(res2)
+                        }
+                    bm = cand.eq_lanes(zero).bitwise_not().to_bitmask()
+                    prev0 = res0
+                    prev1 = res1
+                    if bm != 0 {
+                        var j = 0
+                        while bail == False and j < 16 {
+                            if bm.bitwise_and(1.U16.shl_wrap(j.to_u8_wrap())) != 0 and w + j >= back {
+                                at = w + j - back
+                                seen = seen + 1
+                                if seen > cap {
+                                    bail = True
+                                } else if at >= last_end {
+                                    var li = 0
+                                    var found = 0
+                                    while li < nlit and found == 0 {
+                                        off = (List.get(offs, li) ?? 0).to_u64()
+                                        ln = (List.get(lens, li) ?? 0).to_u64()
+                                        var i = 0
+                                        var ok = True
+                                        while ok and i < ln {
+                                            if (List.get(hay, at + i) ?? 1) == (List.get(flat, off + i) ?? 2) { i = i + 1 } else { ok = False }
+                                        }
+                                        if ok { found = at + ln } else { li = li + 1 }
+                                    }
+                                    if found != 0 {
+                                        spans = List.append(spans, { start: at, end: found })
+                                        last_end = found
+                                    }
+                                }
+                            }
+                            j = j + 1
+                        }
+                    }
+                    w = w + 16
+                }
             }
         }
+        if bail { Err(TooMany) } else { Ok(spans) }
     }
-
-    # verify one candidate against the literals (in order), threading MState
-    step_m : Teddy.T, List(U8), Teddy.MState, U64, U64 -> Try(Teddy.MState, [TooMany])
-    step_m = |t, hay, st, at, cap|
-        if st.seen + 1 > cap {
-            Err(TooMany)
-        } else if at < st.last_end {
-            Ok({ ..st, seen: st.seen + 1 })
-        } else {
-            match Teddy.lit_end(t, hay, at, 0) {
-                Ok(end) => Ok({ last_end: end, spans: List.append(st.spans, { start: at, end }), seen: st.seen + 1 })
-                Err(_) => Ok({ ..st, seen: st.seen + 1 })
-            }
-        }
-
-    # end (`at + len`) of the first literal that fully matches at `at`, else NoMatch
-    lit_end : Teddy.T, List(U8), U64, U64 -> Try(U64, [NoMatch])
-    lit_end = |t, hay, at, li|
-        match List.get(t.lits, li) {
-            Err(_) => Err(NoMatch)
-            Ok(lit) =>
-                if Teddy.eqm(hay, at, lit, 0, List.len(lit)) {
-                    Ok(at + List.len(lit))
-                } else {
-                    Teddy.lit_end(t, hay, at, li + 1)
-                }
-        }
-
-    # windowed fused scan (mirrors `scan`, verifying literals instead of collecting)
-    scan_m : Teddy.T, List(U8), U64, U64, U8x16, U8x16, U64, Teddy.MState -> Try(Teddy.MState, [TooMany])
-    scan_m = |t, hay, len, w, prev0, prev1, cap, st|
-        if w + 16 > len {
-            Ok(st)
-        } else {
-            chunk = U8x16.load(hay, w) ?? U8x16.splat(0)
-            lomask = U8x16.splat(0x0F)
-            hlo = chunk.bitwise_and(lomask)
-            hhi = chunk.shr_zf_wrap(4).bitwise_and(lomask)
-            res0 = t.lo0.table_lookup(hlo).bitwise_and(t.hi0.table_lookup(hhi))
-            res1 = if t.m >= 2 { t.lo1.table_lookup(hlo).bitwise_and(t.hi1.table_lookup(hhi)) } else { U8x16.splat(0) }
-            cand =
-                if t.m == 1 {
-                    res0
-                } else if t.m == 2 {
-                    prev0.concat_shift_bytes(res0, 15).bitwise_and(res1)
-                } else {
-                    res2 = t.lo2.table_lookup(hlo).bitwise_and(t.hi2.table_lookup(hhi))
-                    a0 = prev0.concat_shift_bytes(res0, 14)
-                    a1 = prev1.concat_shift_bytes(res1, 15)
-                    a0.bitwise_and(a1).bitwise_and(res2)
-                }
-            bm = cand.eq_lanes(U8x16.splat(0)).bitwise_not().to_bitmask()
-            if bm == 0 {
-                Teddy.scan_m(t, hay, len, w + 16, res0, res1, cap, st)
-            } else {
-                match Teddy.bits_m(t, hay, bm, w, t.m - 1, 0, cap, st) {
-                    Err(e) => Err(e)
-                    Ok(st2) => Teddy.scan_m(t, hay, len, w + 16, res0, res1, cap, st2)
-                }
-            }
-        }
-
-    # verify each set bit's candidate (mirrors `bits`)
-    bits_m : Teddy.T, List(U8), U16, U64, U64, U64, U64, Teddy.MState -> Try(Teddy.MState, [TooMany])
-    bits_m = |t, hay, bm, w, back, j, cap, st|
-        if j >= 16 {
-            Ok(st)
-        } else {
-            set = bm.bitwise_and(1.U16.shl_wrap(j.to_u8_wrap())) != 0
-            if set and w + j >= back {
-                match Teddy.step_m(t, hay, st, w + j - back, cap) {
-                    Err(e) => Err(e)
-                    Ok(st2) => Teddy.bits_m(t, hay, bm, w, back, j + 1, cap, st2)
-                }
-            } else {
-                Teddy.bits_m(t, hay, bm, w, back, j + 1, cap, st)
-            }
-        }
-
-    # scalar fused tail (mirrors `scalar_tail`) for haystacks shorter than a vector
-    tail_m : Teddy.T, List(U8), U64, U64, U64, Teddy.MState -> Try(Teddy.MState, [TooMany])
-    tail_m = |t, hay, at, len, cap, st|
-        if at >= len {
-            Ok(st)
-        } else if List.any(t.lits, |l| Teddy.starts(hay, at, l, t.m)) {
-            match Teddy.step_m(t, hay, st, at, cap) {
-                Err(e) => Err(e)
-                Ok(st2) => Teddy.tail_m(t, hay, at + 1, len, cap, st2)
-            }
-        } else {
-            Teddy.tail_m(t, hay, at + 1, len, cap, st)
-        }
 
     # scan 16-byte windows from `w`, carrying prev fingerprint results
     scan : Teddy.T, List(U8), U64, U64, U8x16, U8x16, List(U64) -> List(U64)
