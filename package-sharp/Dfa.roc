@@ -851,45 +851,166 @@ Dfa := [].{
         if n == 0 {
             if Deriv.nullable(e.a, Deriv.loc_both, Dfa.st_node_of(e, e.s_rev_ts)) { [0] } else { [] }
         } else {
-            s0 = e.s_rev_ts
-            node = Dfa.st_node_of(e, s0)
-            f = Dfa.flags(e, s0)
-            null_at_end = f.bitwise_and(Dfa.fl_always) != 0 or Deriv.nullable(e.a, Deriv.loc_end, node)
-            st =
-                if !(null_at_end or Arena.depends_anchor(e.a, node)) {
-                    { s: s0, pos: n, acc: [] }
-                } else {
-                    acc0 = if null_at_end { if f.bitwise_and(Dfa.fl_pending) != 0 { Dfa.add_pending_fast(e, s0, [], hay, n) } else { [n] } } else { [] }
-                    d = Utf8.decode_rev(hay, n)
-                    cls = if d.ok { Trie.class_of(t, d.cp) } else { t.invalid }
-                    # the fold fills End transitions only for an anchor-dependent
-                    # start; otherwise End equals Center
-                    s1e = List.get(e.end_table, s0.to_u64() * e.nmt.to_u64() + cls.to_u64()) ?? 0
-                    s1 = if s1e != 0 { s1e } else { List.get(e.table, s0.to_u64() * e.nmt.to_u64() + cls.to_u64()) ?? Dfa.dead }
-                    pos = d.cs
-                    if pos != 0 {
-                        { s: s1, pos, acc: if Dfa.is_null(e, s1) { Dfa.set_null_fast(e, s1, acc0, hay, pos) } else { acc0 } }
-                    } else {
-                        nd = Dfa.st_node_of(e, s1)
-                        really = Dfa.flags(e, s1).bitwise_and(Dfa.fl_always) != 0 or Deriv.nullable(e.a, Deriv.loc_begin, nd)
-                        acc1 =
-                            if really {
-                                k = Dfa.nk(e, s1)
-                                if k == Dfa.nk_current or k == Dfa.nk_prev {
-                                    List.append(acc0, Utf8.advance(hay, 0, k.to_u64()))
-                                } else {
-                                    pairs = Arena.rs_get(e.a, List.get(e.st_pend, s1.to_u64()) ?? 0)
-                                    if List.is_empty(pairs) { List.append(acc0, 0) } else { Dfa.add_pairs_fast(acc0, pairs, hay, 0) }
-                                }
-                            } else {
-                                acc0
-                            }
-                        { s: s1, pos, acc: acc1 }
-                    }
-                }
+            st = Dfa.sweep_prologue(e, t, hay)
             col = Dfa.collect_fast(e, t, ini, hay, st.pos, st.s, st.acc, skip)
             Dfa.start_fast(e, col.s, col.acc, hay)
         }
+    }
+
+    ## `HandleInputEnd`: the End-location first step, and whatever it records.
+    ## Shared by the full sweep and the stop-at-first one; it runs once per scan,
+    ## so the call costs nothing measurable.
+    sweep_prologue : Dfa.E, Trie.T, List(U8) -> { s : U32, pos : U64, acc : List(U64) }
+    sweep_prologue = |e, t, hay| {
+        n = List.len(hay)
+        s0 = e.s_rev_ts
+        node = Dfa.st_node_of(e, s0)
+        f = Dfa.flags(e, s0)
+        null_at_end = f.bitwise_and(Dfa.fl_always) != 0 or Deriv.nullable(e.a, Deriv.loc_end, node)
+        if !(null_at_end or Arena.depends_anchor(e.a, node)) {
+            { s: s0, pos: n, acc: [] }
+        } else {
+            acc0 = if null_at_end { if f.bitwise_and(Dfa.fl_pending) != 0 { Dfa.add_pending_fast(e, s0, [], hay, n) } else { [n] } } else { [] }
+            d = Utf8.decode_rev(hay, n)
+            cls = if d.ok { Trie.class_of(t, d.cp) } else { t.invalid }
+            # the fold fills End transitions only for an anchor-dependent
+            # start; otherwise End equals Center
+            s1e = List.get(e.end_table, s0.to_u64() * e.nmt.to_u64() + cls.to_u64()) ?? 0
+            s1 = if s1e != 0 { s1e } else { List.get(e.table, s0.to_u64() * e.nmt.to_u64() + cls.to_u64()) ?? Dfa.dead }
+            pos = d.cs
+            if pos != 0 {
+                { s: s1, pos, acc: if Dfa.is_null(e, s1) { Dfa.set_null_fast(e, s1, acc0, hay, pos) } else { acc0 } }
+            } else {
+                nd = Dfa.st_node_of(e, s1)
+                really = Dfa.flags(e, s1).bitwise_and(Dfa.fl_always) != 0 or Deriv.nullable(e.a, Deriv.loc_begin, nd)
+                acc1 =
+                    if really {
+                        k = Dfa.nk(e, s1)
+                        if k == Dfa.nk_current or k == Dfa.nk_prev {
+                            List.append(acc0, Utf8.advance(hay, 0, k.to_u64()))
+                        } else {
+                            pairs = Arena.rs_get(e.a, List.get(e.st_pend, s1.to_u64()) ?? 0)
+                            if List.is_empty(pairs) { List.append(acc0, 0) } else { Dfa.add_pairs_fast(acc0, pairs, hay, 0) }
+                        }
+                    } else {
+                        acc0
+                    }
+                { s: s1, pos, acc: acc1 }
+            }
+        }
+    }
+
+    ## The reverse sweep stopped at the first position that records a match
+    ## start, for `is_match`, which needs one rather than all of them. Empty
+    ## means the sweep reached the haystack start without recording any, which
+    ## is conclusive; a non-empty result is a candidate the caller verifies with
+    ## the forward pass.
+    ##
+    ## Its own loops rather than a flag in `collect_plain`: a per-step check
+    ## there would cost `find_all` on every pattern.
+    first_starts : Dfa.E, Trie.T, Dfa.Init, List(U8) -> List(U64)
+    first_starts = |e, t, ini, hay| {
+        n = List.len(hay)
+        if n == 0 {
+            if Deriv.nullable(e.a, Deriv.loc_both, Dfa.st_node_of(e, e.s_rev_ts)) { [0] } else { [] }
+        } else {
+            st = Dfa.sweep_prologue(e, t, hay)
+            if !List.is_empty(st.acc) {
+                st.acc
+            } else {
+                col =
+                    match ini {
+                        NoInit => Dfa.collect_first_plain(e, t, hay, st.pos, st.s)
+                        Prefix(pf) => Dfa.collect_first_prefix(e, t, pf, hay, st.pos, st.s)
+                        Potential(pf) => Dfa.collect_first_prefix(e, t, pf, hay, st.pos, st.s)
+                    }
+                if !List.is_empty(col.acc) { col.acc } else { Dfa.start_fast(e, col.s, [], hay) }
+            }
+        }
+    }
+
+    collect_first_plain : Dfa.E, Trie.T, List(U8), U64, U32 -> { s : U32, acc : List(U64) }
+    collect_first_plain = |e, t, hay, pos0, s0| {
+        at = e.atable
+        nks = e.st_nk
+        table = e.table
+        nmt = e.nmt.to_u64()
+        var pos = pos0
+        var s = s0
+        var acc = []
+        while pos > 0 and List.is_empty(acc) {
+            b = List.get(hay, pos - 1) ?? 0
+            if b < 0x80 {
+                s = (List.get(at, s.to_u64() * 128 + b.to_u64()) ?? Dfa.dead16).to_u32()
+                pos = pos - 1
+            } else {
+                d = Utf8.decode_rev(hay, pos)
+                cls = if d.ok { Trie.class_of(t, d.cp) } else { t.invalid }
+                s = List.get(table, s.to_u64() * nmt + cls.to_u64()) ?? Dfa.dead
+                pos = d.cs
+            }
+            if (List.get(nks, s.to_u64()) ?? Dfa.nk_notnull) != Dfa.nk_notnull {
+                acc = Dfa.set_null_fast(e, s, acc, hay, pos)
+            }
+        }
+        { s, acc }
+    }
+
+    collect_first_prefix : Dfa.E, Trie.T, Rlit.Prefix, List(U8), U64, U32 -> { s : U32, acc : List(U64) }
+    collect_first_prefix = |e, t, pf, hay, pos0, s0| {
+        at = e.atable
+        nks = e.st_nk
+        table = e.table
+        nmt = e.nmt.to_u64()
+        start_state = e.s_rev_ts
+        land = pf.state
+        lands = pf.land
+        var pos = pos0
+        var s = s0
+        var acc = []
+        while pos > 0 and List.is_empty(acc) {
+            if s == start_state {
+                match Rlit.rfind_sets(hay, t, pf, pos) {
+                    Ok(occ) => {
+                        if lands {
+                            pos = occ.start
+                            s = land
+                        } else if occ.end < pos {
+                            pos = occ.end
+                        } else {
+                            b = List.get(hay, pos - 1) ?? 0
+                            if b < 0x80 {
+                                s = (List.get(at, s.to_u64() * 128 + b.to_u64()) ?? Dfa.dead16).to_u32()
+                                pos = pos - 1
+                            } else {
+                                d = Utf8.decode_rev(hay, pos)
+                                cls = if d.ok { Trie.class_of(t, d.cp) } else { t.invalid }
+                                s = List.get(table, s.to_u64() * nmt + cls.to_u64()) ?? Dfa.dead
+                                pos = d.cs
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        pos = 0
+                    }
+                }
+            } else {
+                b = List.get(hay, pos - 1) ?? 0
+                if b < 0x80 {
+                    s = (List.get(at, s.to_u64() * 128 + b.to_u64()) ?? Dfa.dead16).to_u32()
+                    pos = pos - 1
+                } else {
+                    d = Utf8.decode_rev(hay, pos)
+                    cls = if d.ok { Trie.class_of(t, d.cp) } else { t.invalid }
+                    s = List.get(table, s.to_u64() * nmt + cls.to_u64()) ?? Dfa.dead
+                    pos = d.cs
+                }
+            }
+            if (List.get(nks, s.to_u64()) ?? Dfa.nk_notnull) != Dfa.nk_notnull {
+                acc = Dfa.set_null_fast(e, s, acc, hay, pos)
+            }
+        }
+        { s, acc }
     }
 
     # `collect_skip`: in the start state, a required prefix lets the sweep jump

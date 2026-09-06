@@ -233,8 +233,35 @@ Sharp := [].{
             Err(_) => Err(NoMatch)
         }
 
+    ## Whether any match exists. Unlike `find`, this does not need the LEFTMOST
+    ## match, so the reverse sweep can stop at the first start it records rather
+    ## than running to the haystack start. The candidate is then verified with
+    ## the forward pass, and a candidate that yields no end falls back to the
+    ## full scan, so the answer does not depend on assuming that a recorded
+    ## start always has one.
     is_match : Sharp.T, List(U8) -> Bool
-    is_match = |re, hay| List.len(Sharp.find_first(re, hay)) > 0
+    is_match = |re, hay|
+        if re.e.complete {
+            match re.accel.override {
+                # a pure literal is already a literal search
+                Literal(_) => List.len(Sharp.find_first(re, hay)) > 0
+                NoOverride => {
+                    cands = Dfa.first_starts(re.e, re.trie, re.accel.init, hay)
+                    if List.is_empty(cands) {
+                        False
+                    } else {
+                        asc = List.sort_with(cands, |x, y| U64.order_relative_to(x, y))
+                        if List.len(Dfa.ends_fast(re.e, re.trie, re.accel.len, hay, asc, True, False, True)) > 0 {
+                            True
+                        } else {
+                            List.len(Sharp.find_first(re, hay)) > 0
+                        }
+                    }
+                }
+            }
+        } else {
+            List.len(Sharp.find_first(re, hay)) > 0
+        }
 
     count : Sharp.T, List(U8) -> U64
     count = |re, hay| List.len(Sharp.find_all(re, hay))

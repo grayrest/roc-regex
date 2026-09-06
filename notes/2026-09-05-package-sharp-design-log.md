@@ -1190,3 +1190,40 @@ sides and had to be discarded.
 The general lesson is the opposite of the previous entry's: a pass that
 materializes something later passes read repeatedly is not the same shape as
 one that materializes something read once. The ordering copy was read once.
+
+## Stopping the reverse sweep for `is_match` (2026-09-06)
+
+`find` needs the leftmost match, so its sweep must reach the haystack start
+before the answer is known. `is_match` does not: any match will do, and the
+sweep runs right to left, so it can stop at the first start it records.
+
+The obstacle was that this rests on a recorded start always having an end,
+which the code does not assume anywhere else. Both scans carry a branch for a
+start that yields none. So the fast path does not assume it either: the
+stopped sweep produces a candidate, the forward pass verifies it, and a
+candidate that yields no end falls back to the full scan. False positives are
+impossible because a verified end is a real match, and false negatives are
+impossible because failure falls back. The saving survives whether or not the
+implication holds.
+
+`Dfa.first_starts` gets its own loops rather than a flag in `collect_plain`,
+because a per-step check there would cost `find_all` on every pattern. The
+`HandleInputEnd` prologue is now shared by both sweeps as `sweep_prologue`,
+which runs once per scan.
+
+`is_match`, ns, min of 10:
+
+| case | before | after |
+|---|---|---|
+| `[A-Za-z]+` on 256 KB of prose | 1409000 | below timer resolution |
+| `\bthe\b` on the same | 402000 | 1000 |
+| `[a-c]{3}` where the only match is at offset 0 | 686000 | 527000 |
+| `[a-c]{3}` with no match at all | 685000 | 518000 |
+
+The first two are the point: a pattern that matches anywhere near the end of
+the haystack now answers in constant time rather than scanning all of it. The
+last two are the cases with no early exit available, and neither regressed;
+they gained slightly from not ordering starts or building a span list.
+
+`find_all` is untouched, as the bench confirms: `[A-Za-z]+` 2174650 against
+Rust's 2229288, still 0.98x.
