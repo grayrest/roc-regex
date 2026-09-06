@@ -198,6 +198,41 @@ agreeing; `(?i)` parsed and cross-checked; `package-http` framing and routing
 - **Constructor API over `Ast`** — no second consumer (H7).
 - **`package-core`** — S8, after both engines are stable.
 
-## Implementation status
+## Implementation status (2026-09-06)
 
-None.
+M0-M3 landed on `main`. Departures from the plan as written:
+
+- **H8 grew a third module.** `Router.roc` holds the table: the priority sort,
+  the conflict check, per-method selection and 405/`Allow`. Putting it in
+  `Route.roc` (which the plan named) would have taken that file past the
+  300-line rule; `Route` is now one route and `Router` is the table of them.
+- **H3's start state is `Deriv.at_input_start` of the root, not the root.** The
+  plan said the root with nullability at `loc_begin`. That is wrong for a
+  leading lookbehind, because a lookbehind derivative walks its body FORWARD:
+  the root matched `(?<=ab)cd` against "abcd" at 0. The prefix has to be
+  resolved against offset 0 rather than kept. See the design log.
+- **H5 was mostly already implemented.** `(?i)` leading and scoped both worked;
+  the README's "No `(?i)`" was stale. What M2 actually fixed was three defects
+  behind it, one of them (a one-directional fold table) in `Regex` as well.
+- **H7's parameter extraction needed the suffix subtracted.** `[^/]+` is greedy
+  and takes the whole segment, so a route with a static suffix in the same
+  segment (`/images/img{id}.png`) bound "9.png" instead of "9". `Route.step`
+  now removes the following static's in-segment head.
+- **M4 is not done, and part of it is blocked.** See below.
+
+### Blocked: two modules with folded constants panic the compiler
+
+`Http` and `Route` each hold their matchers as top-level folded values, which
+is the design. An app importing BOTH panics the Roc compiler; either alone is
+fine. Reduced to a six-file reproducer in
+`upstream/2026-09-06-two-modules-folded-constant/` (no regex dependency in the
+minimal form -- an ordinary recursive function over lists and tag unions shows
+it too).
+
+`examples/http.roc` builds and passes 49/49 on the cached path and panics under
+`--no-cache`. Per [[compiler-instability-not-a-design-input]] the layout is
+NOT being redesigned around this; it is reported upstream.
+
+Consequence for M4: `tools/sharp-size/breakdown.sh` builds with `--no-cache`,
+so **H6's artifact measurement cannot be taken** until the compiler bug is
+fixed. H10's `httparse` row is not blocked by it.
