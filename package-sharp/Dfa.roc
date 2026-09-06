@@ -675,7 +675,17 @@ Dfa := [].{
             if dup or start < next_valid {
                 {}
             } else if kind == 1 {
-                en = Utf8.advance(hay, start, plen)
+                # inline, not `Utf8.advance`: that is a call per symbol wrapping a
+                # call per decode, and on `\bthe\b` the fixed-length end pass cost
+                # 145 ns a match for what is three pointer bumps on ASCII
+                var p = start
+                var k = plen
+                while k > 0 and p < n {
+                    b = List.get(hay, p) ?? 0
+                    p = if b < 0x80 { p + 1 } else { p + (Utf8.decode(hay, p)).len }
+                    k = k - 1
+                }
+                en = p + k
                 spans = List.append(spans, { start, end: en })
                 next_valid = en
             } else if kind == 3 {

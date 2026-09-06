@@ -1318,3 +1318,44 @@ floor. Decomposing `Holmes`, the scan accounts for about 11000 of its 30050 and
 the remaining 19000 covers 1219 matches, so roughly 15 ns each against Rust's
 14 ns. What is left is vector width, not overhead: Roc has 128-bit vectors, so
 the scan reads 16 bytes a window where Rust's reads 32.
+
+## `[0-9]{2,4}` and `\bthe\b`, the last two gaps (2026-09-06)
+
+The two widest remaining rows against Rust, at 1.75x and 1.78x. Stage timings,
+on the 256 KB haystack:
+
+| pattern | starts | matches | reverse sweep | forward | total |
+|---|---|---|---|---|---|
+| `\bthe\b` | 1216 | 1216 | 341000 | 139000 | 480000 |
+| `[0-9]{2,4}` | 2863 | 1455 | 224000 | ~0 | 185000 |
+
+**`[0-9]{2,4}` is essentially all reverse sweep.** Its `RemainingSets` length
+lookup makes the forward pass free, and its skip set already earns 3x: 614000
+without, 224000 with. What is left is 0.85 ns a byte against Rust's 0.42. The
+skip kernel runs two `table_lookup`s plus a compare, a negate, a bitmask and an
+or per 16-byte window, where Rust scans 32 bytes at a time over a ten-value
+byte set. That is vector width and ops per byte, not overhead, and I do not see
+a way to close it in Roc: the language has 128-bit vectors only, which the
+Teddy header has noted since M4.
+
+**`\bthe\b` splits differently.** One fix landed: the fixed-length end pass
+called `Utf8.advance`, a call per symbol wrapping a call per decode, costing
+145 ns a match to advance three ASCII bytes. Inlined, the row went 373350 to
+342450, so 1.78x to 1.68x, with every other row unchanged.
+
+The rest is the sweep, and its cost is prefix VERIFICATION rather than
+scanning. The accelerator anchors on `h`, which occurs 13473 times where the
+pattern matches 1216, so 12257 of those hits are verified and rejected. Each
+verification checks the three other prefix sets, and each set check is a
+haystack load, an `ascii` load, a `sets` load and a bit test. Roughly 40000 set
+checks at four memory operations each accounts for the 341000.
+
+The fix, not yet built: the prefix sets for this pattern are a word-boundary
+class followed by the single codepoints `t`, `h`, `e`. A contiguous run of
+single-codepoint sets can be compared as one padded vector against a length
+mask, exactly as `find_all_literal` now verifies a literal, leaving only the
+boundary class scalar. That turns three set checks into one compare and should
+take the sweep near 200000, which would put the row at parity with Rust. The
+work is in `Rlit.Prefix` and `rfind_sets`, and the vector has to be built once
+per scan in `collect_prefix` rather than per candidate, since folded constants
+cannot hold `U8x16`.
