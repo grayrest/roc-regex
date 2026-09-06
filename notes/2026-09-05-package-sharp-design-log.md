@@ -1675,6 +1675,59 @@ artifact. Two qualifications:
   ns/byte in the end pass in isolation, but the end pass is a small enough
   share of `find_all` that it does not clear the noise floor above.
 
+## The ~130 ns of sweep setup, decomposed (2026-09-06)
+
+`Dfa` cannot be timed from an app (it SIGBUSes), but `Sharp` can call it, so
+temporary probes inside `Sharp` timed the sweep in cumulative stages. 100k
+iterations, `[ab]`, 1-byte haystack:
+
+| stage | cumulative | its own |
+|---|---|---|
+| call boundary only (no-op with the same arguments) | 1 | **1** |
+| + `sweep_prologue` | 23 | **22** |
+| + `collect_fast` -> `collect_plain` | 75 | **52** |
+| + `start_fast` | 101 | **26** |
+| `Sharp.match_starts_fast` (returns the list to the app) | 135 | **34** |
+
+So it is not one thing. It is four small things, none individually wrong.
+
+### Six hypotheses measured and rejected
+
+Each of these was plausible enough to try, and each is worth NOT trying again:
+
+1. **The call boundary.** A no-op `Dfa.probe_noop : Dfa.E, Trie.T, List(U8) ->
+   U64` that reads one scalar from each argument costs **1 ns**. Passing the
+   engine record — eighteen fields, fourteen lists, a nested `Arena.A` — is
+   free.
+2. **The record return.** `probe_noop_rec` returning `sweep_prologue`'s exact
+   `{ s, pos, acc }` also costs **1 ns**.
+3. **Binding the tables.** A synthetic record of five lists, with functions
+   binding zero, one, three or five of them and a variant reading them in place,
+   are all within noise of each other (~1-6 ns).
+4. **Eagerly binding the arena in `start_fast`.** `a = e.a` sits above the
+   branch that uses it; moving it inside changed 101 ns to 102. The compiler
+   already sinks it. Reverted.
+5. **`ends_fast`'s six extra `Dfa.Len` destructures** (previous entry): no-op.
+6. **Automaton size.** `[ab]` at 5 states pays the same as the header pattern
+   at 34.
+
+### The one anomaly left
+
+`collect_fast`'s 52 ns splits as ~22 before it looks at a byte and **~30 for
+the FIRST byte**, after which bytes cost ~0.2-0.6 ns each. A thirty-nanosecond
+first iteration against a sub-nanosecond steady state is the sharpest thing in
+the profile and is not explained by anything above. It is not cold cache — the
+same haystack and engine are scanned 100k times in the timing loop, so the
+tables are hot after the first of those.
+
+Attributing it further needs a profiler rather than another A/B; guessing has
+now failed six times in a row. Cutting the ~130 ns without one would mean
+fusing `sweep_prologue`, `collect_*` and `start_fast` into a single function so
+their list reads happen once, which puts the `find_all` hot loop at risk for a
+cost that no longer sits on the HTTP request path at all.
+
+Nothing shipped from this round.
+
 ## The port against the original (2026-09-06): `tools/sharp-bench`
 
 Everything measured so far compared this engine with Rust and with the other
