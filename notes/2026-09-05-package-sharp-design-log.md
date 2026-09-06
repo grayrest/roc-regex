@@ -1051,3 +1051,55 @@ and this engine reports byte offsets, and the haystack has 9900 non-ASCII
 bytes, so positions after a multibyte codepoint legitimately differ. And the
 .NET side gets Release, server GC and a warmup, which is the fairest setup for
 it, while the Roc side is ahead-of-time compiled and needs none.
+
+## Why the dense classes were slow, and the fix (2026-09-06)
+
+The three patterns behind RE# were `[A-Za-z]+`, `\p{L}+` and `\w+\s+\w+`, the
+ones where no accelerator fires. Timing each stage on inputs prepared outside
+the loop, rather than by subtracting whole-scan timings, which was too noisy
+to read:
+
+| pattern | starts recorded | matches kept | reverse | order | forward |
+|---|---|---|---|---|---|
+| `[A-Za-z]+` | 205101 | 40056 | 1098000 | 633000 | 1226000 |
+| `\p{L}+` | 210051 | 40898 | 1030000 | 356000 | 931000 |
+| `\w+\s+\w+` | 210198 | 21091 | 1029000 | 355000 | 1329000 |
+
+Two causes, only one of them inherent.
+
+**The discard rate is the design.** The reverse sweep records a start wherever
+a match could begin, so a dense class records most of the haystack: five to
+nine starts for every match that survives the next-valid check. RE# does the
+same, so this explains the absolute cost, not the gap.
+
+**The ordering pass was mine.** `find_all` materialized a sorted, deduplicated
+copy of that 205000-element list before the forward pass. RE# never does:
+`llmatch_ends` walks its accumulator backwards by index, which is ascending
+position order already. That copy was 15% to 25% of the scan on exactly these
+patterns and near zero elsewhere.
+
+It existed for a reason. RE#'s backwards walk assumes the accumulator is
+ordered, and lookaround pending positions can resolve out of order, which is
+one of the RE# bugs this port fixes. But that only happens with lookarounds.
+`Dfa.is_descending` now decides: ordered input is walked backwards in place,
+out-of-order input is still sorted, and duplicate suppression folds into the
+loop as a comparison against the previous start, since equal starts are
+adjacent in position order.
+
+| pattern | sharp/RE# before | after | sharp/Rust meta before | after |
+|---|---|---|---|---|
+| `[A-Za-z]+` | 1.09x | 0.85x | 1.07x | 0.93x |
+| `\p{L}+` | 1.13x | 0.91x | 1.20x | 1.08x |
+| `\w+\s+\w+` | 1.32x | 1.08x | 1.65x | 1.45x |
+| `Sherlock\|Holmes\|…` | 0.92x | 0.85x | 2.18x | 2.11x |
+| `(\w+)@(\w+)` | 0.13x | 0.11x | 1.21x | 1.05x |
+
+Against the original the port is now ahead on nine of ten patterns, behind
+only on `\w+\s+\w+` at 1.08x. Against Rust's meta engine `[A-Za-z]+` lands at
+0.93x and `.*Holmes` at 0.55x, so two patterns are now faster than Rust.
+Against the other Roc engine the port wins eight of ten. In absolute terms
+`[A-Za-z]+` went from 2590500 to 2083950, a 20% cut, with the other two dense
+patterns each about 17%.
+
+The lesson generalises past this change: the accumulator is O(haystack) on
+dense patterns, so anything that touches it a second time costs a full pass.

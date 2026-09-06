@@ -544,12 +544,11 @@ Dfa := [].{
         { e: fin.e, spans: fin.spans }
     }
 
-    ## The reverse sweep emits starts in descending order except where pending
-    ## nullables (lookaheads) resolve out of order, so: reverse and dedup in one
-    ## pass when already descending, sort otherwise. An always-nullable pattern
-    ## has a start at every position, and sorting those dominated its scan.
-    ascending : List(U64) -> List(U64)
-    ascending = |sts| {
+    ## Is the reverse sweep's output already in descending position order? It is
+    ## unless pending nullables (lookaheads) resolved positions out of order,
+    ## which is the case RE# gets wrong and this port sorts for.
+    is_descending : List(U64) -> Bool
+    is_descending = |sts| {
         n = List.len(sts)
         var i = 1
         var desc = True
@@ -557,18 +556,7 @@ Dfa := [].{
             desc = (List.get(sts, i) ?? 0) <= (List.get(sts, i - 1) ?? 0)
             i = i + 1
         }
-        if desc {
-            var out = List.with_capacity(n)
-            var j = n
-            while j > 0 {
-                j = j - 1
-                v = List.get(sts, j) ?? 0
-                out = if j + 1 < n and (List.get(sts, j + 1) ?? 0) == v { out } else { List.append(out, v) }
-            }
-            out
-        } else {
-            sts |> List.sort_with(|x, y| U64.order_relative_to(x, y)) |> Dfa.dedup
-        }
+        desc
     }
 
     dedup : List(U64) -> List(U64)
@@ -604,19 +592,27 @@ Dfa := [].{
             Literal(lit) => Dfa.find_all_literal(hay, lit)
             NoOverride => {
                 sk = skip and e.any_skip
-                sts = Dfa.starts_fast_opts(e, t, ac.init, hay, sk) |> Dfa.ascending
-                Dfa.ends_fast(e, t, ac.len, hay, sts, sk)
+                raw = Dfa.starts_fast_opts(e, t, ac.init, hay, sk)
+                # RE#'s `llmatch_ends` walks its accumulator backwards, which is
+                # already ascending position order, instead of materializing a
+                # sorted copy. That copy cost 15-25% of the scan on a dense class,
+                # where the sweep records 5-9 starts for every match it keeps. The
+                # sort is still needed when lookarounds resolved out of order.
+                desc = Dfa.is_descending(raw)
+                sts = if desc { raw } else { List.sort_with(raw, |x, y| U64.order_relative_to(x, y)) }
+                Dfa.ends_fast(e, t, ac.len, hay, sts, sk, desc)
             }
         }
 
-    ## The forward end pass over ascending starts (RE#'s `llmatch_ends`): a
+    ## The forward end pass over the starts (RE#'s `llmatch_ends`), read
+    ## backwards when `descending` so that no ordered copy is needed: a
     ## start inside the previous match is dropped, every other start gets the
     ## longest end from `s_noprefix`. One function, `while` loops, tables bound
     ## once: calling `end_fast` per start passed the engine record each time
     ## (4.9 ms against 0.5 ms for 40k matches), and a `List.fold` closure over
     ## the starts copied its captured environment per start (8 ms for 262k).
-    ends_fast : Dfa.E, Trie.T, Dfa.Len, List(U8), List(U64), Bool -> List({ start : U64, end : U64 })
-    ends_fast = |e, t, len, hay, sts, skip| {
+    ends_fast : Dfa.E, Trie.T, Dfa.Len, List(U8), List(U64), Bool, Bool -> List({ start : U64, end : U64 })
+    ends_fast = |e, t, len, hay, sts, skip, descending| {
         n = List.len(hay)
         at = e.atable
         nks = e.st_nk
@@ -638,11 +634,16 @@ Dfa := [].{
         n_sts = List.len(sts)
         var spans = []
         var next_valid = 0
+        # the previous start considered. Equal starts are adjacent in position
+        # order, so this does the deduplication the sorted copy used to do.
+        var prev = 0xFFFF_FFFF_FFFF_FFFF
         var i = 0
         while i < n_sts {
-            start = List.get(sts, i) ?? 0
+            start = if descending { List.get(sts, n_sts - 1 - i) ?? 0 } else { List.get(sts, i) ?? 0 }
             i = i + 1
-            if start < next_valid {
+            dup = start == prev
+            prev = start
+            if dup or start < next_valid {
                 {}
             } else if kind == 1 {
                 en = Utf8.advance(hay, start, plen)
