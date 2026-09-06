@@ -1728,6 +1728,53 @@ cost that no longer sits on the HTTP request path at all.
 
 Nothing shipped from this round.
 
+## Profiled: it is Roc's refcounting (2026-09-06)
+
+Six rounds of A/B guessing had failed, so: `sample` on a binary doing nothing
+but `Sharp.match_starts_fast` in a loop. Roc emits opaque `_roc__proc_<hex>`
+symbols, but its runtime helpers keep their names, which is enough.
+
+Excluding the root frame:
+
+| haystack | `roc_llvm_rc_decref_*` | Roc code |
+|---|---|---|
+| 1 byte | **73.8%** | 26.2% |
+| 256 bytes | **58.8%** | 41.2% |
+
+**Three quarters of a short sweep is reference counting**, and the share falls
+exactly as it should when real scanning grows — a fixed per-call cost. The call
+tree shows the struct-level routines (`decref_69/71/73`) recursing into the
+list one (`decref_29`): the engine records being walked field by field on entry
+and exit. `Dfa.E` is eighteen fields, fourteen of them lists, with a nested
+`Arena.A` of its own; `sweep_prologue`, `collect_fast`, `collect_plain` and
+`start_fast` each take it.
+
+### This corrects the previous entry
+
+That entry measured a no-op `Dfa.probe_noop : Dfa.E, Trie.T, List(U8) -> U64`
+at 1 ns and concluded "passing the engine record is free". Wrong: the probe read
+one scalar per argument, so the compiler elided the refcounting. It does not
+elide it when the fields are used, which is the whole difference between the
+probe and the real function. A no-op is not a null hypothesis for refcounting.
+
+### Two fixes tried, both worse or invalid
+
+- **A `Tabs` record holding just the tables the loops read.** 142-160 ns against
+  85-100 for the `Dfa.E` version — WORSE. It has to carry `Arena.A` and
+  `st_pend` for the pending-nullable path, which puts a nested record back in,
+  and `tabs_of` constructs it per call.
+- **Flat arguments — the five lists, no record.** Measured 30 ns against 85, but
+  that spike's loop had dropped the `pend_positions` calls, so it was not the
+  same loop. The number is not evidence for anything.
+
+Reverted, both. What the profile supports is the diagnosis, not yet a fix: a
+real one has to keep the pending path and still hand the loop something Roc
+does not walk, and the obvious shapes for that are what just failed.
+
+Worth noting for upstream: `sweep_prologue(e, t, hay)` returns a record that
+contains neither `e` nor `t`, so both are pure borrows. Refcounting them is
+work the program cannot observe.
+
 ## The port against the original (2026-09-06): `tools/sharp-bench`
 
 Everything measured so far compared this engine with Rust and with the other
