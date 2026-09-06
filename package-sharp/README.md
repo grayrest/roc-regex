@@ -70,6 +70,7 @@ DOTNET_ROOT=~/.dotnet PATH=~/.dotnet:$PATH RESHARP=~/Repositories/resharp-dotnet
 tools/sharp-size/probe.sh <haystack> [size|speed]     # fold cost, artifact size, ns per find_all
 tools/sharp-size/breakdown.sh <haystack> [size|speed] # what one pattern costs in the binary, and where
 tools/bench/run.sh                                     # sharp_* rows next to Regex and Rust
+DOTNET_ROOT=~/.dotnet PATH=~/.dotnet:$PATH RESHARP=~/Repositories/resharp-dotnet tools/sharp-bench/run.sh   # vs the original RE#
 ```
 
 The `a b` arguments exist so the runners cannot be constant-folded whole.

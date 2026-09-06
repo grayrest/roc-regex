@@ -992,3 +992,62 @@ which is a documented budget under S4 and S12 rather than a representation
 detail, so it is a decision for the owner and not taken here. The prize is
 `a(?=.*b)`'s 41000 bytes halving, and nothing on any complete fold, where
 these two tables are already small next to `atable`.
+
+## The port against the original (2026-09-06): `tools/sharp-bench`
+
+Everything measured so far compared this engine with Rust and with the other
+Roc engine. `tools/sharp-bench` compares it with the thing it is a port of.
+The harness builds RE# from the checkout, times the same ten patterns on the
+same 256 KB haystack, and checks match counts.
+
+Both sides construct once outside the loop and keep the per-pattern minimum
+over 5 runs of 20 iterations. RE# additionally warms up: it JITs and fills a
+lazy DFA on the early passes. That warmup matters more than expected. Before
+adding it, the first pattern's construction measured 19.9 ms; after, 0.92 ms.
+The whole first draft of the construction column was measuring .NET starting
+up.
+
+| pattern | sharp ns | RE# ns | sharp/RE# | counts |
+|---|---|---|---|---|
+| `(\w+)@(\w+)` | 84900 | 648833 | 0.13x | ok |
+| `.*Holmes` | 372050 | 993625 | 0.37x | ok |
+| `[0-9]{2,4}` | 189800 | 449458 | 0.42x | ok |
+| `Moriarty` | 11050 | 25167 | 0.44x | ok |
+| `Holmes` | 46650 | 81000 | 0.58x | ok |
+| `\bthe\b` | 375300 | 632584 | 0.59x | ok |
+| `Sherlock\|Holmes\|…` | 940750 | 1027041 | 0.92x | ok |
+| `[A-Za-z]+` | 2590500 | 2385458 | 1.09x | ok |
+| `\p{L}+` | 2650700 | 2355583 | 1.13x | ok |
+| `\w+\s+\w+` | 2680700 | 2035792 | 1.32x | ok |
+
+Ahead on seven, behind on three, and all ten match counts agree. The counts
+agreeing is the more interesting half: on top of the 331-case corpus and the
+3587-case differential, the port reproduces the original's answers on every
+bench pattern.
+
+The split is the same one that shows against the other Roc engine. Where an
+accelerator fires the port wins, most dramatically on the email pattern at
+7.6x, where the rare-byte prefix skip does the work. The three losses are the
+dense-class patterns where nothing skips and both engines walk every symbol;
+there RE# is running a JIT-optimised inner loop over .NET's vectorised
+primitives and we are not.
+
+Construction is the architectural difference rather than a tuning one:
+
+| pattern | RE# construction |
+|---|---|
+| `[A-Za-z]+` | 414833 |
+| `Holmes` | 920500 |
+| `\w+\s+\w+` | 5628834 |
+| `Sherlock\|Holmes\|…` | 8860250 |
+| `\bthe\b` | 8878208 |
+
+RE# pays 0.4 ms to 8.9 ms per pattern at runtime, every process start. A
+folded Roc pattern pays zero, because the automaton is in the binary. On a
+short-lived process that alone outweighs every scan difference above.
+
+Two caveats. Offsets are not compared, only counts: RE# reports UTF-16 indices
+and this engine reports byte offsets, and the haystack has 9900 non-ASCII
+bytes, so positions after a multibyte codepoint legitimately differ. And the
+.NET side gets Release, server GC and a warmup, which is the fairest setup for
+it, while the Roc side is ahead-of-time compiled and needs none.
