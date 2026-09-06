@@ -25,7 +25,12 @@ Accel := [].{
     T : {
         init : Dfa.Init,
         len : Dfa.Len,
-        override : [NoOverride, Literal(List(U8))],
+        # `Literal` carries the literal, the same bytes padded to a 16-lane
+        # vector, and the lane mask for its length. The scan used to build those
+        # two per call — three list allocations before it looked at a byte —
+        # which is invisible over a 256 KB haystack and was the whole cost of a
+        # `find` over a few hundred bytes.
+        override : [NoOverride, Literal(List(U8), List(U8), U16)],
     }
 
     none : Accel.T
@@ -54,13 +59,24 @@ Accel := [].{
             match (Accel.literal_of(t, sets), len) {
                 (Ok(lit), FixedLength(n)) =>
                     if n.to_u64() == List.len(sets) and !Arena.depends_anchor(sp.e.a, root) and !Arena.contains_look(sp.e.a, root) and !Arena.depends_anchor(sp.e.a, rev) {
-                        Literal(lit)
+                        Literal(lit, Accel.pad16(lit), Accel.lane_mask(lit))
                     } else {
                         NoOverride
                     }
                 _ => NoOverride
             }
         { e: ll.e, accel: { init: sp.init, len, override } }
+    }
+
+    ## the literal padded to 16 bytes, so a scan can load it as one vector
+    pad16 : List(U8) -> List(U8)
+    pad16 = |lit| List.take_first(List.concat(lit, List.repeat(0.U8, 16)), 16)
+
+    ## the lanes of `pad16` that are the literal rather than padding
+    lane_mask : List(U8) -> U16
+    lane_mask = |lit| {
+        n = List.len(lit)
+        if n >= 16 { 0xFFFF } else { (1.U16.shl_wrap(n.to_u8_wrap())) - 1 }
     }
 
     # --- LengthLookup (RE#'s `inferLengthLookup`) -------------------------------------
@@ -99,6 +115,19 @@ Accel := [].{
             } else if Arena.is_singleton(a, body) and lo != 0 {
                 l = Build.mk_loop(a, body, 0, if hi == Arena.inf { hi } else { hi - lo })
                 { a: l.a, len: Ok(lo + acc), rem: Ok(l.id) }
+            } else if lo == hi and lo != 0 {
+                # An exact repetition of a FIXED-LENGTH body is fixed-length
+                # too. Only a singleton body used to count, and the rewrites
+                # fold a doubled literal into exactly this shape: `\r\n\r\n`
+                # becomes `(\r\n){2}`, lost its length, and with it the literal
+                # override — so an HTTP header-block search ran the whole
+                # reverse sweep where a 22 ns SIMD scan would do. `abab`,
+                # `aaaa`, `xyxy` and `(?:ab){2}` were all in the same hole.
+                bp = Accel.fixed_prefix(a, 0, body)
+                match (bp.len, bp.rem) {
+                    (Ok(bl), Err(_)) => { a: bp.a, len: Ok(acc + lo * bl), rem: Err(NoRem) }
+                    _ => { a: bp.a, len: Err(NoLen), rem: Ok(node) }
+                }
             } else {
                 { a, len: Err(NoLen), rem: Ok(node) }
             }

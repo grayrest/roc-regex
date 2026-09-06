@@ -606,7 +606,7 @@ Dfa := [].{
     ## ASCII bytes as a `Bset` table), inclusive when `nk` is CurrentNull.
     ## `RemainingSets(k, cls, m)`: `k` symbols then up to `m` symbols of `cls`.
     Len : [MatchEnd, FixedLength(U32), PrefixEnd(U32, U32), SetLookup(U32, U32, U8, List(U8)), RemainingSets(U32, U32, U32)]
-    Override : [NoOverride, Literal(List(U8))]
+    Override : [NoOverride, Literal(List(U8), List(U8), U16)]
     Accels : { init : Dfa.Init, len : Dfa.Len, override : Dfa.Override }
 
     ## RE#'s llmatch on a complete fold, as byte spans
@@ -625,10 +625,15 @@ Dfa := [].{
     find_all_fast_opts : Dfa.E, Trie.T, Dfa.Accels, List(U8), Bool, Bool -> List({ start : U64, end : U64 })
     find_all_fast_opts = |e, t, ac, hay, skip, first_only|
         match ac.override {
-            Literal(lit) => {
-                r = Dfa.find_all_literal(hay, lit)
-                if first_only { List.take_first(r, 1) } else { r }
-            }
+            Literal(lit, padded, mask) =>
+                if first_only {
+                    match Dfa.first_literal(hay, lit, padded, mask) {
+                        Ok(sp) => [sp]
+                        Err(_) => []
+                    }
+                } else {
+                    Dfa.find_all_literal(hay, lit, padded, mask)
+                }
             NoOverride => {
                 sk = skip and e.any_skip
                 raw = Dfa.starts_fast_opts(e, t, ac.init, hay, sk)
@@ -959,8 +964,64 @@ Dfa := [].{
     ## and folding over it afterwards cost about 18 ns a match against Rust on
     ## `Holmes`, which has 1219 matches and, on this haystack, not one false
     ## candidate: the overhead was the list and the fold closure, not selectivity.
-    find_all_literal : List(U8), List(U8) -> List({ start : U64, end : U64 })
-    find_all_literal = |hay, lit| {
+    ## The FIRST occurrence of a literal, stopping there. `find` and `is_match`
+    ## went through `find_all_literal` and took the head of its list, so a
+    ## `find` scanned the whole haystack and built every span to answer about
+    ## one. Same SIMD kernel, no list, and it returns as soon as it hits.
+    first_literal : List(U8), List(U8), List(U8), U16 -> Try({ start : U64, end : U64 }, [NoMatch])
+    first_literal = |hay, lit, padded, mask| {
+        n = List.len(hay)
+        plen = List.len(lit)
+        b0 = List.get(lit, 0) ?? 0
+        bv = U8x16.splat(b0)
+        litv = U8x16.from_list(padded) ?? bv
+        wide = plen <= 16
+        var found = 0xFFFF_FFFF_FFFF_FFFF
+        var w = 0
+        while found == 0xFFFF_FFFF_FFFF_FFFF and w + 16 <= n {
+            bm = (U8x16.load(hay, w) ?? bv).eq_lanes(bv).to_bitmask()
+            if bm != 0 {
+                var j = 0
+                while found == 0xFFFF_FFFF_FFFF_FFFF and j < 16 {
+                    if bm.bitwise_and(1.U16.shl_wrap(j.to_u8_wrap())) != 0 {
+                        at = w + j
+                        if at + plen <= n {
+                            ok =
+                                if wide and at + 16 <= n {
+                                    ((U8x16.load(hay, at) ?? bv).eq_lanes(litv).to_bitmask()).bitwise_and(mask) == mask
+                                } else {
+                                    var i = 1
+                                    var ok2 = True
+                                    while ok2 and i < plen {
+                                        if (List.get(hay, at + i) ?? 1) == (List.get(lit, i) ?? 2) { i = i + 1 } else { ok2 = False }
+                                    }
+                                    ok2
+                                }
+                            if ok { found = at } else {}
+                        }
+                    }
+                    j = j + 1
+                }
+            }
+            w = w + 16
+        }
+        var at2 = w
+        while found == 0xFFFF_FFFF_FFFF_FFFF and at2 < n {
+            if (List.get(hay, at2) ?? 1) == b0 and at2 + plen <= n {
+                var i = 1
+                var ok = True
+                while ok and i < plen {
+                    if (List.get(hay, at2 + i) ?? 1) == (List.get(lit, i) ?? 2) { i = i + 1 } else { ok = False }
+                }
+                if ok { found = at2 } else {}
+            }
+            at2 = at2 + 1
+        }
+        if found == 0xFFFF_FFFF_FFFF_FFFF { Err(NoMatch) } else { Ok({ start: found, end: found + plen }) }
+    }
+
+    find_all_literal : List(U8), List(U8), List(U8), U16 -> List({ start : U64, end : U64 })
+    find_all_literal = |hay, lit, padded, mask| {
         n = List.len(hay)
         plen = List.len(lit)
         b0 = List.get(lit, 0) ?? 0
@@ -969,8 +1030,11 @@ Dfa := [].{
         # window is in bounds: `lit` padded to 16 bytes, and a mask of its length
         # so the pad bytes are ignored. Byte-at-a-time verification cost about
         # 12 ns a match against Rust, which compares the whole literal at once.
-        litv = U8x16.from_list(List.take_first(List.concat(lit, List.repeat(0, 16)), 16)) ?? bv
-        want = if plen >= 16 { 0xFFFF } else { (1.U16.shl_wrap(plen.to_u8_wrap())) - 1 }
+        # `padded`/`mask` come from `Accel` rather than being built here: three
+        # list allocations per call are nothing against 256 KB and were the
+        # entire cost of a `find` over a few hundred bytes.
+        litv = U8x16.from_list(padded) ?? bv
+        want = mask
         wide = plen <= 16
         var spans = []
         var last_end = 0

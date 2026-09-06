@@ -1258,6 +1258,85 @@ for framing, not for the route table. Why the same table costs 324 B alone and
 2081 B beside the engine is unexplained; it is the same folded-constant
 double-storage question already recorded above as owed upstream.
 
+## Per-call cost on short inputs, and a literal that was not one (2026-09-06)
+
+The owner asked for the framing and header overhead measured in the trie entry.
+Every number below is from a haystack of a few hundred bytes, which is the
+regime this engine had never been profiled in: everything it does once per call
+is invisible against 256 KB and dominant against 280 bytes.
+
+**What it was not.** Three plausible causes were measured and cleared before the
+real one was found, which is the only reason it was found:
+
+- `List.sublist` **is free** (0 ns). H2's "seamless slices" premise holds; the
+  parse was not copying its buffer.
+- Passing `Sharp.T` across a call boundary is **free** (0 ns for a function that
+  takes it and reads one scalar). The record-passing cost the hot-loop notes
+  warn about does not apply here.
+- The literal scan's prologue (`List.repeat`/`concat`/`take_first` to pad the
+  literal to a vector, three allocations per call) is real but small: hoisting
+  it into `Accel` changed 770 ns to 770 ns.
+
+**What it was.** `Sharp.find("\r\n\r\n")` cost ~780 ns and was **flat from 4
+bytes to 1004** — no scanning component at all. The kernel it should reach,
+`Dfa.first_literal`, is 22 ns. The pattern was not taking the literal path:
+`accel_str` reported `len=any override=none`.
+
+`Build.loop_register` computed a loop's min/max length only when the body was a
+SINGLETON. The rewrites fold a doubled literal into exactly that shape, so
+`\r\n\r\n` becomes `(\r\n){2}` and reported no fixed length, which denied it
+`Accel`'s literal override and sent an HTTP terminator search through the whole
+reverse sweep. The rule is general — a repetition of a fixed-length body is
+fixed-length, `lo * body` — and so was the hole: `abab`, `aaaa`, `xyxy`,
+`(?:ab){2}` and `(?:abc){3}` were all in it, while `abcd`, `abba` and `abcabc`
+were fine. Capped so a large `{n,m}` cannot overflow into the `none` sentinel.
+
+Two smaller changes went with it, both the same rule as
+`Regex.verify_candidates`: `Sharp.find` and `is_match` dispatch the literal
+override themselves instead of reaching the kernel through `find_first_fast` ->
+`find_all_fast_opts`, and `Dfa.first_literal` stops at the first hit instead of
+collecting every span and taking the head.
+
+| | before | after |
+|---|---|---|
+| `Sharp.find` of `\r\n\r\n`, 280 B | 787 ns | **63 ns** |
+| `Http.frame`, 280 B request | 1209 ns | **566 ns** |
+
+### The benchmark
+
+| stage | regex selection | radix trie | + these fixes |
+|---|---|---|---|
+| + frame | 1298.5 | 1309.0 | **735.9** |
+| + route | 7669.9 | 1914.5 | 1335.8 |
+| + three header lookups | 10552.0 | 4617.1 | **4107.1** |
+| ratio to `httparse` | 27.3x | 11.9x | **10.2x** |
+
+### What is left, and the decision it needs
+
+Headers are now **67%** of a parse: 2771 ns for three lookups, ~920 each.
+`(?i)^content-length:[ \t]*` is genuinely not a literal, so none of the above
+touches it, and its `find` is ~560 ns fixed plus 0.6 ns/byte — setup again,
+in the non-literal path's own prologues (`ends_fast` alone destructures the
+`Dfa.Len` tag seven times before it looks at a byte).
+
+The cheaper shape is measured and available: one `find_all` of `\r\n` over the
+header block costs ~80 ns plus 0.6 ns/byte — about 250 ns for a 280-byte block
+— and yields every line boundary, after which matching a known header name is a
+byte compare. Three lookups would go from ~2770 ns to ~300.
+
+That is **H2's lazy-versus-eager decision**, not an optimisation: H2 chose
+"pull a header on demand" over "materialize all headers up front" on the
+reasoning that materializing was the expensive one, and this measurement says
+the opposite by an order of magnitude. It is the owner's call, so it is
+recorded here rather than taken.
+
+### Gates
+
+RE# corpus 331/331, node layer 57/57, fuzz plain 18000 cases 0 divergences,
+fuzz seed 42 16 divergences (the pre-existing anchor family, unchanged), RE#
+differential agree=5139 differ=0 of 5341 with ends differ=0, `examples/http.roc`
+56/56, router differential 174/174 against matchit.
+
 ## The port against the original (2026-09-06): `tools/sharp-bench`
 
 Everything measured so far compared this engine with Rust and with the other

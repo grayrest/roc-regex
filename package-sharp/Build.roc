@@ -1242,15 +1242,28 @@ Build := [].{
         }
     }
 
+    # `n * m` stays a length rather than wrapping or colliding with the `none`
+    # sentinel
+    len_fits : U32, U32 -> Bool
+    len_fits = |n, m| m == 0 or n <= (Arena.none - 1) // m
+
     loop_register : Arena.A, U32, U32, U32 -> Arena.R
     loop_register = |a, body, lo, hi| {
         key = Arena.key_loop(body, lo, hi)
         match Arena.lookup(a, key) {
             Ok(id) => { a, id }
             Err(_) => {
-                single = Arena.is_singleton(a, body)
-                minl = if single { lo } else { Arena.none }
-                maxl = if single and hi != Arena.inf { hi } else { Arena.none }
+                # A repetition of a FIXED-LENGTH body has a fixed length too:
+                # `(\r\n){2}` is four symbols. Only a singleton body used to
+                # count, so a doubled literal — which the rewrites fold into
+                # exactly this shape — reported no length at all, and with it
+                # lost `Accel`'s literal override: `\r\n\r\n`, `abab`, `xyxy`
+                # and `(?:ab){2}` all ran the full reverse sweep where a 22 ns
+                # SIMD scan would do. Capped so a large `{n,m}` cannot overflow.
+                bmin = Arena.minl(a, body)
+                bmax = Arena.maxl(a, body)
+                minl = if bmin != Arena.none and Build.len_fits(lo, bmin) { lo * bmin } else { Arena.none }
+                maxl = if bmax != Arena.none and hi != Arena.inf and Build.len_fits(hi, bmax) { hi * bmax } else { Arena.none }
                 Arena.register(a, key, { flags: Build.infer_loop(a, body, lo), sub: Arena.sub(a, body), minl, maxl, pend: Arena.pend(a, body) })
             }
         }

@@ -235,7 +235,7 @@ Sharp := [].{
             }
         ov =
             match re.accel.override {
-                Literal(l) => "override=${Str.from_utf8_lossy(l)}"
+                Literal(l, _, _) => "override=${Str.from_utf8_lossy(l)}"
                 NoOverride => if List.is_empty(re.lits) { "override=none" } else { "override=set[${re.lits |> List.map(|l| Str.from_utf8_lossy(l)) |> Str.join_with("|")}]" }
             }
         "${init} ${len} ${ov}"
@@ -268,16 +268,42 @@ Sharp := [].{
     ## class that was 40056 spans for a question about the first.
     find_first : Sharp.T, List(U8) -> List(Sharp.Span)
     find_first = |re, hay|
-        match Sharp.lit_set_spans(re.lits, hay) {
-            Ok(sp) => List.take_first(sp, 1)
-            Err(_) => if re.e.complete { Dfa.find_first_fast(re.e, re.trie, re.accel, hay) } else { Sharp.find_all_threaded(re, hay) }
+        match Sharp.find(re, hay) {
+            Ok(s) => [s]
+            Err(_) => []
         }
 
+    ## The leftmost match. Documented as a full sweep for a general pattern: the
+    ## reverse pass has to reach the haystack start before the leftmost start is
+    ## known (S11).
+    ##
+    ## The literal case is dispatched HERE rather than inside
+    ## `Dfa.find_all_fast_opts`, and that is a measurement, not tidiness.
+    ## Reaching the kernel through `find_first_fast` -> `find_all_fast_opts`
+    ## passes `Dfa.E` — eighteen fields, fourteen of them heap lists — down two
+    ## call levels, and every pass refcounts all of them. On a few hundred bytes
+    ## the SIMD kernel itself is 22 ns and getting to it cost about 750. Same
+    ## rule as `Regex.verify_candidates`: dispatch once, outside, and hand the
+    ## loop only what it reads.
     find : Sharp.T, List(U8) -> Try(Sharp.Span, [NoMatch])
     find = |re, hay|
-        match List.first(Sharp.find_first(re, hay)) {
-            Ok(s) => Ok(s)
-            Err(_) => Err(NoMatch)
+        match re.accel.override {
+            Literal(lit, padded, mask) => Dfa.first_literal(hay, lit, padded, mask)
+            NoOverride =>
+                match Sharp.lit_set_spans(re.lits, hay) {
+                    Ok(sp) =>
+                        match List.first(sp) {
+                            Ok(s) => Ok(s)
+                            Err(_) => Err(NoMatch)
+                        }
+                    Err(_) => {
+                        r = if re.e.complete { Dfa.find_first_fast(re.e, re.trie, re.accel, hay) } else { Sharp.find_all_threaded(re, hay) }
+                        match List.first(r) {
+                            Ok(s) => Ok(s)
+                            Err(_) => Err(NoMatch)
+                        }
+                    }
+                }
         }
 
     ## Whether any match exists. Unlike `find`, this does not need the LEFTMOST
@@ -290,8 +316,9 @@ Sharp := [].{
     is_match = |re, hay|
         if re.e.complete {
             match re.accel.override {
-                # a pure literal is already a literal search
-                Literal(_) => List.len(Sharp.find_first(re, hay)) > 0
+                # a pure literal is already a literal search, and the kernel is
+                # reached without passing the engine record (see `find`)
+                Literal(lit, padded, mask) => Dfa.first_literal(hay, lit, padded, mask) != Err(NoMatch)
                 NoOverride => {
                     cands = Dfa.first_starts(re.e, re.trie, re.accel.init, hay)
                     if List.is_empty(cands) {
