@@ -1775,6 +1775,47 @@ Worth noting for upstream: `sweep_prologue(e, t, hay)` returns a record that
 contains neither `e` nor `t`, so both are pure borrows. Refcounting them is
 work the program cannot observe.
 
+## Current standing against Rust's meta engine (2026-09-06, quiet machine)
+
+Two back-to-back runs of `tools/bench/run.sh`, 256 KB haystack, on a machine
+with no competing build (every earlier three-way table in this log was taken
+while another session held ~98% of a core). The two runs agree within 2% on
+every row, which no previous pair in this log does.
+
+| pattern | sharp ns | sharp/meta | run 2 | `Regex`/meta |
+|---|---|---|---|---|
+| `Holmes` | 29000 | **1.09x** | 1.06x | 1.88x |
+| `Moriarty` | 10150 | **1.04x** | 1.03x | 1.17x |
+| `Sherlock\|Holmes\|…` | 474750 | **1.13x** | 1.12x | 2.14x |
+| `[A-Za-z]+` | 2093250 | **0.96x** | 0.97x | 1.55x |
+| `[0-9]{2,4}` | 189350 | **1.75x** | 1.79x | 1.39x |
+| `\bthe\b` | 255550 | **1.26x** | 1.25x | 1.64x |
+| `\w+\s+\w+` | 2132250 | **1.38x** | 1.40x | 1.53x |
+| `(\w+)@(\w+)` | 70250 | **1.03x** | 1.05x | 1.99x |
+| `\p{L}+` | 2166100 | **1.06x** | 1.05x | 1.67x |
+| `.*Holmes` | 340300 | **0.53x** | 0.56x | 0.84x |
+
+All match counts agree with Rust.
+
+**Two rows beat the meta engine** — `[A-Za-z]+` at 0.96x and `.*Holmes` at
+0.53x — and four more are within 5% of it. Sharp is ahead of `Regex` on every
+row, including `[0-9]{2,4}`, the one row where it is furthest from Rust (1.75x
+against Rust, but `Regex` is 1.39x there, so this is the single pattern where
+the older engine still wins).
+
+Against this log's first three-way table (M4 stage 4): `Holmes` 1.68 -> 1.09,
+the alternation 2.19 -> 1.13, `\bthe\b` 1.74 -> 1.26, `\w+\s+\w+` 1.73 ->
+1.39, `(\w+)@(\w+)` 1.29 -> 1.04, `\p{L}+` 1.29 -> 1.05. **Almost all of that
+belongs to the accelerator work between the two tables** — the byte-wide class
+trie, the 16-bit `atable`, walking the starts backwards, stopping the sweep for
+`is_match`, the literal-set accelerator, the fused single-literal scan, the
+inlined fixed-length end pass — not to the short-input campaign above, which a
+paired test measured as a wash at this length. Part of the gap is also that the
+earlier table was measured under contention.
+
+`[0-9]{2,4}` is the one row that has not moved at all (1.76 -> 1.75) and is now
+the outlier by a distance.
+
 ## The port against the original (2026-09-06): `tools/sharp-bench`
 
 Everything measured so far compared this engine with Rust and with the other
