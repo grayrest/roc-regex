@@ -1121,6 +1121,69 @@ layer 57/57; fuzz plain 18000 cases 0 divergences; fuzz seed 42 16 divergences
 (the pre-existing anchor family, unchanged); RE# differential agree=5139
 differ=0 of 5341, ends differ=0 prefix_diff=261.
 
+## HTTP parsing on the engine, and where it goes (2026-09-06)
+
+M3 and M4 of `plans/2026-09-06-http-parse.md`. `package-http` frames HTTP/1.1
+requests and routes them with matchit 0.8 syntax, using only `Sharp`'s public
+API: `longest_end` per piece over a slice of the caller's buffer, `find` for
+the `\r\n\r\n` terminator and for a header line, and one anchored selection
+pattern per route.
+
+### The claim the plan set out to test does not hold
+
+`tools/http-bench/run.sh`: 1000 generated requests (8-15 headers each, 328 KB),
+against Rust `httparse` + `matchit` doing the identical task -- frame the
+request, select the route and bind its parameters, read three named headers.
+Both sides print a checksum summing every piece's length plus the matched
+route's index; they agree at 51584, so the comparison is of the same work. Min
+of five runs, ns per request:
+
+| stage | ns/req | share |
+|---|---|---|
+| split the fixture into requests | 7.7 | 0% |
+| + frame (method, target, version, header-block extent) | 1300 | 12% |
+| + select the route and bind parameters | 7661 | 60% |
+| + three header lookups (the full task) | 10543 | 27% |
+| `httparse` + `matchit`, same task | 386 | |
+
+**27.3x slower than the hand-written parser.** The premise of H1 was that a
+tuned matcher beats most hand-written parsers; against the strongest one it
+does not, and the plan asked for this number rather than an estimate.
+
+### Where it goes: per-call overhead, not scanning
+
+Routing is 60% of a request. The table holds 27 entries (9 routes x 3
+methods); the method comparison short-circuits, so ~9 anchored matches run per
+request, at about **707 ns each for a path of ~20 bytes**. The engine scans
+prose at roughly 8 ns/byte, so a 20-byte path is ~160 ns of scanning and the
+rest is fixed cost per call. This is the `caps_email` shape from the earlier
+entry -- per-candidate overhead, not scan length -- and it is exactly H4's
+stated reopen condition ("pattern IDs if M4 shows per-call overhead
+dominating"). matchit does 130 routes in 2.4 us; we do 9 in 6.4 us.
+
+What did help, and is shipped: `Route.matches` used `Sharp.is_match`, which
+runs the reverse sweep first. The selection pattern is anchored `\A..\z`, so a
+match exists exactly when `longest_end` is the whole path -- one forward pass,
+no sweep, no candidate list. Routing went from 7663 to 6361 ns/req and the
+total from 12508 to 10543, checksum unchanged.
+
+The two reopens H4 named are both now justified by measurement rather than
+speculation, and neither is implemented: they are design changes for the owner
+to call. A radix trie for selection would remove the per-route call entirely;
+pattern IDs would make it one automaton pass. The other 40% (framing 12%,
+header lookups 27%) is the same per-call cost spread over four `find` /
+`longest_end` calls per request, so it moves with any fix to the same thing.
+
+### Blocked: H6's artifact measurement
+
+`tools/sharp-size/breakdown.sh` builds with `--no-cache`, and an app importing
+both `Http` and `Route` panics the compiler on that path (either module alone
+is fine). Reduced to a six-file reproducer in
+`upstream/2026-09-06-two-modules-folded-constant/`; the minimal form needs no
+regex package at all. Per [[compiler-instability-not-a-design-input]] the
+module layout is not being changed around it. `examples/http.roc` and the
+benchmark app both build on the cached path, so only the size number is lost.
+
 ## The port against the original (2026-09-06): `tools/sharp-bench`
 
 Everything measured so far compared this engine with Rust and with the other

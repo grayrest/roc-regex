@@ -218,7 +218,18 @@ M0-M3 landed on `main`. Departures from the plan as written:
   and takes the whole segment, so a route with a static suffix in the same
   segment (`/images/img{id}.png`) bound "9.png" instead of "9". `Route.step`
   now removes the following static's in-segment head.
-- **M4 is not done, and part of it is blocked.** See below.
+- **M4's H10 row is taken; H6 is blocked.** `tools/http-bench/run.sh` reports
+  **27.3x slower than `httparse` + `matchit`** on the same task with agreeing
+  checksums, and the stage split puts 60% of it in route selection at ~707 ns
+  per anchored match of a 20-byte path -- per-call overhead, not scanning. Both
+  of H4's reopens are now justified by measurement; neither is implemented,
+  because they are design changes. See the design log.
+- **`Route.matches` uses `longest_end`, not `is_match`.** Same automaton, same
+  answer, one forward pass instead of a reverse sweep first: routing 7663 ->
+  6361 ns/req.
+- **`Http.header_matcher` was added.** H8 described `header` taking a name;
+  a caller looking the same header up per request wants the matcher compiled
+  once, which the benchmark needs and a real server would too.
 
 ### Blocked: two modules with folded constants panic the compiler
 
@@ -233,6 +244,7 @@ it too).
 `--no-cache`. Per [[compiler-instability-not-a-design-input]] the layout is
 NOT being redesigned around this; it is reported upstream.
 
-Consequence for M4: `tools/sharp-size/breakdown.sh` builds with `--no-cache`,
-so **H6's artifact measurement cannot be taken** until the compiler bug is
-fixed. H10's `httparse` row is not blocked by it.
+Consequence: `tools/sharp-size/breakdown.sh` builds with `--no-cache`, so
+**H6's artifact measurement cannot be taken** until the compiler bug is fixed.
+H10's `httparse` row was not blocked by it (`tools/http-bench/run.sh` builds
+on the cached path).

@@ -95,10 +95,18 @@ Http := [].{
             Ok(m) => Http.header_with(buf, req, m)
         }
 
+    ## A compiled header-name matcher. Declared at a top level with a literal
+    ## name it folds into the artifact; built from a runtime name it compiles
+    ## once, which is still better than once per lookup.
+    Matcher : Sharp.T
+
+    header_matcher : Str -> Http.Matcher
+    header_matcher = |name| Sharp.unwrap(Sharp.compile(Http.name_pattern(name)))
+
     ## `header` with the matcher supplied, for a caller that looks the same
     ## header up repeatedly: `Sharp.compile` folds at build time only for a
     ## literal pattern, and a name assembled at runtime compiles at runtime.
-    header_with : List(U8), Http.Req, Sharp.T -> Try(Http.Piece, [Missing])
+    header_with : List(U8), Http.Req, Http.Matcher -> Try(Http.Piece, [Missing])
     header_with = |buf, req, m| {
         block = Http.slice(buf, req.headers)
         match Sharp.find(m, block) {

@@ -1,0 +1,17 @@
+[package]
+name = "http-bench"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+httparse = "1.9"
+matchit = "0.8"
+
+[[bin]]
+name = "http-bench"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

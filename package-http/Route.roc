@@ -180,8 +180,15 @@ Route := [].{
     # --- matching ----------------------------------------------------------------
 
     ## Does this route match the whole path?
+    ##
+    ## `longest_end`, not `is_match`. The selection pattern is anchored `\A..\z`,
+    ## so a match exists exactly when the anchored end is the whole path -- one
+    ## forward pass. `is_match` answers the same question by running the reverse
+    ## sweep first, which is right for an unanchored search and pure overhead
+    ## here; selection was 61% of a request's parse time with it, and the table
+    ## is scanned once per candidate route.
     matches : Route.T, List(U8) -> Bool
-    matches = |r, path| Sharp.is_match(r.sel, path)
+    matches = |r, path| Sharp.longest_end(r.sel, path) == Ok(List.len(path))
 
     ## The route's parameters, in order, as slices of `path`. Only call this on
     ## a route whose selection pattern matched: the pieces are stepped in order

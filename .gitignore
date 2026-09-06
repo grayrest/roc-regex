@@ -18,12 +18,18 @@ examples/*.wasm
 /difftest
 /repro
 
-# generated benchmark haystack
+# generated benchmark inputs
 testdata/bench_haystack.txt
+testdata/http_requests.txt
 
 # rust harness build
 tools/diff/target/
 tools/diff/Cargo.lock
 tools/bench/target/
 tools/bench/Cargo.lock
+tools/http-bench/target/
+tools/http-bench/rust/target/
+tools/http-bench/rust/Cargo.lock
 /bench_sharp
+/http_bench
+/http_bench_tmp
