@@ -28,7 +28,14 @@ Sharp := [].{
     ## The compiled pattern. `root` is the raw pattern node, `rev` its reversal,
     ## `rev_ts` `_*·rev` (the reverse search start), `noprefix` the pattern with
     ## its lookbehind prefix stripped (the forward end pass). Documented-unstable.
-    T : { a : Arena.A, trie : Trie.T, root : U32, rev : U32, rev_ts : U32, ts : U32, noprefix : U32, e : Dfa.E, accel : Accel.T, lits : List(List(U8)) }
+    T : { a : Arena.A, trie : Trie.T, root : U32, rev : U32, rev_ts : U32, ts : U32, noprefix : U32, e : Dfa.E, accel : Accel.T, lits : Sharp.Lits }
+
+    ## The literal-alternation accelerator, with its Teddy tables ALREADY BUILT.
+    ## They used to be built inside `lit_set_spans`, which is to say once per
+    ## search, at 900-1500 ns: nothing against a 256 KB haystack and more than
+    ## the whole search over a few hundred bytes. Built here they fold into the
+    ## artifact like every other table.
+    Lits : [NoLits, Lits(List(List(U8)), Teddy.T)]
 
     ## D13 budget 4: states the fold may explore — the artifact budget (256 KB
     ## provisional) over the table stride, capped at `fold_state_cap`. The cap is
@@ -94,8 +101,16 @@ Sharp := [].{
                                 e = Dfa.freeze(Dfa.explore(ac.e), trie.ascii)
                                 lits =
                                     match ac.accel.override {
-                                        NoOverride => Accel.literal_set(e.a, trie, root.id) ?? []
-                                        _ => []
+                                        NoOverride =>
+                                            match Accel.literal_set(e.a, trie, root.id) {
+                                                Ok(ls) =>
+                                                    match Teddy.build(ls) {
+                                                        Ok(td) => Lits(ls, td)
+                                                        Err(_) => NoLits
+                                                    }
+                                                Err(_) => NoLits
+                                            }
+                                        _ => NoLits
                                     }
                                 Ok({ a: e.a, trie, root: root.id, rev: rv.id, rev_ts: rts.id, ts: ts.id, noprefix: np.id, e, accel: ac.accel, lits })
                             }
@@ -132,24 +147,20 @@ Sharp := [].{
     ## Dispatched here rather than inside `Dfa.find_all_fast_opts`: putting
     ## another arm in that function cost 3-25% on every pattern, the target row
     ## included, so the hot scan does not learn about this at all.
-    lit_set_spans : List(List(U8)), List(U8) -> Try(List(Sharp.Span), [NoSet])
+    lit_set_spans : Sharp.Lits, List(U8) -> Try(List(Sharp.Span), [NoSet])
     lit_set_spans = |lits, hay|
-        if List.is_empty(lits) {
-            Err(NoSet)
-        } else {
-            match Teddy.build(lits) {
-                Err(_) => Err(NoSet)
-                Ok(td) =>
-                    # Uncapped. A candidate cap was tried, to protect the case
-                    # where matches are so dense that Teddy stops paying, but once
-                    # its scan was rewritten as one loop the dense case became
-                    # 1.84x FASTER than the ordinary scan, and the cap only made
-                    # it pay for a partial scan before giving up.
-                    match Teddy.match_lits(td, hay, List.len(hay) + 1) {
-                        Ok(sp) => Ok(sp)
-                        Err(_) => Err(NoSet)
-                    }
-            }
+        match lits {
+            NoLits => Err(NoSet)
+            # Uncapped. A candidate cap was tried, to protect the case where
+            # matches are so dense that Teddy stops paying, but once its scan
+            # was rewritten as one loop the dense case became 1.84x FASTER than
+            # the ordinary scan, and the cap only made it pay for a partial scan
+            # before giving up.
+            Lits(_, td) =>
+                match Teddy.match_lits(td, hay, List.len(hay) + 1) {
+                    Ok(sp) => Ok(sp)
+                    Err(_) => Err(NoSet)
+                }
         }
 
     find_all : Sharp.T, List(U8) -> List(Sharp.Span)
@@ -236,7 +247,11 @@ Sharp := [].{
         ov =
             match re.accel.override {
                 Literal(l, _, _) => "override=${Str.from_utf8_lossy(l)}"
-                NoOverride => if List.is_empty(re.lits) { "override=none" } else { "override=set[${re.lits |> List.map(|l| Str.from_utf8_lossy(l)) |> Str.join_with("|")}]" }
+                NoOverride =>
+                    match re.lits {
+                        NoLits => "override=none"
+                        Lits(ls, _) => "override=set[${ls |> List.map(|l| Str.from_utf8_lossy(l)) |> Str.join_with("|")}]"
+                    }
             }
         "${init} ${len} ${ov}"
     }

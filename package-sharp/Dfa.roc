@@ -1125,7 +1125,14 @@ Dfa := [].{
         s0 = e.s_rev_ts
         node = Dfa.st_node_of(e, s0)
         f = Dfa.flags(e, s0)
-        null_at_end = f.bitwise_and(Dfa.fl_always) != 0 or Deriv.nullable(e.a, Deriv.loc_end, node)
+        # `Deriv.nullable` is a recursive walk of the node graph, and this runs
+        # ONCE PER SCAN — which is why it never showed up against a 256 KB
+        # haystack and was ~240 ns of the ~340 a header lookup cost over 213
+        # bytes. `fl_end_null` / `fl_begin_null` are set at state creation to
+        # exactly `can_be_null(node) and nullable(loc, node)`, and `nullable` is
+        # False when the node cannot be null, so the flag test is the same
+        # question already answered.
+        null_at_end = f.bitwise_and(Dfa.fl_always.bitwise_or(Dfa.fl_end_null)) != 0
         if !(null_at_end or Arena.depends_anchor(e.a, node)) {
             { s: s0, pos: n, acc: [] }
         } else {
@@ -1140,8 +1147,7 @@ Dfa := [].{
             if pos != 0 {
                 { s: s1, pos, acc: if Dfa.is_null(e, s1) { Dfa.set_null_fast(e, s1, acc0, hay, pos) } else { acc0 } }
             } else {
-                nd = Dfa.st_node_of(e, s1)
-                really = Dfa.flags(e, s1).bitwise_and(Dfa.fl_always) != 0 or Deriv.nullable(e.a, Deriv.loc_begin, nd)
+                really = Dfa.flags(e, s1).bitwise_and(Dfa.fl_always.bitwise_or(Dfa.fl_begin_null)) != 0
                 acc1 =
                     if really {
                         k = Dfa.nk(e, s1)
@@ -1495,7 +1501,8 @@ Dfa := [].{
         # see `handle_input_start`
         node = Dfa.st_node_of(e, s)
         a = e.a
-        if Dfa.flags(e, s).bitwise_and(Dfa.fl_always) != 0 or Deriv.nullable(a, Deriv.loc_begin, node) {
+        # see `sweep_prologue`: the flag is the walk's answer, precomputed
+        if Dfa.flags(e, s).bitwise_and(Dfa.fl_always.bitwise_or(Dfa.fl_begin_null)) != 0 {
             tail = List.take_last(acc, 8)
             fresh = List.keep_if(Dfa.add_pairs_fast([], Dfa.pend_at(a, node, Deriv.loc_begin), hay, 0), |p| !List.contains(tail, p))
             acc1 = List.concat(acc, fresh)

@@ -1400,6 +1400,73 @@ duplicate headers, a header with no colon, a value containing a colon, the
 field count), router differential 174/174 against matchit. The engine was not
 touched, so its gates stand from the previous entry.
 
+## Where the non-literal `find`'s fixed cost was (2026-09-06)
+
+The previous entry left ~560 ns unlocated after rejecting four hypotheses. Two
+more of it are now found, and the method that found them was splitting `find`
+into its two passes across a family of patterns rather than guessing again:
+`Sharp.match_starts_fast` is public, so the reverse sweep can be timed alone
+and the forward end pass taken as the difference. Over a 213-byte header block:
+
+| pattern | find | sweep alone | is_match |
+|---|---|---|---|
+| `Content-Length` (literal) | 36 | 347 | 62 |
+| `[Cc]ontent-Length` | 484 | 347 | 445 |
+| `(?i)^content-length:[ \t]*` | 715 | 461 | 552 |
+| `^content-length:` (no match) | 381 | 326 | 335 |
+
+`find` is the sweep plus a small end pass, and the sweep costs ~330 ns even for
+a pattern it records nothing for. Against haystack length the sweep is **~242
+ns fixed plus 0.46 ns/byte** — so on a header block it is almost all fixed.
+
+**`Deriv.nullable` is a recursive walk of the node graph, and `sweep_prologue`
+called it once per scan.** So did `start_fast`, the sweep's input-start
+handler. The comment above `sweep_prologue` said "it runs once per scan, so the
+call costs nothing measurable", which was true when it was measured against 256
+KB. The answers were already precomputed: `fl_end_null` and `fl_begin_null` are
+set at state creation to exactly `can_be_null(node) and nullable(loc, node)`,
+and `nullable` is False when the node cannot be null, so the flag test IS the
+query. Three substitutions, ~90-100 ns off every non-literal `find`:
+
+| pattern | find before | after |
+|---|---|---|
+| `[Cc]ontent-Length` | 484 | 397 |
+| `(?i)content-length:` | 580 | 491 |
+| `(?i)^content-length:[ \t]*` | 715 | 624 |
+| `^content-length:` | 381 | 302 |
+| `[0-9]+` | 625 | 523 |
+
+**`Teddy.build` ran once per search too**, for any pattern with a literal-set
+accelerator. It is 820-856 ns — more than the entire search it was preparing.
+`Accel.literal_set` already built the tables to decide whether the set was
+usable and then threw them away, keeping only the literals; `Sharp.T` now
+carries `Lits(literals, Teddy.T)` and they fold into the artifact. Paired A/B on
+a 75-byte haystack, `Sherlock|Holmes|Watson|Adler`:
+
+| | `Sharp.find` |
+|---|---|
+| tables built per call | 885-1950 ns |
+| tables in the artifact | **83-265 ns** |
+
+Both bugs are the same shape as the doubled-literal one in the previous entry,
+and the same shape as each other: per-search setup that a 256 KB benchmark
+amortises to nothing and a few-hundred-byte search pays in full. This engine
+had never been profiled at that size.
+
+**What is still unaccounted for:** the sweep keeps ~145-260 ns of fixed cost
+depending on pattern complexity, and the forward end pass ~140-270. Neither is
+a single identifiable call any more — `collect_plain`'s prologue is already
+documented as tuned, and `ends_fast`'s extra tag destructures were measured at
+no-op in the previous entry.
+
+No regression on long haystacks: `tools/bench/run.sh` is within 2-6% on every
+row, and the untouched `Regex` column moved by the same amount, so that is the
+machine rather than the change.
+
+Gates: RE# corpus 331/331, node layer 57/57, fuzz plain 18000 cases 0
+divergences, fuzz seed 42 unchanged at 16, RE# differential agree=5139 differ=0
+of 5341 with ends differ=0, `examples/http.roc` 60/60.
+
 ## The port against the original (2026-09-06): `tools/sharp-bench`
 
 Everything measured so far compared this engine with Rust and with the other
