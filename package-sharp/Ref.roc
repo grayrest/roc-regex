@@ -15,7 +15,9 @@ import Utf8
 
 Ref := [].{
     ## the haystack as symbol classes and symbol start offsets (`pos[n]` = len)
-    Hay : { cls : List(U32), pos : List(U64), n : U64 }
+    # `cls` is a minterm id, which `Trie.build` keeps under 64, and `pos` a byte
+    # offset, so the prepared haystack costs 5 bytes a symbol rather than 12.
+    Hay : { cls : List(U8), pos : List(U32), n : U64 }
 
     prepare : Trie.T, List(U8) -> Ref.Hay
     prepare = |t, hay| Ref.prep_loop(t, hay, 0, { cls: [], pos: [], n: 0 })
@@ -23,11 +25,11 @@ Ref := [].{
     prep_loop : Trie.T, List(U8), U64, Ref.Hay -> Ref.Hay
     prep_loop = |t, hay, i, acc|
         if i >= List.len(hay) {
-            { ..acc, pos: List.append(acc.pos, i) }
+            { ..acc, pos: List.append(acc.pos, i.to_u32_wrap()) }
         } else {
             d = Utf8.decode(hay, i)
             c = if d.ok { Trie.class_of(t, d.cp) } else { t.invalid }
-            Ref.prep_loop(t, hay, i + d.len, { cls: List.append(acc.cls, c), pos: List.append(acc.pos, i), n: acc.n + 1 })
+            Ref.prep_loop(t, hay, i + d.len, { cls: List.append(acc.cls, c.to_u8_wrap()), pos: List.append(acc.pos, i.to_u32_wrap()), n: acc.n + 1 })
         }
 
     ## memo of `ends` results keyed by (node, start)
@@ -69,7 +71,7 @@ Ref := [].{
         n = h.n
         k = Arena.kind(a, id)
         if k == Arena.k_singleton {
-            if s < n and TSet.contains(Arena.tset(a, id), List.get(h.cls, s) ?? 0) {
+            if s < n and TSet.contains(Arena.tset(a, id), (List.get(h.cls, s) ?? 0).to_u32()) {
                 { m, set: Ref.single(n, s + 1) }
             } else {
                 { m, set: Ref.empty_set(n) }
@@ -157,7 +159,7 @@ Ref := [].{
             match case_end {
                 Err(_) => Ref.scan(a, h, r.m, root, s + 1, acc)
                 Ok(e) => {
-                    span = { start: List.get(h.pos, s) ?? 0, end: List.get(h.pos, e) ?? 0 }
+                    span = { start: (List.get(h.pos, s) ?? 0).to_u64(), end: (List.get(h.pos, e) ?? 0).to_u64() }
                     next = if e > s { e } else { s + 1 }
                     Ref.scan(a, h, r.m, root, next, List.append(acc, span))
                 }
@@ -169,6 +171,6 @@ Ref := [].{
     ends_at_start = |a, t, root, hay| {
         h = Ref.prepare(t, hay)
         r = Ref.ends(a, h, Dict.empty(), root, 0)
-        List.map(Ref.members(r.set), |e| List.get(h.pos, e) ?? 0)
+        List.map(Ref.members(r.set), |e| (List.get(h.pos, e) ?? 0).to_u64())
     }
 }

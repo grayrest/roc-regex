@@ -124,7 +124,7 @@ Sharp := [].{
         } else {
             h = Ref.prepare(re.trie, hay)
             r = Dfa.find_all(re.e, h)
-            List.map(r.spans, |sp| { start: List.get(h.pos, sp.start) ?? 0, end: List.get(h.pos, sp.end) ?? 0 })
+            List.map(r.spans, |sp| { start: (List.get(h.pos, sp.start) ?? 0).to_u64(), end: (List.get(h.pos, sp.end) ?? 0).to_u64() })
         }
 
     ## `find_all` on the fast scan with every accelerator off (A/B measurement)
@@ -143,7 +143,7 @@ Sharp := [].{
     find_all_threaded = |re, hay| {
         h = Ref.prepare(re.trie, hay)
         r = Dfa.find_all(re.e, h)
-        List.map(r.spans, |sp| { start: List.get(h.pos, sp.start) ?? 0, end: List.get(h.pos, sp.end) ?? 0 })
+        List.map(r.spans, |sp| { start: (List.get(h.pos, sp.start) ?? 0).to_u64(), end: (List.get(h.pos, sp.end) ?? 0).to_u64() })
     }
 
     ## `find_all`, also returning the regex with every state the scan minted
@@ -153,7 +153,7 @@ Sharp := [].{
     find_all_grow = |re, hay| {
         h = Ref.prepare(re.trie, hay)
         r = Dfa.find_all(re.e, h)
-        ({ ..re, e: r.e, a: r.e.a }, List.map(r.spans, |sp| { start: List.get(h.pos, sp.start) ?? 0, end: List.get(h.pos, sp.end) ?? 0 }))
+        ({ ..re, e: r.e, a: r.e.a }, List.map(r.spans, |sp| { start: (List.get(h.pos, sp.start) ?? 0).to_u64(), end: (List.get(h.pos, sp.end) ?? 0).to_u64() }))
     }
 
     ## The runtime state cap (RE#'s `MaxDfaCapacity`, default 100k): past it a
@@ -172,7 +172,7 @@ Sharp := [].{
     match_starts = |re, hay| {
         h = Ref.prepare(re.trie, hay)
         r = Dfa.starts(re.e, h)
-        List.map(r.acc, |p| List.get(h.pos, p) ?? 0)
+        List.map(r.acc, |p| (List.get(h.pos, p) ?? 0).to_u64())
     }
 
     ## the accelerators chosen for this pattern, for tests
@@ -407,12 +407,12 @@ Sharp := [].{
     derive_chain_rev = |re, node, hay, from, n_steps| {
         h = Ref.prepare(re.trie, hay)
         # symbol index of byte `from`
-        si = List.fold_with_index(h.pos, 0, |acc, p, i| if p == from { i } else { acc })
+        si = List.fold_with_index(h.pos, 0, |acc, p, i| if p.to_u64() == from { i } else { acc })
         st = List.fold(Arena.upto(n_steps), { a: re.a, id: node, i: si, out: [Sharp.describe(re.a, re.trie, node)] }, |acc, _|
             if acc.i == 0 { acc } else {
-                cls = List.get(h.cls, acc.i - 1) ?? 0
+                cls = (List.get(h.cls, acc.i - 1) ?? 0).to_u32()
                 d = Deriv.derivative(acc.a, Deriv.loc_center, TSet.bit(cls), acc.id)
-                { a: d.a, id: d.id, i: acc.i - 1, out: List.append(acc.out, "@${(List.get(h.pos, acc.i - 1) ?? 0).to_str()} ${Sharp.describe(d.a, re.trie, d.id)}") }
+                { a: d.a, id: d.id, i: acc.i - 1, out: List.append(acc.out, "@${(List.get(h.pos, acc.i - 1) ?? 0).to_u64().to_str()} ${Sharp.describe(d.a, re.trie, d.id)}") }
             })
         st.out
     }

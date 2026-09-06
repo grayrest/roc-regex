@@ -342,7 +342,7 @@ Dfa := [].{
             pos0 = h.n
             acc0 = if null_at_end { if f.bitwise_and(Dfa.fl_pending) != 0 { Dfa.add_pending_rev(e, s0, [], pos0) } else { [pos0] } } else { [] }
             # one End-location step over the last symbol
-            r = Dfa.step_end(e, s0, List.get(h.cls, pos0 - 1) ?? 0)
+            r = Dfa.step_end(e, s0, (List.get(h.cls, pos0 - 1) ?? 0).to_u32())
             pos = pos0 - 1
             if pos != 0 {
                 acc1 = if Dfa.is_null(r.e, r.id) { Dfa.set_null_full(r.e, r.id, acc0, pos) } else { acc0 }
@@ -376,7 +376,7 @@ Dfa := [].{
         var acc = acc0
         while pos > 0 {
             p = pos - 1
-            r = Dfa.step(e, s, List.get(h.cls, p) ?? 0)
+            r = Dfa.step(e, s, (List.get(h.cls, p) ?? 0).to_u32())
             e = r.e
             s = r.id
             if Dfa.is_null(e, s) {
@@ -471,7 +471,7 @@ Dfa := [].{
                 k = Dfa.nk(e, s)
                 best = if k == Dfa.nk_current or k == Dfa.nk_prev { Ok(pos - k.to_u64()) } else { Dfa.null_fallback(e, s, pos, best) }
             }
-            r = Dfa.step(e, s, List.get(h.cls, pos) ?? 0)
+            r = Dfa.step(e, s, (List.get(h.cls, pos) ?? 0).to_u32())
             e = r.e
             s = r.id
             pos = pos + 1

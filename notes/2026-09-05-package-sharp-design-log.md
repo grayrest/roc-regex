@@ -1152,3 +1152,41 @@ points whose agreement was assumed rather than tested.
 threaded scan runs, two haystack-sized lists that the fast path does without
 and that RE# does not build at all. That is structural rather than a stray
 pass, so it is a larger change than these.
+
+## `Ref.prepare` is amortization, not a redundant pass (2026-09-06)
+
+The previous entry listed `Ref.prepare` as the last of the redundant passes:
+it builds a class and a byte offset per symbol before the threaded scan, two
+haystack-sized lists the frozen scans do without. That reading was wrong, and
+the rewrite that followed from it was a regression.
+
+The threaded scan was converted to byte offsets, decoding and classifying each
+symbol in place exactly as the frozen scans do, sharing their byte-based
+helpers. It passed every gate, so it was correct, and it was much slower:
+
+| pattern | with `prepare` | byte-based | |
+|---|---|---|---|
+| `a(?=.*b)` find_all | 12192000 | 21247000 | 1.74x slower |
+| `\w+\s+\w+` threaded | 41965000 | 54422000 | 1.30x slower |
+
+The reason the frozen path can decode in place is that it has `atable`, the
+fused ASCII byte-to-state table, so a complete fold never calls `Trie.class_of`
+for ASCII at all. The threaded path has no such table, by definition: it exists
+because the fold is incomplete. So it pays a decode and a class lookup per
+symbol, and the forward pass re-walks the span of every match, so the same
+symbols are classified several times. `prepare` pays that once and every later
+pass indexes an array. It is a cache, and the passes that read it are what
+justify it.
+
+Reverted. What survived is the smaller version of the idea: the prepared
+haystack was storing a minterm id in a `U32` and a byte offset in a `U64`,
+where `Trie.build` bounds a minterm id under 64 and a byte offset fits a
+`U32`. Narrowing both takes the prepared haystack from 12 bytes a symbol to 5,
+so 3.1 MB to 1.3 MB on a 256 KB haystack. Speed is neutral to about 1.5%
+better, measured by alternating the two binaries once the machine was quiet,
+after a first attempt produced numbers 40% higher across the board on both
+sides and had to be discarded.
+
+The general lesson is the opposite of the previous entry's: a pass that
+materializes something later passes read repeatedly is not the same shape as
+one that materializes something read once. The ordering copy was read once.
