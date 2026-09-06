@@ -74,8 +74,8 @@ main! = |args| {
 	u32 = |n| n * 4
 	u64 = |n| n * 8
 	# the transition tables and the per-state columns
-	tables = u32(List.len(e.table)) + u32(List.len(e.end_table)) + u32(List.len(e.atable))
-	states = u32(List.len(e.st_node)) + List.len(e.st_flags) + List.len(e.st_nk) + u32(List.len(e.st_pend)) + u32(List.len(e.st_minpend)) + u32(List.len(e.node_state))
+	tables = u32(List.len(e.table)) + u32(List.len(e.end_table)) + 2 * List.len(e.atable)
+	states = u32(List.len(e.st_node)) + List.len(e.st_flags) + List.len(e.st_nk) + u32(List.len(e.st_pend)) + 2 * List.len(e.st_minpend) + u32(List.len(e.node_state))
 	skips = List.len(e.skip_ok) + List.len(e.skip_lo)
 	# the codepoint-class trie, dominated by Unicode class data
 	trie = List.len(t.ascii) + 2 * List.len(t.l1) + List.len(t.leaves) + u64(List.len(t.set_tsets)) + u32(List.len(t.cuts)) + List.len(t.mt_of_atom)

@@ -958,3 +958,37 @@ been failing since: `^a*b` derived by `a` now prints `(ε|_*^)a*b` rather than
 `(_*^)?a*b`, because `ε | X` no longer folds when X carries a lookaround. The
 test accepts a list of spellings and this one was added. Nothing else moved,
 and 57/57 pass again.
+
+## Narrowing the DFA tables (2026-09-06)
+
+`atable`, the fused ASCII byte-to-state table, is built only when the fold is
+complete, and a complete fold is capped at `Sharp.fold_state_cap` = 1024
+states, so a state id there fits a `U16`. `st_minpend` holds a symbol offset
+that `Arena.ps` already bounds to 16 bits. Both narrowed; every reader widens
+back on the way out.
+
+| pattern | tables before | tables after | binary before | binary after |
+|---|---|---|---|---|
+| `Sherlock\|Holmes\|…` | 48720 | 30800 | 873008 | 840224 |
+| `_*cat_*&_*dog_*` | 14400 | 8000 | 774608 | 741824 |
+| `.*Holmes` | 12264 | 6888 | 774688 | 774736 |
+| `Holmes` | 9216 | 5120 | 409200 | 409200 |
+| `\bthe\b` | 7384 | 4056 | 823904 | 823904 |
+| `\w+\s+\w+` | 5440 | 2880 | 823760 | 807392 |
+| `a+` baseline | 3216 | 1680 | 725360 | 725408 |
+| `a(?=.*b)` incomplete | 41000 | 41000 | 1730416 | 1681168 |
+
+The tables halve as expected. The binary follows only where the saving clears
+the file's roughly 16 KB granularity, so the alternation and the intersection
+drop about 33 KB each while several rows show no change at all. The
+incomplete fold keeps its 41000 bytes of tables, because it has no `atable`
+at all, but still drops 49 KB from the narrower `st_minpend` and the code that
+goes with it. Speed is unchanged: 0.87x to 1.02x across the bench set.
+
+**`table` and `end_table` are deliberately left at `U32`.** They are read by
+the extensible path, which mints states at scan time up to `runtime_cap`,
+RE#'s 100000 default. Narrowing them means lowering that cap below 65535,
+which is a documented budget under S4 and S12 rather than a representation
+detail, so it is a decision for the owner and not taken here. The prize is
+`a(?=.*b)`'s 41000 bytes halving, and nothing on any complete fold, where
+these two tables are already small next to `atable`.

@@ -31,7 +31,8 @@ Dfa := [].{
         st_flags : List(U8),
         st_nk : List(U8),
         st_pend : List(U32),
-        st_minpend : List(U32),
+        # symbol offset of the earliest pending nullable; `Arena.ps` is 16-bit
+        st_minpend : List(U16),
         # node id -> state id (0 = none); may be shorter than the arena
         node_state : List(U32),
         table : List(U32),
@@ -45,8 +46,11 @@ Dfa := [].{
         fold_states : U64,
         fold_marks : Arena.Marks,
         runtime_cap : U64,
-        # complete folds only: fused ASCII byte -> next state, `state * 128 + byte`
-        atable : List(U32),
+        # Complete folds only: fused ASCII byte -> next state, `state * 128 + byte`.
+        # A complete fold is capped at `Sharp.fold_state_cap` states, so a state id
+        # fits a U16 here. `table` and `end_table` cannot narrow the same way: the
+        # extensible path mints states at scan time up to `runtime_cap`.
+        atable : List(U16),
         # complete folds only (RE#'s per-state startsets / `CanSkipFlag`): for
         # state `s`, `skip_ok[s] == 1` says the bytes that change the state form
         # a rare enough set that a scan in `s` can skip to the nearest one;
@@ -59,6 +63,10 @@ Dfa := [].{
 
     dead : U32
     dead = 1
+
+    # the same state, as stored in `atable`
+    dead16 : U16
+    dead16 = 1
 
     # StateFlags
     fl_initial : U8
@@ -118,7 +126,7 @@ Dfa := [].{
                     s = i // 128
                     b = i % 128
                     cls = (List.get(ascii, b) ?? 0).to_u64()
-                    List.get(e.table, s * e.nmt.to_u64() + cls) ?? 0
+                    (List.get(e.table, s * e.nmt.to_u64() + cls) ?? 0).to_u16_wrap()
                 })
             } else {
                 []
@@ -211,7 +219,7 @@ Dfa := [].{
                 st_flags: List.append(e.st_flags, f5),
                 st_nk: List.append(e.st_nk, nk),
                 st_pend: List.append(e.st_pend, pend),
-                st_minpend: List.append(e.st_minpend, minpend),
+                st_minpend: List.append(e.st_minpend, minpend.to_u16_wrap()),
                 node_state: List.set(ns, node.to_u64(), id) ?? ns,
                 table: List.concat(e.table, List.repeat(0.U32, e.nmt.to_u64())),
                 end_table: List.concat(e.end_table, List.repeat(0.U32, e.nmt.to_u64())),
@@ -750,7 +758,7 @@ Dfa := [].{
                         }
                         b = List.get(hay, pos) ?? 0
                         if b < 0x80 {
-                            s = List.get(at, s.to_u64() * 128 + b.to_u64()) ?? Dfa.dead
+                            s = (List.get(at, s.to_u64() * 128 + b.to_u64()) ?? Dfa.dead16).to_u32()
                             pos = pos + 1
                         } else {
                             d = Utf8.decode(hay, pos)
@@ -794,7 +802,7 @@ Dfa := [].{
     step_rev_fast = |e, t, hay, s, pos| {
         b = List.get(hay, pos - 1) ?? 0
         if b < 0x80 {
-            { s: List.get(e.atable, s.to_u64() * 128 + b.to_u64()) ?? Dfa.dead, cs: pos - 1 }
+            { s: (List.get(e.atable, s.to_u64() * 128 + b.to_u64()) ?? Dfa.dead16).to_u32(), cs: pos - 1 }
         } else {
             d = Utf8.decode_rev(hay, pos)
             cls = if d.ok { Trie.class_of(t, d.cp) } else { t.invalid }
@@ -922,7 +930,7 @@ Dfa := [].{
                 pos = np
             } else {
                 if b < 0x80 {
-                    s = List.get(at, s.to_u64() * 128 + b.to_u64()) ?? Dfa.dead
+                    s = (List.get(at, s.to_u64() * 128 + b.to_u64()) ?? Dfa.dead16).to_u32()
                     pos = pos - 1
                 } else {
                     d = Utf8.decode_rev(hay, pos)
@@ -979,7 +987,7 @@ Dfa := [].{
                         } else {
                             b = List.get(hay, pos - 1) ?? 0
                             if b < 0x80 {
-                                s = List.get(at, s.to_u64() * 128 + b.to_u64()) ?? Dfa.dead
+                                s = (List.get(at, s.to_u64() * 128 + b.to_u64()) ?? Dfa.dead16).to_u32()
                                 pos = pos - 1
                             } else {
                                 d = Utf8.decode_rev(hay, pos)
@@ -1039,7 +1047,7 @@ Dfa := [].{
                     pos = np
                 } else {
                     if b < 0x80 {
-                        s = List.get(at, s.to_u64() * 128 + b.to_u64()) ?? Dfa.dead
+                        s = (List.get(at, s.to_u64() * 128 + b.to_u64()) ?? Dfa.dead16).to_u32()
                         pos = pos - 1
                     } else {
                         d = Utf8.decode_rev(hay, pos)
@@ -1154,7 +1162,7 @@ Dfa := [].{
                 }
                 b = List.get(hay, pos) ?? 0
                 if b < 0x80 {
-                    s = List.get(at, s.to_u64() * 128 + b.to_u64()) ?? Dfa.dead
+                    s = (List.get(at, s.to_u64() * 128 + b.to_u64()) ?? Dfa.dead16).to_u32()
                     pos = pos + 1
                 } else {
                     d = Utf8.decode(hay, pos)
