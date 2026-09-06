@@ -1319,6 +1319,15 @@ touches it, and its `find` is ~560 ns fixed plus 0.6 ns/byte — setup again,
 in the non-literal path's own prologues (`ends_fast` alone destructures the
 `Dfa.Len` tag seven times before it looks at a byte).
 
+Four hypotheses for that 560 ns were measured and rejected, so it is genuinely
+not yet located: `List.sublist`, passing `Sharp.T`, the literal prologue's
+allocations (all above), and the six extra `Dfa.Len` destructures in
+`ends_fast`'s prologue — skipping the five that `MatchEnd` does not need moved
+620 ns to 607, inside the noise, and was reverted. What remains unexamined is
+`starts_fast_opts` and the body of `ends_fast`; a probe calling them directly
+from an app crashed (exit 138), which is itself worth reducing before the next
+attempt.
+
 The cheaper shape is measured and available: one `find_all` of `\r\n` over the
 header block costs ~80 ns plus 0.6 ns/byte — about 250 ns for a 280-byte block
 — and yields every line boundary, after which matching a known header name is a
