@@ -774,3 +774,60 @@ reproduce across runs to within 2%.
 
 Roc's `--opt=speed` is the build default, so the harness was always
 optimizing; an explicit flag changes nothing.
+
+## Per-pattern artifact size (2026-09-05): `tools/sharp-size/breakdown.sh`
+
+`probe.sh` reports whole-binary bytes, which conflates the platform, the engine
+code and the pattern's own data. The new tool separates them: it reads the
+Mach-O section table for code and constant data, diffs both against a baseline
+binary, and prints the engine's own folded structures summed from their element
+counts and widths. `--opt=size`, 256 KB haystack.
+
+| pattern | binary | d_binary | d_const | d_code | tables | trie | nodes | states |
+|---|---|---|---|---|---|---|---|---|
+| `a+` baseline | 741776 | 0 | 0 | 0 | 3216 | 20004 | 772 | 5 |
+| `Holmes` | 409200 | -332576 | -84928 | -224088 | 9216 | 20116 | 2782 | 15 |
+| `Sherlock\|Holmes\|…` | 889424 | +147648 | +152080 | -3320 | 48720 | 20396 | 8231 | 69 |
+| `[A-Za-z]+` | 725264 | -16512 | -8 | -3516 | 3216 | 20020 | 772 | 5 |
+| `[0-9]{2,4}` | 741712 | -64 | +3000 | -4452 | 5360 | 20004 | 936 | 9 |
+| `\bthe\b` | 1250720 | +508944 | +490208 | +1276 | 7384 | 220340 | 2584 | 12 |
+| `\w+\s+\w+` | 1217744 | +475968 | +480384 | -4348 | 5440 | 220268 | 1380 | 9 |
+| `(\w+)@(\w+)` | 1217888 | +476112 | +479720 | +2820 | 5440 | 220132 | 1261 | 9 |
+| `\p{L}+` | 1184912 | +443136 | +428384 | -3480 | 3216 | 201828 | 772 | 5 |
+| `.*Holmes` | 791104 | +49328 | +44944 | +5300 | 12264 | 20140 | 4976 | 20 |
+| `_*cat_*&_*dog_*` | 807440 | +65664 | +55216 | -408 | 14400 | 20116 | 3755 | 24 |
+| `~(_*\d\d_*)` | 889520 | +147744 | +147952 | +4 | 3216 | 88708 | 1093 | 5 |
+| `a(?=.*b)` incomplete | 1714000 | +972224 | +349712 | +611160 | 41000 | 20044 | 43114 | 1024 |
+
+Four things the split shows that the total could not.
+
+**Code is paid once.** `d_code` is within about 5 KB for every complete fold,
+so the roughly 225 KB of scanning engine is a fixed cost and everything
+per-pattern is data. The exception is the incomplete fold, which keeps the
+threaded scan, the derivative machinery and the arena constructors: 611 KB of
+extra code on top of its 350 KB of tables.
+
+**A pure literal is cheaper than the baseline.** `Holmes` comes in 332 KB
+BELOW a minimal DFA pattern, because the literal override never touches the
+transition tables and the whole scanning path is eliminated. Any measurement
+that uses a literal as its baseline is therefore wrong, which is how the first
+version of this tool produced a table of identical numbers.
+
+**Unicode class data dominates everything else.** Adding `\w` costs about 490
+KB where its derived trie accounts for 200 KB of that, and the residue tracks
+the source range tables in `Uni`. A runtime-compiled `\bthe\b`, which must
+keep those tables by definition, has 270 KB of constants against the folded
+build's roughly 514 KB. So the folded binary appears to carry the derived trie
+AND the ranges it was derived from. Roughly 200 KB per Unicode pattern looks
+recoverable; not yet chased.
+
+**Transition tables are small.** The largest complete fold here is the
+alternation at 48 KB across 69 states. Tables only become a term at all in the
+1024-state incomplete fold.
+
+### Measuring this at all requires the data to be live
+
+An app that only asks for `List.len` of the folded lists gets constant-folded
+answers and the data is dropped, so every binary comes out byte-identical. The
+tool therefore scans a real runtime haystack, as `probe.sh` does. That is also
+a clean demonstration that the fold is genuine and dead-code-eliminated.

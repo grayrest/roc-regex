@@ -68,6 +68,7 @@ roc tools/sharp-corpus/nodes.roc                                                
 python3 tools/sharp-fuzz/gen.py 1500 20260905 plain > /tmp/f.roc && roc build /tmp/f.roc && /tmp/f a b   # fuzz vs the reference
 DOTNET_ROOT=~/.dotnet PATH=~/.dotnet:$PATH RESHARP=~/Repositories/resharp-dotnet python3 tools/sharp-diff/gen.py > /tmp/d.roc   # vs real RE#
 tools/sharp-size/probe.sh <haystack> [size|speed]     # fold cost, artifact size, ns per find_all
+tools/sharp-size/breakdown.sh <haystack> [size|speed] # what one pattern costs in the binary, and where
 tools/bench/run.sh                                     # sharp_* rows next to Regex and Rust
 ```
 
