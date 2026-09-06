@@ -1467,6 +1467,68 @@ Gates: RE# corpus 331/331, node layer 57/57, fuzz plain 18000 cases 0
 divergences, fuzz seed 42 unchanged at 16, RE# differential agree=5139 differ=0
 of 5341 with ends differ=0, `examples/http.roc` 60/60.
 
+## `collect_*`'s prologue, and what the residual actually is (2026-09-06)
+
+The owner suspected `collect_plain`'s prologue was not tuned for a match of
+this size. It is not, and the comment above it says so once you read it against
+the question: "the tables the loop reads are bound once ... passing the engine
+record to a helper PER STEP cost 4-5x". That tuned the loop. Nothing tuned the
+entry.
+
+Timing `Sharp.match_starts_fast` on a haystack the accelerator skips
+end-to-end, so that scanning contributes almost nothing:
+
+| haystack | `collect_plain` | `collect_prefix` |
+|---|---|---|
+| 0 B (early return, never enters) | 46 | 44 |
+| **1 B** | **127** | **121** |
+| 2 B | 124 | 118 |
+| 4 B | 126 | 120 |
+| 256 B | 148 | 140 |
+
+**~80 ns appears the instant the sweep processes one byte**, and 1 B to 256 B
+adds ~20. Both loops pay it equally.
+
+### It is not the table bindings, and not the automaton
+
+Three hypotheses measured and rejected, so the next attempt does not repeat
+them:
+
+- **Binding the five list fields costs ~1-6 ns**, measured directly: a record
+  of five lists, functions binding 0 / 1 / 3 / 5 of them, and a variant reading
+  them in place without binding, all within noise of each other.
+- **The record return is free** — the same test with a `{ s, acc }` return
+  measured the same.
+- **It does not scale with the automaton.** `[ab]` (5 states) shows the same
+  ~80 ns step as the header pattern (34 states).
+
+So it is the fixed structure of entering the sweep — `sweep_prologue`, the
+`collect_fast` dispatch, `collect_plain`/`collect_prefix`, `start_fast`: four
+calls whose bodies each do a small fixed amount of real work (`decode_rev`, a
+class lookup, two table reads, flag tests, and list plumbing across three
+record returns). Cutting it means fusing them, which puts the `find_all` hot
+loop at risk for ~80 ns on short searches.
+
+### Correction to the previous entry
+
+That entry put the sweep at "~242 ns fixed plus 0.46 ns/byte". Both numbers
+came from filler haystacks and conflated fixed cost with content-dependent
+scanning. Measured apart, for `(?i)^content-length:[ \t]*`:
+
+| | ns |
+|---|---|
+| sweep, fixed (entry ~46 + setup ~80) | ~130 |
+| sweep, scanning a real 213-byte header block | ~210 |
+| forward end pass and `find`'s glue | ~270 |
+| **`find` total** | **~620** |
+
+So a little over a fifth of a non-literal `find` on a small haystack is setup,
+not the 40%+ the earlier estimate implied, and the largest single piece left is
+the forward end pass rather than the sweep.
+
+Nothing shipped from this round: no change was measured as a win, and the
+project does not ship unmeasured ones.
+
 ## The port against the original (2026-09-06): `tools/sharp-bench`
 
 Everything measured so far compared this engine with Rust and with the other
