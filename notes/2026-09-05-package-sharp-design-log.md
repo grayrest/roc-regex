@@ -1184,6 +1184,80 @@ regex package at all. Per [[compiler-instability-not-a-design-input]] the
 module layout is not being changed around it. `examples/http.roc` and the
 benchmark app both build on the cached path, so only the size number is lost.
 
+## The radix trie for route selection (2026-09-06)
+
+H4's reopen, taken by the owner after M4 measured route selection at 60% of a
+request. `package-http/Rtrie` is a port of matchit 0.8's radix trie: static
+edges share prefixes and split on insert, a parameter edge consumes to the next
+`/`, a catch-all to the end, and at every node a static child is tried before
+the parameter child and that before the catch-all, backtracking into the next
+kind when a deeper match fails. Nodes are parallel flat lists indexed by node
+id, as `Dfa.E` and `Arena.A` are.
+
+One descent answers selection AND binds the parameters, so the second pass that
+stepped the pieces with `[^/]+` is gone too, and with it the whole selection
+pattern: `Route` is now the route SYNTAX only and does not import `Sharp`. The
+regex engine has left routing entirely.
+
+### The measurement
+
+`tools/http-bench/run.sh`, same fixture, same task, checksums still agreeing at
+51584:
+
+| stage | anchored DFA per route | radix trie |
+|---|---|---|
+| split | 7.7 | 7.2 |
+| + frame | 1298.5 | 1309.0 |
+| + route | 7669.9 | **1914.5** |
+| + three header lookups | 10552.0 | **4617.1** |
+| `httparse` + `matchit` | 386.9 | 387.8 |
+| ratio | 27.3x | **11.9x** |
+
+Route selection went from 6361 to 606 ns per request, **10.5x**, and the whole
+parse from 27.3x off `httparse` to 11.9x. What remains is 1302 ns of framing
+and 2703 ns for three header lookups (~900 ns each), both still the engine's
+per-call cost on short inputs -- the same fixed overhead the routing pass was
+paying nine times.
+
+### Checked against the original, not just against itself
+
+`tools/route-diff` builds the same table in real matchit and compares the
+matched route and its bound parameters path by path: **174/174 agree**,
+first run, including the radix splits (`/he` vs `/health` vs `/healthz`), the
+backtrack out of a static into a parameter (`/users/health`), and the
+suffix-in-segment case (`/images/img{id}.png` on "imga.b.png" binds "a.b").
+`examples/http.roc` is 56/56 with seven cases added for the descent.
+
+Two behaviours changed and are now matchit's rather than ours: conflicts are
+detected structurally (a route ending where one already does, or a parameter
+edge with a different name) instead of by comparing sorted shape keys, and
+`Allow` lists methods in declaration order again, since nothing sorts the table.
+
+### H6, unblocked and answered
+
+Removing `Sharp` from `Route` left `Http` as the only module holding folded
+matchers, so the two-module compiler panic no longer fires for
+`examples/http.roc` and `--no-cache` builds work. That is a consequence of the
+design change, not a workaround: the bug is unaffected and
+`upstream/2026-09-06-two-modules-folded-constant/` still reproduces it.
+
+The artifact number H6 wanted, from the constant sections of `--no-cache`
+builds with live (argv-derived) data, 1 route against 11:
+
+| app | `__TEXT,__const` + `__DATA_CONST,__const` | per extra route |
+|---|---|---|
+| routing only | 24536 -> 27776 | **324 B** |
+| routing + framing engine | 213832 -> 234640 | **2081 B** |
+
+Against H6's estimate of ~30 KB per pattern, a route is one to two orders of
+magnitude cheaper, because there is no per-route automaton left to store. The
+estimate still holds for the FRAMING matchers: `Http`'s five folded automata
+plus the engine account for the 189 KB gap between the two rows. So the
+ASCII-only trie that H6 named as its lever is still the thing to reach for, but
+for framing, not for the route table. Why the same table costs 324 B alone and
+2081 B beside the engine is unexplained; it is the same folded-constant
+double-storage question already recorded above as owed upstream.
+
 ## The port against the original (2026-09-06): `tools/sharp-bench`
 
 Everything measured so far compared this engine with Rust and with the other

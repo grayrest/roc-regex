@@ -1,0 +1,14 @@
+[package]
+name = "route-diff"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+matchit = "0.8"
+
+[[bin]]
+name = "route-diff"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3

@@ -130,7 +130,7 @@ cases = [
 	{ name: "param does not cross a slash", got: route("GET", "/users/4/2"), want: "404" },
 	{ name: "param must be non-empty", got: route("GET", "/users/"), want: "404" },
 	{ name: "unknown path", got: route("GET", "/nope"), want: "404" },
-	{ name: "method not allowed", got: route("PUT", "/users/42"), want: "405 DELETE,GET" },
+	{ name: "method not allowed", got: route("PUT", "/users/42"), want: "405 GET,DELETE" },
 	{ name: "other method on same path", got: route("DELETE", "/users/42"), want: "/users/{id} id=42" },
 	{ name: "post to collection", got: route("POST", "/users"), want: "/users" },
 	{ name: "percent-encoding is left alone", got: route("GET", "/users/a%2Fb"), want: "/users/{id} id=a%2Fb" },
@@ -174,7 +174,6 @@ route_err = |rs|
 		Err(BadRoute(p, InvalidParam)) => Str.join_with(["invalid-param ", p], "")
 		Err(BadRoute(p, InvalidParamSegment)) => Str.join_with(["invalid-param-segment ", p], "")
 		Err(BadRoute(p, InvalidCatchAll)) => Str.join_with(["invalid-catch-all ", p], "")
-		Err(BadRoute(p, BadPattern(_))) => Str.join_with(["bad-pattern ", p], "")
 		Err(Conflict(a, b)) => Str.join_with(["conflict ", a, " ", b], "")
 	}
 
@@ -189,6 +188,15 @@ table_cases = [
 	{ name: "different methods do not conflict", got: route_err([{ method: "GET", path: "/u/{id}" }, { method: "PUT", path: "/u/{name}" }]), want: "ok" },
 	{ name: "escaped braces are literal", got: route_err([{ method: "GET", path: "/{{a}}" }]), want: "ok" },
 	{ name: "escaped-brace route matches", got: route(  "GET", "/{a}"), want: "404" },
+	# the trie decides precedence structurally, so these check the descent
+	# rather than a sort order
+	{ name: "static wins over param at a shared prefix", got: route("GET", "/users"), want: "/users" },
+	{ name: "param wins when no static matches", got: route("GET", "/userz"), want: "404" },
+	{ name: "catch-all loses to a static sibling", got: route("GET", "/static/css/site.css"), want: "/static/{*rest} rest=css/site.css" },
+	{ name: "backtrack out of a static into a param", got: route("GET", "/users/health"), want: "/users/{id} id=health" },
+	{ name: "backtrack out of a longer static", got: route("GET", "/user_profiles/x"), want: "/user_profiles/{id} id=x" },
+	{ name: "shared prefix does not leak", got: route("GET", "/use"), want: "404" },
+	{ name: "trailing slash is not the route", got: route("GET", "/health/"), want: "404" },
 ]
 
 main! = |_| {

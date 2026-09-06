@@ -218,7 +218,20 @@ M0-M3 landed on `main`. Departures from the plan as written:
   and takes the whole segment, so a route with a static suffix in the same
   segment (`/images/img{id}.png`) bound "9.png" instead of "9". `Route.step`
   now removes the following static's in-segment head.
-- **M4's H10 row is taken; H6 is blocked.** `tools/http-bench/run.sh` reports
+- **H4's radix-trie reopen was taken (2026-09-06, owner).** `Rtrie` replaces
+  the per-route anchored DFA pass; selection 6361 -> 606 ns/req, the whole
+  parse 27.3x -> **11.9x** off `httparse`, 174/174 against real matchit
+  (`tools/route-diff`). Parameter binding comes from the same descent, so the
+  selection pattern and the piece-stepping matchers are both gone and `Route`
+  no longer imports `Sharp`. H7's "translate to a selection pattern" is
+  superseded for selection; H7's route-syntax parser stands.
+- **H6 is unblocked and answered.** With `Sharp` out of `Route`, only `Http`
+  holds folded matchers, so the two-module compiler panic no longer fires and
+  `--no-cache` builds work. A route costs **324 B** of constant data alone,
+  2081 B beside the engine; the ~30 KB estimate holds only for the framing
+  matchers. The compiler bug is unaffected and still reproduces in
+  `upstream/`.
+- **M4's H10 row was taken before the trie.** `tools/http-bench/run.sh` reports
   **27.3x slower than `httparse` + `matchit`** on the same task with agreeing
   checksums, and the stage split puts 60% of it in route selection at ~707 ns
   per anchored match of a 20-byte path -- per-call overhead, not scanning. Both
