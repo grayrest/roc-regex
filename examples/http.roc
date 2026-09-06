@@ -88,7 +88,19 @@ route = |method, path|
 	}
 
 get_req : Str
-get_req = "GET /users/42/posts/hello-world?x=1 HTTP/1.1\r\nHost: example.com\r\nContent-Length: 17\r\nX-Empty:\r\nAccept:   text/html   \r\n\r\nbody"
+get_req = "GET /users/42/posts/hello-world?x=1 HTTP/1.1\r\nHost: example.com\r\nContent-Length: 17\r\nX-Empty:\r\nAccept:   text/html   \r\nReferer: https://x/y\r\n\r\nbody"
+
+dup_req : Str
+dup_req = "GET / HTTP/1.1\r\nX-Dup: one\r\nX-Dup: two\r\n\r\n"
+
+nfields : Str -> Str
+nfields = |text| {
+	buf = Str.to_utf8(text)
+	match Http.frame(buf) {
+		Err(_) => "incomplete"
+		Ok(r) => List.len(r.fields).to_str()
+	}
+}
 
 cases : List(Case)
 cases = [
@@ -112,7 +124,11 @@ cases = [
 	{ name: "header absent", got: hdr(get_req, "Authorization"), want: "-" },
 	{ name: "header empty value", got: hdr(get_req, "X-Empty"), want: "" },
 	{ name: "header OWS trimmed", got: hdr(get_req, "Accept"), want: "text/html" },
-	{ name: "header name is not a pattern", got: hdr(get_req, "Host.*"), want: "-" },
+	{ name: "header name is matched literally", got: hdr(get_req, "Host.*"), want: "-" },
+	{ name: "all headers are indexed", got: nfields(get_req), want: "5" },
+	{ name: "duplicate header takes the first", got: hdr(dup_req, "X-Dup"), want: "one" },
+	{ name: "header with no colon", got: req("GET / HTTP/1.1\r\nbroken\r\n\r\n"), want: "bad-header" },
+	{ name: "value containing a colon", got: hdr(get_req, "Referer"), want: "https://x/y" },
 	# --- routing ---
 	{ name: "root", got: route("GET", "/"), want: "/" },
 	{ name: "static beats param", got: route("GET", "/users"), want: "/users" },

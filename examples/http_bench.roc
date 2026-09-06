@@ -45,14 +45,12 @@ router =
 		Err(_) => crash "route table is invalid"
 	}
 
-lookups : List(Str)
-lookups = ["content-length", "host", "x-request-id"]
-
-# One matcher per looked-up header, compiled once. A header name assembled at
-# runtime would compile per call; these are literals at the top level, so they
-# fold into the artifact like every other matcher here.
-lookup_matchers : List(Http.Matcher)
-lookup_matchers = List.map(lookups, |n| Http.header_matcher(n))
+# Headers are parsed by `frame` now, so a lookup is a case-insensitive byte
+# compare against the index rather than its own search.
+# as byte constants, folded into the artifact, the way a server would hold the
+# header names it reads on every request
+lookups : List(List(U8))
+lookups = [Str.to_utf8("content-length"), Str.to_utf8("host"), Str.to_utf8("x-request-id")]
 
 # Split the fixture at each `\r\n\r\n`, so neither side is handed a
 # pre-parsed structure.
@@ -98,8 +96,8 @@ one = |stage, buf, r| {
 				}
 			hdrs =
 				if stage < 3 { 0 } else
-				List.fold(lookup_matchers, 0, |acc, m|
-					match Http.header_with(raw, req, m) {
+				List.fold(lookups, 0, |acc, nm|
+					match Http.header_bytes(raw, req, nm) {
 						Ok(p) => acc + (p.end - p.start)
 						Err(_) => acc
 					})

@@ -1346,6 +1346,60 @@ fuzz seed 42 16 divergences (the pre-existing anchor family, unchanged), RE#
 differential agree=5139 differ=0 of 5341 with ends differ=0, `examples/http.roc`
 56/56, router differential 174/174 against matchit.
 
+## Eager headers (2026-09-06)
+
+The owner took the decision the previous entry recorded: `Http.frame` parses
+every header in the same pass, and `header` is a lookup rather than a search.
+
+Framing no longer searches for the terminator separately either. One `find_all`
+of `\r\n` over the buffer locates the request line's end, every header line's
+end, AND the blank line that ends the block, so the `find` of `\r\n\r\n` is
+gone: one SIMD literal pass does what a search plus a search per header did.
+
+| stage (cumulative) | lazy headers | eager |
+|---|---|---|
+| split | 8.2 | 7.8 |
+| + frame | 735.9 | 1459.2 |
+| + route | 1335.8 | 2128.3 |
+| + three header lookups | 4107.1 | **2236.7** |
+| `httparse` + `matchit` | 402.6 | 404.6 |
+| ratio | 10.2x | **5.5x** |
+
+Framing absorbs the header parsing and roughly doubles, 736 -> 1459; the three
+lookups fall from 2771 to **89** — about 30 ns each against ~920. The stage
+split now reads differently, which the harness says on its own header.
+
+Two things inside the lookup were worth more than the search they replaced:
+
+- `List.find_first` over the fields cost a closure per header. An indexed
+  `while` took three lookups from 423 ns to 89. This is the fold-closure cost
+  the hot-loop notes describe, in a loop of eleven elements.
+- `Http.header` takes a `Str`, and `Str.to_utf8` allocates on every call.
+  `header_bytes` takes the name already as bytes, which a top-level literal
+  folds into the artifact — that is what a server holds for the headers it
+  reads on every request.
+
+`colon_at` and `eq_ci_at` became `while` loops rather than per-byte recursion,
+worth about 1%: kept for the idiom, not for the number.
+
+### What the whole exercise moved
+
+| | ns/request | vs `httparse` |
+|---|---|---|
+| M4, as first measured | 10552 | 27.3x |
+| radix trie for selection | 4617 | 11.9x |
+| the doubled-literal override fix | 4107 | 10.2x |
+| eager headers | **2237** | **5.5x** |
+
+Framing is now 65% of a parse and route selection 30%. The ~560 ns of unlocated
+fixed cost in the non-literal `find` path no longer sits on the request path at
+all — nothing in framing or routing uses a leftmost search any more.
+
+Gates: `examples/http.roc` 60/60 (four cases added for the field index —
+duplicate headers, a header with no colon, a value containing a colon, the
+field count), router differential 174/174 against matchit. The engine was not
+touched, so its gates stand from the previous entry.
+
 ## The port against the original (2026-09-06): `tools/sharp-bench`
 
 Everything measured so far compared this engine with Rust and with the other

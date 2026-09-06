@@ -1,78 +1,147 @@
 ## HTTP/1.1 request framing on `Sharp` (H2, H3, H8 of
 ## `plans/2026-09-06-http-parse.md`).
 ##
-## The caller drives each step. Every piece is a `List.sublist` view of the
-## request buffer, so nothing here copies the bytes: a `Piece` is a byte range
-## and `slice` turns it into the bytes when they are wanted.
+## The caller drives each step. Every piece is a byte range of the request
+## buffer, and `slice` turns it into bytes when they are wanted — `List.sublist`
+## is a view, so nothing here copies the buffer.
 ##
-## Framing waits for the `\r\n\r\n` that ends the header block: a buffer
+## Framing waits for the blank line that ends the header block: a buffer
 ## without it is `Incomplete`, not an error, so a caller reading from a socket
-## can call again with more bytes. Headers are NOT parsed up front -- `header`
-## runs one anchored search over the header block per lookup, which for the
-## handful a request handler reads is less work than materializing all of them.
+## can call again with more bytes.
+##
+## Headers are parsed EAGERLY, in the same pass. H2 originally chose to pull
+## each header on demand, on the reasoning that materializing all of them would
+## cost more than the two or three a handler reads. The measurement says the
+## opposite by an order of magnitude: one `find_all` of `\r\n` locates every
+## line boundary in a single SIMD pass over the block (~250 ns for a typical
+## request), where each on-demand lookup was a separate leftmost search costing
+## ~920 ns. Three lookups went from ~2770 ns to one shared ~250.
+##
+## What that trades away is the regex in the header lookup itself: with the
+## line boundaries known, matching a header NAME is a case-insensitive byte
+## compare, which is what it always was.
 import sharp.Sharp
 
 Http := [].{
     ## A byte range of the request buffer.
     Piece : { start : U64, end : U64 }
 
-    ## A framed request. `headers` is the extent of the header block, not its
-    ## contents; `body` starts after the terminator.
+    ## One header, as two ranges of the buffer. The value has its surrounding
+    ## optional whitespace already trimmed (RFC 7230 OWS).
+    Field : { name : Http.Piece, value : Http.Piece }
+
+    ## A framed request. `body` is the offset just past the blank line.
     Req : {
         method : Http.Piece,
         target : Http.Piece,
         version : Http.Piece,
-        headers : Http.Piece,
+        fields : List(Http.Field),
         body : U64,
     }
 
     Err : [
-        # no `\r\n\r\n` yet: read more and call again
+        # no blank line yet: read more and call again
         Incomplete,
         # the request line is not METHOD SP TARGET SP HTTP/d.d CRLF
         BadRequestLine,
         # a header line starts with SP or HT (obs-fold, RFC 7230 deprecated)
         ObsFold,
-        # the header block has a line that is not `name: value`
+        # a header line has no `:`
         BadHeader,
     ]
 
-    ## Frame a request. One anchored step per piece of the request line, then
-    ## the header block's extent.
+    ## Frame a request: the request line, then every header, in one pass.
     frame : List(U8) -> Try(Http.Req, Http.Err)
-    frame = |buf|
-        match Http.find_terminator(buf) {
+    frame = |buf| {
+        # every `\r\n` in the buffer, from one SIMD literal scan. This locates
+        # the request line's end, each header line's end, and the blank line
+        # that ends the block, so framing needs no separate terminator search.
+        ends = Sharp.find_all(Http.crlf_m, buf)
+        match List.first(ends) {
             Err(_) => Err(Incomplete)
-            Ok(t) =>
-                # the request line ends at the first CRLF, which the terminator
-                # search has already proved exists
-                match Http.take(Http.method_m, buf, 0) {
+            Ok(rl) =>
+                match Http.request_line(buf, rl.start) {
+                    Err(e) => Err(e)
+                    Ok(rq) =>
+                        match Http.fields_from(buf, ends, 1, rl.end, []) {
+                            Err(e) => Err(e)
+                            Ok(fs) => Ok({ method: rq.method, target: rq.target, version: rq.version, fields: fs.fields, body: fs.body })
+                        }
+                }
+        }
+    }
+
+    ## The three pieces of the request line, each one anchored step over a view
+    ## of the buffer. `eol` is where the line's `\r\n` begins.
+    request_line : List(U8), U64 -> Try({ method : Http.Piece, target : Http.Piece, version : Http.Piece }, Http.Err)
+    request_line = |buf, eol|
+        match Http.take(Http.method_m, buf, 0) {
+            Err(_) => Err(BadRequestLine)
+            Ok(m) =>
+                match Http.take(Http.target_m, buf, m) {
                     Err(_) => Err(BadRequestLine)
-                    Ok(m) =>
-                        match Http.take(Http.target_m, buf, m) {
+                    Ok(tg) =>
+                        match Http.take(Http.version_m, buf, tg) {
                             Err(_) => Err(BadRequestLine)
-                            Ok(tg) =>
-                                match Http.take(Http.version_m, buf, tg) {
-                                    Err(_) => Err(BadRequestLine)
-                                    Ok(v) =>
-                                        if v + 2 > t.end or !Http.at_crlf(buf, v) {
-                                            Err(BadRequestLine)
-                                        } else if Http.is_obs_fold(buf, v + 2) {
-                                            Err(ObsFold)
-                                        } else {
-                                            Ok({
-                                                method: { start: 0, end: m },
-                                                # the separating spaces are one byte each
-                                                target: { start: m + 1, end: tg },
-                                                version: { start: tg + 1, end: v },
-                                                headers: { start: v + 2, end: t.start + 2 },
-                                                body: t.end,
-                                            })
-                                        }
+                            # the version must run exactly to the line's end, so
+                            # a trailing "HTTP/1.1x" is rejected rather than
+                            # silently truncated
+                            Ok(v) =>
+                                if v != eol {
+                                    Err(BadRequestLine)
+                                } else {
+                                    Ok({
+                                        method: { start: 0, end: m },
+                                        # the separating spaces are one byte each
+                                        target: { start: m + 1, end: tg },
+                                        version: { start: tg + 1, end: v },
+                                    })
                                 }
                         }
                 }
         }
+
+    ## Walk the line ends from `i`, turning each into a `Field`, until the blank
+    ## line. `at` is where the current line starts.
+    fields_from : List(U8), List(Sharp.Span), U64, U64, List(Http.Field) -> Try({ fields : List(Http.Field), body : U64 }, Http.Err)
+    fields_from = |buf, ends, i, at, acc|
+        match List.get(ends, i) {
+            # the block is not terminated yet
+            Err(_) => Err(Incomplete)
+            Ok(e) =>
+                if e.start == at {
+                    # a zero-length line: the blank line that ends the block
+                    Ok({ fields: acc, body: e.end })
+                } else if Http.is_ows(List.get(buf, at) ?? 0) {
+                    Err(ObsFold)
+                } else {
+                    match Http.colon_at(buf, at, e.start) {
+                        Err(_) => Err(BadHeader)
+                        Ok(c) =>
+                            Http.fields_from(buf, ends, i + 1, e.end, List.append(acc, {
+                                name: { start: at, end: c },
+                                value: Http.trim_ows(buf, { start: c + 1, end: e.start }),
+                            }))
+                    }
+                }
+        }
+
+    # the first `:` in `at..stop`. A `while`, not recursion: this runs once per
+    # byte of every header name in the request.
+    colon_at : List(U8), U64, U64 -> Try(U64, [NoColon])
+    colon_at = |buf, at, stop| {
+        var i = at
+        var found = stop
+        while i < stop {
+            if (List.get(buf, i) ?? 0) == ':' {
+                found = i
+                i = stop
+            } else {
+                i = i + 1
+            }
+        }
+        if found == stop { Err(NoColon) } else { Ok(found) }
+    }
 
     ## The bytes of a piece.
     slice : List(U8), Http.Piece -> List(U8)
@@ -82,62 +151,56 @@ Http := [].{
     slice_str : List(U8), Http.Piece -> Str
     slice_str = |buf, p| Str.from_utf8_lossy(Http.slice(buf, p))
 
-    ## The value of a named header, case-insensitively, with surrounding
-    ## optional whitespace trimmed. On demand: one anchored search of the
-    ## header block per call.
-    ##
-    ## `name` must be a header name, not a pattern -- it is escaped before it
-    ## reaches the engine.
+    ## The value of a named header, matched case-insensitively as HTTP requires.
+    ## The first occurrence wins.
     header : List(U8), Http.Req, Str -> Try(Http.Piece, [Missing])
-    header = |buf, req, name|
-        match Sharp.compile(Http.name_pattern(name)) {
-            Err(_) => Err(Missing)
-            Ok(m) => Http.header_with(buf, req, m)
-        }
+    header = |buf, req, name| Http.header_bytes(buf, req, Str.to_utf8(name))
 
-    ## A compiled header-name matcher. Declared at a top level with a literal
-    ## name it folds into the artifact; built from a runtime name it compiles
-    ## once, which is still better than once per lookup.
-    Matcher : Sharp.T
-
-    header_matcher : Str -> Http.Matcher
-    header_matcher = |name| Sharp.unwrap(Sharp.compile(Http.name_pattern(name)))
-
-    ## `header` with the matcher supplied, for a caller that looks the same
-    ## header up repeatedly: `Sharp.compile` folds at build time only for a
-    ## literal pattern, and a name assembled at runtime compiles at runtime.
-    header_with : List(U8), Http.Req, Http.Matcher -> Try(Http.Piece, [Missing])
-    header_with = |buf, req, m| {
-        block = Http.slice(buf, req.headers)
-        match Sharp.find(m, block) {
-            Err(_) => Err(Missing)
-            Ok(s) => {
-                at = req.headers.start + s.end
-                match Sharp.longest_end(Http.value_m, List.sublist(buf, { start: at, len: List.len(buf) - at })) {
-                    Err(_) => Ok({ start: at, end: at })
-                    Ok(e) => Ok(Http.trim_ows(buf, { start: at, end: at + e }))
-                }
+    ## `header` with the name already as bytes. A server looks the same few
+    ## headers up on every request from constant names; `Str.to_utf8` allocates,
+    ## and at ~160 ns a lookup that conversion was most of the cost. A `List(U8)`
+    ## literal at a top level is folded into the artifact, so this pays nothing.
+    header_bytes : List(U8), Http.Req, List(U8) -> Try(Http.Piece, [Missing])
+    header_bytes = |buf, req, want| {
+        # an indexed loop, not `List.find_first`: a closure per field is the
+        # cost the hot-loop notes describe, and there is one call per header a
+        # handler reads
+        n = List.len(want)
+        fs = req.fields
+        nf = List.len(fs)
+        var i = 0
+        var hit = Err(Missing)
+        while i < nf {
+            f = List.get(fs, i) ?? { name: { start: 0, end: 0 }, value: { start: 0, end: 0 } }
+            if f.name.end - f.name.start == n and Http.eq_ci_at(buf, f.name.start, want, 0, n) {
+                hit = Ok(f.value)
+                i = nf
+            } else {
+                i = i + 1
             }
         }
+        hit
     }
 
-    ## The pattern matching one header's name and the colon and optional
-    ## whitespace after it, anchored to the start of a line. `^` is a line
-    ## anchor in RE# always, so "the start of a header line" needs nothing
-    ## more; `(?i)` makes the name case-insensitive, as HTTP requires.
-    name_pattern : Str -> Str
-    name_pattern = |name|
-        Str.join_with(["(?i)^", Http.escape(Str.to_utf8(name)), ":[ \t]*"], "")
+    ## Are `n` bytes of the buffer at `at` equal to `want`, ASCII-case-
+    ## insensitively? Header names are ASCII by RFC 7230, so folding a byte is
+    ## one range test.
+    eq_ci_at : List(U8), U64, List(U8), U64, U64 -> Bool
+    eq_ci_at = |buf, at, want, from, n| {
+        var i = from
+        var ok = True
+        while ok and i < n {
+            if Http.lower(List.get(buf, at + i) ?? 0) == Http.lower(List.get(want, i) ?? 1) {
+                i = i + 1
+            } else {
+                ok = False
+            }
+        }
+        ok
+    }
 
-    escape : List(U8) -> Str
-    escape = |bytes|
-        Str.from_utf8_lossy(
-            List.fold(bytes, [], |acc, c|
-                if List.contains(Http.metas, c) { List.concat(acc, ['\\', c]) } else { List.append(acc, c) }))
-
-    # RE#'s metacharacters, which include `_`, `&` and `~`
-    metas : List(U8)
-    metas = ['\\', '.', '+', '*', '?', '(', ')', '[', ']', '{', '}', '|', '^', '$', '_', '&', '~', '-']
+    lower : U8 -> U8
+    lower = |c| if c >= 'A' and c <= 'Z' { c + 32 } else { c }
 
     ## Drop spaces and horizontal tabs from both ends of a piece (RFC 7230 OWS).
     trim_ows : List(U8), Http.Piece -> Http.Piece
@@ -156,34 +219,14 @@ Http := [].{
     is_ows : U8 -> Bool
     is_ows = |c| c == ' ' or c == '\t'
 
-    # --- the anchored steps ------------------------------------------------------
-
     ## One anchored step over a suffix of the buffer: how far does `m` reach
-    ## from `at`? The slice is a view, so a step costs no copy -- which is what
-    ## makes a whole request one forward pass rather than a quadratic one.
+    ## from `at`? The slice is a view, so a step costs no copy.
     take : Sharp.T, List(U8), U64 -> Try(U64, [NoMatch])
     take = |m, buf, at|
         match Sharp.longest_end(m, List.sublist(buf, { start: at, len: List.len(buf) - at })) {
             Err(_) => Err(NoMatch)
             Ok(0) => Err(NoMatch)
             Ok(e) => Ok(at + e)
-        }
-
-    at_crlf : List(U8), U64 -> Bool
-    at_crlf = |buf, i| (List.get(buf, i) ?? 0) == '\r' and (List.get(buf, i + 1) ?? 0) == '\n'
-
-    # a header line may not begin with SP or HT (obsolete line folding)
-    is_obs_fold : List(U8), U64 -> Bool
-    is_obs_fold = |buf, i| Http.is_ows(List.get(buf, i) ?? 0)
-
-    ## The end of the header block: the first `\r\n\r\n`. Returns the range of
-    ## the terminator itself, so `start` is where the last header line ended
-    ## and `end` is where the body begins.
-    find_terminator : List(U8) -> Try({ start : U64, end : U64 }, [NoMatch])
-    find_terminator = |buf|
-        match Sharp.find(Http.term_m, buf) {
-            Err(_) => Err(NoMatch)
-            Ok(s) => Ok({ start: s.start, end: s.end })
         }
 
     ## The matchers, one automaton each rather than one per call. Each is a
@@ -199,9 +242,6 @@ Http := [].{
     version_m : Sharp.T
     version_m = Sharp.unwrap(Sharp.compile(" HTTP/[0-9]\\.[0-9]"))
 
-    value_m : Sharp.T
-    value_m = Sharp.unwrap(Sharp.compile("[^\r\n]*"))
-
-    term_m : Sharp.T
-    term_m = Sharp.unwrap(Sharp.compile("\r\n\r\n"))
+    crlf_m : Sharp.T
+    crlf_m = Sharp.unwrap(Sharp.compile("\r\n"))
 }

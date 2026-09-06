@@ -39,6 +39,16 @@ one iteration).
 
 ### H2 — Caller-driven anchored stepping over seamless slices
 
+**Amended 2026-09-06 (owner): headers are parsed EAGERLY.** The original choice
+was to pull each header on demand, on the reasoning that materializing all of
+them would cost more than the two or three a handler reads. Measured, the
+opposite holds by an order of magnitude: one `find_all` of `\r\n` locates every
+line boundary in a single SIMD pass over the block, where each on-demand lookup
+was its own leftmost search. `Http.frame` returns `fields`, and `header` is a
+case-insensitive byte compare against it. The rest of H2 — the caller driving
+each step, pieces as views of its own buffer, no resumable state — stands.
+
+
 The parse primitive is "from the start of this slice, how far does this piece
 extend?" — RE#'s `LongestEnd`. Pieces are the slices. No captures, no cursor
 type in the engine, no resumable match state. Rejected: resuming across socket

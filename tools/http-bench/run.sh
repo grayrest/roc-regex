@@ -45,7 +45,8 @@ for _ in $(seq 1 $REPS); do ./tools/http-bench/rust/target/release/http-bench "$
 
 REQS=$(awk -F, '$1=="rust"{print $3}' /tmp/hb_rust.csv)
 echo
-echo "${REQS} requests   |   ns per request for: frame + route + 3 header lookups"
+echo "${REQS} requests   |   ns per request, cumulative"
+echo "roc_frame includes every header: framing parses them all in one pass (H2, reversed)"
 awk -F, -v reqs="$REQS" '
 FILENAME==ARGV[1] { roc[$1]=$2; rk[$1]=$4; next }
 { rust_ns=$2; rust_k=$4 }
