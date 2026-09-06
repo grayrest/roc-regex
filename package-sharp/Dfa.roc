@@ -39,6 +39,11 @@ Dfa := [].{
         end_table : List(U32),
         s_rev_ts : U32,
         s_noprefix : U32,
+        # the start state for a match anchored at offset 0
+        # (`Deriv.at_input_start` of the root): the forward scans start from
+        # `s_noprefix`, whose lookbehind prefix the reverse sweep verified, and
+        # an anchored match has no sweep to have done that.
+        s_anchored : U32,
         max_states : U64,
         complete : Bool,
         # the folded prefix (S4): `freeze` records it after `explore`; a scan
@@ -95,19 +100,24 @@ Dfa := [].{
     R : { e : Dfa.E, id : U32 }
 
     ## An engine over the arena with the dead state and the two start states.
-    init : Arena.A, U32, U32, U64 -> Dfa.E
-    init = |a, rev_ts, noprefix, max_states| {
+    init : Arena.A, U32, U32, U32, U64 -> Dfa.E
+    init = |a, rev_ts, noprefix, anchored, max_states| {
         e0 = {
             a, nmt: a.nmt,
             st_node: [0], st_flags: [0], st_nk: [Dfa.nk_notnull], st_pend: [0], st_minpend: [0],
             node_state: [], table: List.repeat(0.U32, a.nmt.to_u64()), end_table: List.repeat(0.U32, a.nmt.to_u64()),
-            s_rev_ts: 0, s_noprefix: 0, max_states, complete: True,
+            s_rev_ts: 0, s_noprefix: 0, s_anchored: 0, max_states, complete: True,
             fold_states: 0, fold_marks: Arena.marks(a), runtime_cap: Dfa.default_runtime_cap, atable: [], skip_ok: [], skip_lo: [], any_skip: False,
         }
         d = Dfa.get_state(e0, Arena.bot, False)
         r1 = Dfa.get_state(d.e, rev_ts, True)
         r2 = Dfa.get_state(r1.e, noprefix, False)
-        { ..r2.e, s_rev_ts: r1.id, s_noprefix: r2.id }
+        # `anchored` is usually `noprefix` itself, and then this mints nothing;
+        # an unsatisfiable prefix resolves to `bot`, which is the dead state. A
+        # new state here is explored with the rest (`explore_from` walks every
+        # state in creation order).
+        r3 = Dfa.get_state(r2.e, anchored, False)
+        { ..r3.e, s_rev_ts: r1.id, s_noprefix: r2.id, s_anchored: r3.id }
     }
 
     ## RE#'s `MaxDfaCapacity`
@@ -824,6 +834,123 @@ Dfa := [].{
         }
         spans
     }
+
+    # --- the anchored end pass (RE#'s FirstEnd / LongestEnd) ---------------------
+
+    ## Both ends of the match anchored at offset 0: the smallest and the largest.
+    ## One pass computes both, so `first_end` and `longest_end` share it.
+    AtStart : { first : Try(U64, [NoEnd]), last : Try(U64, [NoEnd]) }
+
+    ## The byte-loop forward pass from offset 0, starting at `s_anchored`.
+    ##
+    ## Three ways this differs from `ends_fast`, each a correctness point:
+    ##
+    ## - It starts at `s_anchored` (`Deriv.at_input_start` of the root), not
+    ##   `s_noprefix`. A search's forward pass runs the prefix-free pattern
+    ##   because the reverse sweep verified the lookbehind prefix at that start;
+    ##   here there is no sweep, so the prefix is resolved against offset 0 --
+    ##   keeping it made `(?<=ab)cd` match "abcd" at 0, since a lookbehind
+    ##   derivative walks its body forward.
+    ## - No `CanSkip`. Skipping jumps to the LAST position a state loops on,
+    ##   which is right for the largest end and would step over the smallest.
+    ## - It tracks the smallest candidate as well as the largest. For a state
+    ##   with pending nullables the largest end retreats by the SMALLEST pending
+    ##   offset (`st_minpend`, what `null_fallback_fast` uses) and the smallest
+    ##   end by the largest, so that one reads the whole pending set.
+    ends_at_start_fast : Dfa.E, Trie.T, List(U8) -> Dfa.AtStart
+    ends_at_start_fast = |e, t, hay| {
+        n = List.len(hay)
+        s0 = e.s_anchored
+        if n == 0 {
+            r = Dfa.at_eoi_fast(e, s0, hay, 0, Err(NoEnd))
+            { first: r, last: r }
+        } else {
+            at = e.atable
+            nks = e.st_nk
+            table = e.table
+            nmt = e.nmt.to_u64()
+            ascii_ok = e.complete
+            var pos = 0
+            var s = s0
+            # nullable at the input start: `fl_begin_null` is exactly
+            # `can_be_null and nullable(loc_begin)`, computed at state creation
+            var first = if Dfa.flags(e, s0).bitwise_and(Dfa.fl_begin_null) != 0 { Ok(0) } else { Err(NoEnd) }
+            var last = first
+            while s != Dfa.dead {
+                k = List.get(nks, s.to_u64()) ?? Dfa.nk_notnull
+                if k != Dfa.nk_notnull {
+                    if k == Dfa.nk_current {
+                        first = Dfa.min_end(first, pos)
+                        last = Dfa.max_end(last, pos)
+                    } else if k == Dfa.nk_prev {
+                        p1 = Utf8.retreat(hay, pos, 1)
+                        first = Dfa.min_end(first, p1)
+                        last = Dfa.max_end(last, p1)
+                    } else if Dfa.flags(e, s).bitwise_and(Dfa.fl_pending) != 0 {
+                        last = Dfa.max_end(last, Utf8.retreat(hay, pos, (List.get(e.st_minpend, s.to_u64()) ?? 0).to_u64()))
+                        first = Dfa.min_end(first, Utf8.retreat(hay, pos, Dfa.pend_max_off(e, s)))
+                    } else {
+                        first = Dfa.min_end(first, pos)
+                        last = Dfa.max_end(last, pos)
+                    }
+                }
+                b = List.get(hay, pos) ?? 0
+                if b < 0x80 and ascii_ok {
+                    s = (List.get(at, s.to_u64() * 128 + b.to_u64()) ?? Dfa.dead16).to_u32()
+                    pos = pos + 1
+                } else {
+                    d = Utf8.decode(hay, pos)
+                    cc = if d.ok { Trie.class_of(t, d.cp) } else { t.invalid }
+                    s = List.get(table, s.to_u64() * nmt + cc.to_u64()) ?? Dfa.dead
+                    pos = pos + d.len
+                }
+                if pos >= n {
+                    eb = Dfa.at_eoi_bounds(e, s, hay, n, { first, last })
+                    first = eb.first
+                    last = eb.last
+                    s = Dfa.dead
+                }
+            }
+            { first, last }
+        }
+    }
+
+    ## `at_eoi_fast` for both bounds. It reports only the largest end -- for each
+    ## pending pair it retreats by the pair's SMALLEST offset -- so the smallest
+    ## end needs the pair's largest: `~(_,\w[^ab])+$` on "cab ab\xff\n" ends at
+    ## both 7 (before the newline, where `$` holds) and 8, and the one-value
+    ## version reported 8 for `first_end`.
+    at_eoi_bounds : Dfa.E, U32, List(U8), U64, Dfa.AtStart -> Dfa.AtStart
+    at_eoi_bounds = |e, s, hay, pos, acc| {
+        node = Dfa.st_node_of(e, s)
+        a = e.a
+        if !Arena.can_be_null(a, node) {
+            acc
+        } else {
+            loc = if pos == 0 { Deriv.loc_both } else { Deriv.loc_end }
+            acc1 = if Dfa.fresh_at(a, node, loc) { { first: Dfa.min_end(acc.first, pos), last: Dfa.max_end(acc.last, pos) } } else { acc }
+            List.fold(Dfa.pend_at(a, node, loc), acc1, |b, p| {
+                { first: Dfa.min_end(b.first, Utf8.retreat(hay, pos, Arena.pe(p).to_u64())),
+                  last: Dfa.max_end(b.last, Utf8.retreat(hay, pos, Arena.ps(p).to_u64())) }
+            })
+        }
+    }
+
+    ## the LARGEST pending offset of a state, so retreating by it gives the
+    ## smallest end (`st_minpend` is the smallest, giving the largest end)
+    pend_max_off : Dfa.E, U32 -> U64
+    pend_max_off = |e, s|
+        List.fold(Arena.rs_get(e.a, List.get(e.st_pend, s.to_u64()) ?? 0), 0, |acc, p| {
+            v = Arena.pe(p).to_u64()
+            if v > acc { v } else { acc }
+        })
+
+    min_end : Try(U64, [NoEnd]), U64 -> Try(U64, [NoEnd])
+    min_end = |best, cand|
+        match best {
+            Ok(b) => Ok(if cand < b { cand } else { b })
+            Err(_) => Ok(cand)
+        }
 
     ## The pattern IS `lit` (RE#'s `FixedLengthString`): scan for its first byte
     ## 16 at a time and verify in place.

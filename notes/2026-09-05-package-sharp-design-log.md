@@ -993,6 +993,134 @@ detail, so it is a decision for the owner and not taken here. The prize is
 `a(?=.*b)`'s 41000 bytes halving, and nothing on any complete fold, where
 these two tables are already small next to `atable`.
 
+## The anchored end finders on the DFA (2026-09-06)
+
+`first_end` and `longest_end` ran on `Ref.ends_at_start`, the brute-force
+interpreter -- correct, and oracles rather than fast paths. H3 of
+`plans/2026-09-06-http-parse.md` makes them the parse primitive for a caller
+stepping pieces of its own buffer, so they move to the frozen DFA
+(`Dfa.ends_at_start_fast`, one pass returning both bounds). The interpreter
+stays as the oracle and as the path for an incomplete fold.
+
+**The start state is not `s_noprefix`, and it is not the root either.** The
+forward pass of a search runs the prefix-free pattern because the reverse sweep
+has already verified the lookbehind prefix at that start. An anchored match has
+had no sweep, so `s_noprefix` would accept a prefix that does not hold:
+`(?<=ab)cd` anchored at 0 of "cdef" is not a match, and `s_noprefix` is `cd`,
+which matches. Starting from the root instead is worse, because a lookbehind
+derivative walks its body FORWARD (`Deriv.derivative`, `k_lookbehind`): the root
+matched "abcd" at 0 and reported 4.
+
+The prefix has to be RESOLVED against offset 0, which is what
+`Deriv.at_input_start` does -- the mirror of `without_lookback_prefix`, sharing
+its shape and its one deviation (it does not resolve through a merely nullable
+head; a prefix after one is judged at its position by the forward pass, as in a
+search). At offset 0 a lookbehind holds exactly when its body matches the empty
+string there, `\A` holds always, and `\z` is left to the end-of-input handler.
+An unsatisfiable prefix resolves to `bot`, which is already the dead state, so
+that pattern costs no state at all; for everything without a leading lookbehind
+the resolved node is the interned root and `get_state` returns the existing
+state. Only a satisfiable leading lookbehind mints one more.
+
+**Both bounds in one pass.** `first_end` is the smallest end and `longest_end`
+the largest, so the loop tracks both and the two entry points share it. Two
+places needed a second reading of the pending-nullable set, which
+`ends_fast` reads only for the largest end:
+
+- in the loop, a pending state's largest end retreats by the SMALLEST pending
+  offset (`st_minpend`); the smallest end needs the largest (`pend_max_off`).
+- at end of input, `at_eoi_fast` folds the pending pairs with `max_end` over
+  each pair's `ps`; the smallest end needs `pe` (`at_eoi_bounds`).
+
+The second one was found by the fuzz, not by inspection: `~(_,\w[^ab])+$` on
+"cab ab\xff\n" ends at 7 (before the newline, where `$` holds) and at 8, and
+the single-value handler reported 8 for `first_end`. The first was written
+correctly only because the second showed what to look for.
+
+RE#'s `CanSkip` is not used here. Skipping jumps to the LAST position a state
+loops on, which is right for the largest end and steps over the smallest.
+
+### RE#'s own FirstEnd/LongestEnd disagree, and the reference is the arbiter
+
+Both call `end_first`/`end_lazy` with `DFA_R_NOPR` (`Regex.fs:1149`, `:1157`) --
+the noprefix state. So RE# implements them the way `s_noprefix` would: it
+strips the prefix and leaves verifying it to the caller. `(?<=b)a` anchored at
+0 of "a" is 1 for RE# and no match for us.
+
+The differential now calls both APIs and classifies this: a disagreement where
+the structural reference sides with us is `PrefixDiff`, anything else is a
+failure. 3587 cases: `find_all` differ=0, ends differ=0, prefix_diff=211. This
+follows "Dropping RE# parity on its confirmed bugs" above -- the reference is
+the arbiter -- and the semantics a caller stepping its own buffer needs.
+
+### Gates
+
+Corpus 331/331, node layer 57/57, fuzz plain (1500 patterns, 18000 cases,
+`first_end`/`longest_end` against the reference on every one) 0 divergences.
+
+A new full-construct fuzz seed (1500 patterns, seed 42, 9336 cases) reports 16
+divergences, **identical before and after this change** and none of them in the
+ends: four patterns, all the family the log's "Dropping RE# parity" section
+names as rejected -- a nullable expression before a line anchor
+(`[^a]\n{0,2}^^`, `\n^^.&[^a]a`, `a\W{0,2}.*(?=^)`, and one `$` alternation).
+The rejection rule does not catch them. Pre-existing and out of scope here;
+recorded so the next seed does not read as a regression.
+
+## `(?i)`, and a fold table that only worked one way (2026-09-06)
+
+M2 of `plans/2026-09-06-http-parse.md` is `(?i)`, needed because HTTP header
+names are case-insensitive and normalizing the buffer would copy it, which the
+slice-based parse cannot afford. Most of it was already there: `Ast.parse`
+handles a leading `(?i)` (`starts_ci`), `group_head`/`read_flags` handle a
+scoped `(?i:...)`, and `fold_ast` expands `Chars` nodes. The README's "No
+`(?i)`" was stale. Three real defects behind it:
+
+**The fold table is one-directional.** `Uni.fold_hex`, generated from
+regex-syntax 0.8, has 1735 ordered pairs in which 153 codepoints appear only as
+a target. `k` and `K` both list the Kelvin sign U+212A; U+212A lists neither. So
+`(?i)k` matched U+212A and `(?i)\u{212a}` matched nothing -- in BOTH engines,
+since `Regex` reads the same table. Fixed by shipping the symmetric-transitive
+closure of the generated pairs: 1890 pairs, 155 added, max orbit 4. Symmetry
+alone gets 1888; the last two (U+A64A/U+A64B, linked only through U+1C88) need
+transitivity. Every pair in the closure agrees with Unicode simple case folding
+in both directions, checked against Python's `casefold` -- and nothing Python
+calls equal is missing from it. `Regex` still runs 1546/1546 against the Rust
+crate afterwards.
+
+**`fold_ranges` skipped any range wider than 1024 codepoints.** It looked up
+partners one codepoint at a time, so a wide class was unaffordable and silently
+went unfolded: `(?i)[a-\u{525}]` did not match a Kelvin sign. `Regex` had
+already moved to one pass over the orbit table per range
+(`Uni.fold_partners_in`); `package-sharp`'s copy of `Uni` had not been updated
+with it. Both copies now carry `fold_pairs` and `fold_partners_in`, and the
+1024 guard and `fold_range_members` are gone.
+
+**Unimplemented inline flags were skipped, not rejected.** `read_flags` walked
+past any letter it did not know, so `(?s:.)` compiled as `(?:.)` and `(?U:a+)`
+as `(?:a+)` -- the same silent-wrong-meaning defect the 2026-09-05 review fixed
+in `Regex`. They are `FlagUnsupported` parse errors now. A bare mid-pattern
+`(?i)` was already an error, and stays one.
+
+### RE# disagrees on `(?i)` twice, and both times .NET is the odd one out
+
+The differential grew 19 `(?i)` patterns and 9 haystacks. Nine rows differ, in
+two families, both recorded in `KNOWN_CI_DIVERGENCES` with the textbook answer
+derived from Python's `re.IGNORECASE` rather than copied from our output:
+
+- **.NET's IgnoreCase is not simple case folding.** It does not equate U+017F
+  LATIN SMALL LETTER LONG S with `s`/`S`, so `(?i)s` on "\u017f" is no match
+  for RE# and a match for us, Rust, `Regex` and Python. Same family as the
+  Unicode exclusion the harness header already states.
+- **.NET leaks a scoped `(?i:...)` to the whole pattern.** `a(?i:bc)` matched
+  "ABC" for RE#, where the `a` is outside the group.
+
+### Gates
+
+`Regex` 1546/1546 vs the Rust crate; smoke 28/28; RE# corpus 331/331; node
+layer 57/57; fuzz plain 18000 cases 0 divergences; fuzz seed 42 16 divergences
+(the pre-existing anchor family, unchanged); RE# differential agree=5139
+differ=0 of 5341, ends differ=0 prefix_diff=261.
+
 ## The port against the original (2026-09-06): `tools/sharp-bench`
 
 Everything measured so far compared this engine with Rust and with the other

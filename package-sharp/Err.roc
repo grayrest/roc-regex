@@ -26,6 +26,7 @@ Err := [].{
         ComplementNeedsGroup,
         # RE# feature set
         LazyQuantifierUnsupported,
+        FlagUnsupported,
         Unsupported(Str),
         # budgets (D13) and the U64 solver's width (S9)
         PatternTooLong({ limit : U64, given : U64 }),
@@ -61,6 +62,7 @@ Err := [].{
             EscapeUnexpectedEof => "incomplete escape at end of pattern"
             ComplementNeedsGroup => "complement must be written ~( ... )"
             LazyQuantifierUnsupported => "RE# does not support lazy quantifiers (*?, +?, ??, {n,m}?)"
+            FlagUnsupported => "unsupported inline flag (only `i` is implemented)"
             Unsupported(msg) => msg
             PatternTooLong(b) => "pattern too long: limit ${b.limit.to_str()}, given ${b.given.to_str()}"
             NestLimitExceeded(b) => "nesting too deep: limit ${b.limit.to_str()}, given ${b.given.to_str()}"

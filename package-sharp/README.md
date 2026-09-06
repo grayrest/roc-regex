@@ -81,7 +81,10 @@ The `a b` arguments exist so the runners cannot be constant-folded whole.
   states) get the fast byte-loop scans and all accelerators; a pattern over
   the cap (unbounded lookaheads like `a(?=.*b)`) runs the threaded scan,
   extending its table at runtime and evicting back to the fold past a cap.
-- No `(?i)`, no captures (RE# has neither in its core either), no `\B`.
+- No captures (RE# has none in its core either), no `\B`. `(?i)` is
+  supported: a leading `(?i)` or a scoped `(?i:...)`, expanded to case-fold
+  classes at parse time. A bare mid-pattern `(?i)` and every other inline flag
+  are parse errors.
 - Performance on 256 KB of prose is within 1–2.5x of Rust's meta engine on
   the bench patterns and ahead of `Regex` on classes and boolean patterns;
   the literal alternation is the outlier (no literal-set accelerator in

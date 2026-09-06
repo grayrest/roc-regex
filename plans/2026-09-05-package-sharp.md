@@ -362,8 +362,9 @@ findings and measurements. Departures from the plan as written:
 
 - **S13 accelerators**: all of RE#'s are in (prefix / set prefix / potential
   start, per-state skip sets, fixed length, prefix end, set lookup, remaining
-  sets, literal override) except case-insensitive prefixes (no `(?i)` in the
-  parser) and skip sets on the threaded path. RE#'s `isTooCommon` and
+  sets, literal override) except case-insensitive prefixes (the parser has
+  `(?i)`, but the accelerator has not been written) and skip sets on the
+  threaded path. RE#'s `isTooCommon` and
   commonality weights were replaced by an English byte-frequency table after
   measurement (`Bset.freq2`); `SetLookup` ignores killing minterms (our
   `Invalid` class) when the remainder is not nullable; set anchors on the

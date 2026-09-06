@@ -331,6 +331,9 @@ Ast := [
             Err(Err.whole(st.src, NestLimitExceeded({ limit: Ast.nest_limit, given: st.depth + 1 })))
         } else {
             h = Ast.group_head(st.toks, st.i)
+            if h.bad {
+                Err(Ast.err_at(st.src, st.toks, st.i + 2, FlagUnsupported))
+            } else
             match Ast.parse_alt({ ..st, i: h.inner, depth: st.depth + 1 }) {
                 Ok(inner) =>
                     if Ast.cp_at(st.toks, inner.i) == Ok(')') {
@@ -352,33 +355,33 @@ Ast := [
     GroupKind : [Plain, Ahead(Bool), Behind(Bool)]
 
     # classify a group opener at `i` ('(')
-    group_head : List(Ast.Tok), U64 -> { kind : Ast.GroupKind, ci : Bool, inner : U64 }
+    group_head : List(Ast.Tok), U64 -> { kind : Ast.GroupKind, ci : Bool, inner : U64, bad : Bool }
     group_head = |toks, i|
         if Ast.cp_at(toks, i + 1) == Ok('?') {
             c2 = Ast.cp_at(toks, i + 2)
             if c2 == Ok('=') {
-                { kind: Ahead(False), ci: False, inner: i + 3 }
+                { kind: Ahead(False), ci: False, inner: i + 3, bad: False }
             } else if c2 == Ok('!') {
-                { kind: Ahead(True), ci: False, inner: i + 3 }
+                { kind: Ahead(True), ci: False, inner: i + 3, bad: False }
             } else if c2 == Ok('<') {
                 c3 = Ast.cp_at(toks, i + 3)
                 if c3 == Ok('=') {
-                    { kind: Behind(False), ci: False, inner: i + 4 }
+                    { kind: Behind(False), ci: False, inner: i + 4, bad: False }
                 } else if c3 == Ok('!') {
-                    { kind: Behind(True), ci: False, inner: i + 4 }
+                    { kind: Behind(True), ci: False, inner: i + 4, bad: False }
                 } else {
                     # (?<name> ... ) — a named group is a plain group
-                    { kind: Plain, ci: False, inner: Ast.skip_name(toks, i + 3) }
+                    { kind: Plain, ci: False, inner: Ast.skip_name(toks, i + 3), bad: False }
                 }
             } else if c2 == Ok('P') and Ast.cp_at(toks, i + 3) == Ok('<') {
-                { kind: Plain, ci: False, inner: Ast.skip_name(toks, i + 4) }
+                { kind: Plain, ci: False, inner: Ast.skip_name(toks, i + 4), bad: False }
             } else {
                 # (?flags: ... ) or (?: ... )
-                f = Ast.read_flags(toks, i + 2, { ci: False })
-                { kind: Plain, ci: f.ci, inner: f.i + 1 }
+                f = Ast.read_flags(toks, i + 2, { ci: False, bad: False })
+                { kind: Plain, ci: f.ci, inner: f.i + 1, bad: f.bad }
             }
         } else {
-            { kind: Plain, ci: False, inner: i + 1 }
+            { kind: Plain, ci: False, inner: i + 1, bad: False }
         }
 
     skip_name : List(Ast.Tok), U64 -> U64
@@ -389,14 +392,17 @@ Ast := [
             Ok(_) => Ast.skip_name(toks, i + 1)
         }
 
-    read_flags : List(Ast.Tok), U64, { ci : Bool } -> { ci : Bool, i : U64 }
+    # An unimplemented flag is an ERROR, not a skip: skipping gave `(?s:.)` and
+    # `(?U:a+)` the wrong meaning silently. `i` is the only one implemented, and
+    # `.` already excludes `\n` unconditionally in RE#, so there is no `(?s)`.
+    read_flags : List(Ast.Tok), U64, { ci : Bool, bad : Bool } -> { ci : Bool, i : U64, bad : Bool }
     read_flags = |toks, i, acc|
         match Ast.cp_at(toks, i) {
-            Ok('i') => Ast.read_flags(toks, i + 1, { ci: True })
-            Ok(':') => { ci: acc.ci, i }
-            Ok(')') => { ci: acc.ci, i }
-            Err(_) => { ci: acc.ci, i }
-            _ => Ast.read_flags(toks, i + 1, acc)
+            Ok('i') => Ast.read_flags(toks, i + 1, { ci: True, bad: acc.bad })
+            Ok(':') => { ci: acc.ci, i, bad: acc.bad }
+            Ok(')') => { ci: acc.ci, i, bad: acc.bad }
+            Err(_) => { ci: acc.ci, i, bad: acc.bad }
+            _ => Ast.read_flags(toks, i + 1, { ci: acc.ci, bad: True })
         }
 
     parse_escape : Str, List(Ast.Tok), U64 -> Try(Ast.Out, Err.Error)
@@ -551,23 +557,13 @@ Ast := [
             LookBehind(x, n) => LookBehind(Ast.fold_ast(x), n)
         }
 
+    # One pass over the orbit table per range, not one lookup per codepoint. The
+    # per-codepoint version skipped any range wider than 1024 to stay affordable,
+    # which silently dropped folding: `(?i)[a-\u{525}]` did not match a Kelvin
+    # sign, where `Regex` (which made this change first) did.
     fold_ranges : List(Ast.Rng) -> List(Ast.Rng)
     fold_ranges = |ranges|
-        List.fold(ranges, ranges, |acc, r|
-            if r.hi - r.lo < 1024 {
-                List.concat(acc, Ast.fold_range_members(r.lo, r.hi, []))
-            } else {
-                acc
-            })
-
-    fold_range_members : U32, U32, List(Ast.Rng) -> List(Ast.Rng)
-    fold_range_members = |cp, hi, acc|
-        if cp > hi {
-            acc
-        } else {
-            partners = Uni.fold_of(cp) |> List.map(|fp| { lo: fp, hi: fp })
-            Ast.fold_range_members(cp + 1, hi, List.concat(acc, partners))
-        }
+        List.fold(ranges, ranges, |acc, r| List.concat(acc, Uni.fold_partners_in(r.lo, r.hi)))
 
     parse_class : Str, List(Ast.Tok), U64 -> Try(Ast.Out, Err.Error)
     parse_class = |src, toks, i0| {

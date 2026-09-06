@@ -88,7 +88,8 @@ Sharp := [].{
                         match np.a.err {
                             Unsup(msg) => Err(Err.whole(src, Unsupported(msg)))
                             NoErr => {
-                                e0 = Dfa.init(np.a, rts.id, np.id, Sharp.max_states(trie.n_classes))
+                                ais = Deriv.at_input_start(np.a, root.id)
+                                e0 = Dfa.init(ais.a, rts.id, np.id, ais.id, Sharp.max_states(trie.n_classes))
                                 ac = Accel.analyze(e0, trie, root.id, rv.id, rts.id, np.id)
                                 e = Dfa.freeze(Dfa.explore(ac.e), trie.ascii)
                                 lits =
@@ -312,20 +313,50 @@ Sharp := [].{
     count : Sharp.T, List(U8) -> U64
     count = |re, hay| List.len(Sharp.find_all(re, hay))
 
-    ## The end of the shortest match anchored at offset 0, if any.
+    ## The oracle for the two above: every end of a match anchored at offset 0,
+    ## from the structural reference. Ascending, so its first and last are what
+    ## `first_end` and `longest_end` must return.
+    ends_at_start_ref : Sharp.T, List(U8) -> List(U64)
+    ends_at_start_ref = |re, hay| Ref.ends_at_start(re.a, re.trie, re.root, hay)
+
+    ## The end of the SHORTEST match anchored at offset 0, if any.
+    ##
+    ## This and `longest_end` are the parse primitive: the caller drives one
+    ## step per piece over a slice of its buffer, and the piece IS the slice
+    ## `0..end`. The haystack is the slice, so `\A` is its start, `\z` its end,
+    ## and a lookbehind or `\b` at 0 sees beginning-of-input.
+    ##
+    ## A nullable pattern legitimately answers `Ok(0)`; a caller stepping a
+    ## sequence must check that it made progress. `end == List.len(hay)` says
+    ## the match ran to the edge of the slice and might extend given more input.
     first_end : Sharp.T, List(U8) -> Try(U64, [NoMatch])
     first_end = |re, hay|
-        match List.first(Ref.ends_at_start(re.a, re.trie, re.root, hay)) {
-            Ok(e) => Ok(e)
-            Err(_) => Err(NoMatch)
+        if re.e.complete {
+            match (Dfa.ends_at_start_fast(re.e, re.trie, hay)).first {
+                Ok(e) => Ok(e)
+                Err(_) => Err(NoMatch)
+            }
+        } else {
+            match List.first(Ref.ends_at_start(re.a, re.trie, re.root, hay)) {
+                Ok(e) => Ok(e)
+                Err(_) => Err(NoMatch)
+            }
         }
 
-    ## The end of the longest match anchored at offset 0, if any.
+    ## The end of the LONGEST match anchored at offset 0, if any. See
+    ## `first_end` for the slice semantics.
     longest_end : Sharp.T, List(U8) -> Try(U64, [NoMatch])
     longest_end = |re, hay|
-        match List.last(Ref.ends_at_start(re.a, re.trie, re.root, hay)) {
-            Ok(e) => Ok(e)
-            Err(_) => Err(NoMatch)
+        if re.e.complete {
+            match (Dfa.ends_at_start_fast(re.e, re.trie, hay)).last {
+                Ok(e) => Ok(e)
+                Err(_) => Err(NoMatch)
+            }
+        } else {
+            match List.last(Ref.ends_at_start(re.a, re.trie, re.root, hay)) {
+                Ok(e) => Ok(e)
+                Err(_) => Err(NoMatch)
+            }
         }
 
     ## Replace every match. `rep` may contain `$0` (the match) and `$$` (`$`);

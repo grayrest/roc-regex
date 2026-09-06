@@ -7,7 +7,8 @@ haystacks (with a two-byte codepoint and an invalid byte), and prints a Roc
 runner that compiles each pattern AT RUNTIME (argv-derived filler defeats
 folding) and compares `find_all` (fast path or threaded, whichever the fold
 allows), `find_all_threaded`, an eviction-forcing variant, and the
-structural reference `find_all_ref`. Patterns RE# rejects (non-normal-form
+structural reference `find_all_ref`. `first_end` and `longest_end` are
+checked against the same reference's anchored-at-0 ends. Patterns RE# rejects (non-normal-form
 lookarounds, `\\B`) are counted, not failed.
 
     python3 tools/sharp-fuzz/gen.py [n_patterns] [seed] [plain] > /tmp/sharp-fuzz.roc
@@ -156,6 +157,19 @@ Outcome : { rejected : U64, incomplete : U64, cases : U64, fails : List(Str), kn
 one : List(Sharp.Span) -> Str
 one = |sp| match List.first(sp) { Ok(s) => "${s.start.to_str()}-${s.end.to_str()}", Err(_) => "-" }
 
+# the anchored end finders against the same reference: `first_end` is the
+# smallest end of a match anchored at offset 0 and `longest_end` the largest,
+# so the reference's own ends list is the oracle for both
+end_str : Try(U64, [NoMatch]) -> Str
+end_str = |r| match r { Ok(n) => n.to_str(), Err(_) => "-" }
+
+want_end : List(U64), Bool -> Str
+want_end = |es, first|
+	match (if first { List.first(es) } else { List.last(es) }) {
+		Ok(n) => n.to_str()
+		Err(_) => "-"
+	}
+
 check : Sharp.T, Str, List(U8), Outcome -> Outcome
 check = |re, pat, hay, o| {
 	all = Sharp.find_all(re, hay)
@@ -167,11 +181,16 @@ check = |re, pat, hay, o| {
 	# checked against taking the first of `find_all` rather than assumed equal
 	fst = match Sharp.find(re, hay) { Ok(s) => "${s.start.to_str()}-${s.end.to_str()}", Err(_) => "-" }
 	ism = Sharp.is_match(re, hay)
+	ends = Sharp.ends_at_start_ref(re, hay)
+	fe = end_str(Sharp.first_end(re, hay))
+	le = end_str(Sharp.longest_end(re, hay))
+	wfe = want_end(ends, True)
+	wle = want_end(ends, False)
 	o2 = { ..o, cases: o.cases + 1 }
-	if fast == ref and thr == ref and ev == ref and fst == one(all) and ism == (List.len(all) > 0) {
+	if fast == ref and thr == ref and ev == ref and fst == one(all) and ism == (List.len(all) > 0) and fe == wfe and le == wle {
 		o2
 	} else {
-		{ ..o2, fails: List.append(o2.fails, "/${pat}/ on ${hay |> List.map(|b| b.to_str()) |> Str.join_with(" ")}: fast=[${fast}] threaded=[${thr}] evict=[${ev}] ref=[${ref}] find=${fst} want_find=${one(all)} is_match=${if ism { "y" } else { "n" }}") }
+		{ ..o2, fails: List.append(o2.fails, "/${pat}/ on ${hay |> List.map(|b| b.to_str()) |> Str.join_with(" ")}: fast=[${fast}] threaded=[${thr}] evict=[${ev}] ref=[${ref}] find=${fst} want_find=${one(all)} is_match=${if ism { "y" } else { "n" }} first_end=${fe}/${wfe} longest_end=${le}/${wle}") }
 	}
 }
 

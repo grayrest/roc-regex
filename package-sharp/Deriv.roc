@@ -232,6 +232,59 @@ Deriv := [].{
         }
     }
 
+    ## The node as it stands at the INPUT START, for a match anchored at offset
+    ## 0 (`Sharp.first_end` / `longest_end`).
+    ##
+    ## The mirror of `without_lookback_prefix`, and needed for the same reason
+    ## read the other way. A search's forward pass may drop the lookbehind
+    ## prefix because the reverse sweep verified it at that start; an anchored
+    ## match has had no sweep, and the prefix cannot simply be kept either,
+    ## because a lookbehind derivative walks its body FORWARD -- keeping it made
+    ## `(?<=ab)cd` match "abcd" at 0. So the prefix is RESOLVED here instead: at
+    ## offset 0 a lookbehind holds exactly when its body matches the empty
+    ## string there, `\A` holds always, and `\z` is left for the end-of-input
+    ## handler to judge.
+    ##
+    ## As in `without_lookback_prefix`, this does not resolve through a merely
+    ## nullable head (`x*(?<=a)b`): only a prefix at the very start is at offset
+    ## 0 for certain, and one after a nullable head is judged at its position by
+    ## the forward pass, as it is in a search.
+    at_input_start : Arena.A, U32 -> Arena.R
+    at_input_start = |a, id| {
+        k = Arena.kind(a, id)
+        if k == Arena.k_lookbehind {
+            { a, id: if Deriv.nullable(a, Deriv.loc_begin, Arena.head(a, id)) { Arena.eps } else { Arena.bot } }
+        } else if k == Arena.k_begin {
+            { a, id: Arena.eps }
+        } else if k == Arena.k_concat {
+            h = Arena.head(a, id)
+            t = Arena.tail(a, id)
+            ch = Deriv.at_input_start(a, h)
+            if ch.id == Arena.bot {
+                { a: ch.a, id: Arena.bot }
+            } else if ch.id == Arena.eps {
+                Deriv.at_input_start(ch.a, t)
+            } else {
+                Build.mk_concat2(ch.a, ch.id, t)
+            }
+        } else if k == Arena.k_or {
+            rs = Deriv.ais_all(a, Arena.children(a, id))
+            Build.mk_or(rs.a, Arena.sort_dedup(rs.ids))
+        } else if k == Arena.k_and {
+            rs = Deriv.ais_all(a, Arena.children(a, id))
+            Build.mk_and(rs.a, Arena.sort_dedup(rs.ids))
+        } else {
+            { a, id }
+        }
+    }
+
+    ais_all : Arena.A, List(U32) -> { a : Arena.A, ids : List(U32) }
+    ais_all = |a, ids|
+        List.fold(ids, { a, ids: [] }, |acc, c| {
+            r = Deriv.at_input_start(acc.a, c)
+            { a: r.a, ids: List.append(acc.ids, r.id) }
+        })
+
     wlp_all : Arena.A, List(U32) -> { a : Arena.A, ids : List(U32) }
     wlp_all = |a, ids|
         List.fold(ids, { a, ids: [] }, |acc, c| {
