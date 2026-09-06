@@ -1529,6 +1529,87 @@ the forward end pass rather than the sweep.
 Nothing shipped from this round: no change was measured as a win, and the
 project does not ship unmeasured ones.
 
+## The forward end pass: a tag built once per byte (2026-09-06)
+
+The previous entry left the forward end pass as the largest unexplained piece.
+Splitting it needed a way to grow the MATCH while holding the haystack and the
+automaton still: `(?i)^content-length:[ \t]*` does that, because padding spaces
+after the colon lengthens what `[ \t]*` consumes and nothing else. Block held
+at 220 bytes:
+
+| pad | find | sweep | end pass |
+|---|---|---|---|
+| 0 | 374 | 190 | 184 |
+| 16 | 457 | 185 | 272 |
+| 48 | 567 | 185 | 382 |
+| 100 | 751 | 183 | **568** |
+
+The sweep is flat, which is the control. So the end pass is **~126 ns fixed plus
+~3.8 ns per matched byte** — and the per-byte half is the interesting one, since
+a fused-`atable` DFA step should be nearer 1 ns.
+
+**`best` was a `Try(U64, [NoEnd])` updated inside the loop.** A nullable tail is
+nullable at EVERY position, so `best = Ok(pos)` built a tag on every byte. Held
+as a `U64` with a sentinel (`Dfa.no_end`, with `from_pos`/`to_pos` at the two
+boundaries where the tag is still wanted):
+
+| | fixed | per byte |
+|---|---|---|
+| `Try` tag in the loop | 197 ns | 3.87 |
+| `U64` sentinel | **167** | **3.10** |
+
+`ends_at_start_fast` — the anchored pass behind `first_end`/`longest_end`, and
+so behind every `Http.take` — carried TWO of them, a `{ first, last }` record of
+tags updated per byte. Same treatment:
+
+| `Sharp.longest_end`, 34 B | before | after |
+|---|---|---|
+| no match | 134 ns | 109 |
+| 3-byte match | 166 | 111 |
+| 34-byte match | 616 | **452** |
+
+That is 14.2 -> 10.1 ns per byte for the anchored pass.
+
+### What it moved
+
+`tools/http-bench`: **2237 -> 2074 ns/request, 5.5x -> 5.0x** off `httparse`,
+framing 1459 -> 1257. And unlike the earlier short-input fixes this one is in a
+loop `find_all` runs too, so `tools/bench` moved as well — Sharp against Rust's
+meta engine improved on seven of eight rows and held on the eighth:
+
+| pattern | sharp/meta before | after |
+|---|---|---|
+| `[A-Za-z]+` | 0.98x | 0.97x |
+| `\p{L}+` | 1.11x | 1.08x |
+| `\bthe\b` | 1.31x | 1.25x |
+| `\w+\s+\w+` | 1.49x | 1.43x |
+| `Sherlock\|Holmes\|…` | 1.15x | 1.13x |
+| `.*Holmes` | 0.57x | 0.55x |
+
+(The untouched `Regex` column also drifted a little in the same direction, so
+read these as "no regression and a modest gain", not as the full 3-6%.)
+
+### One change reverted
+
+Inside the same loop, `hay[pos]` is read twice — once as `b0` for the skip
+check, once as `b` for the transition. Reading it once measured 566 vs 580 ns
+at pad=100, inside the noise: the compiler already eliminates it. Reverted
+rather than shipped with a plausible-sounding comment.
+
+### Also: `Dfa.ends_fast` and `Dfa.find_first_fast` SIGBUS when called from an app
+
+Both crash (exit 138) called directly from an app, while `Sharp.find` runs the
+same code from inside the package without trouble. Hit three times now while
+profiling, and it is why this entry's decomposition had to be done indirectly,
+by growing the match rather than by timing the pass. Worth a reduction for
+upstream; it belongs with the two debug-helper crashes already owed.
+
+### Gates
+
+RE# corpus 331/331, node layer 57/57, fuzz plain 18000 cases 0 divergences,
+fuzz seed 42 unchanged at 16, RE# differential agree=5139 differ=0 of 5341 with
+ends differ=0, `examples/http.roc` 60/60, `tools/bench` counts all ok.
+
 ## The port against the original (2026-09-06): `tools/sharp-bench`
 
 Everything measured so far compared this engine with Rust and with the other

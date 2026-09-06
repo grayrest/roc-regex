@@ -789,7 +789,13 @@ Dfa := [].{
                     # an anchor that survived `without_lookback_prefix` behind a nullable
                     # head (`_*\A`) is nullable only at the input start, which the
                     # NullKind check inside the loop never sees
-                    var best = if pos0 == 0 and Dfa.flags(e, s_start).bitwise_and(Dfa.fl_anchor_null) != 0 and Deriv.nullable(e.a, Deriv.loc_begin, Dfa.st_node_of(e, s_start)) { Ok(0) } else { Err(NoEnd) }
+                    # `best` as a U64 with a sentinel, not `Try(U64, [NoEnd])`:
+                    # a nullable tail (`[ \t]*`, `\w*`) is nullable at EVERY
+                    # position, so the tag was constructed once per byte.
+                    var bp = Dfa.no_end
+                    if pos0 == 0 and Dfa.flags(e, s_start).bitwise_and(Dfa.fl_anchor_null) != 0 and Deriv.nullable(e.a, Deriv.loc_begin, Dfa.st_node_of(e, s_start)) {
+                        bp = 0
+                    } else {}
                     while s != Dfa.dead {
                         b0 = List.get(hay, pos) ?? 0
                         # RE#'s forward `CanSkip`: the state loops on every byte up to the
@@ -805,11 +811,11 @@ Dfa := [].{
                         }
                         k = List.get(nks, s.to_u64()) ?? Dfa.nk_notnull
                         if k == Dfa.nk_current {
-                            best = Ok(pos)
+                            bp = pos
                         } else if k == Dfa.nk_prev {
-                            best = Ok(Utf8.retreat(hay, pos, 1))
+                            bp = Utf8.retreat(hay, pos, 1)
                         } else if k != Dfa.nk_notnull {
-                            best = Dfa.null_fallback_fast(e, s, hay, pos, best)
+                            bp = Dfa.to_pos(Dfa.null_fallback_fast(e, s, hay, pos, Dfa.from_pos(bp)))
                         }
                         b = List.get(hay, pos) ?? 0
                         if b < 0x80 {
@@ -822,11 +828,11 @@ Dfa := [].{
                             pos = pos + d.len
                         }
                         if pos >= n {
-                            best = Dfa.at_eoi_fast(e, s, hay, n, best)
+                            bp = Dfa.to_pos(Dfa.at_eoi_fast(e, s, hay, n, Dfa.from_pos(bp)))
                             s = Dfa.dead
                         }
                     }
-                    match best {
+                    match Dfa.from_pos(bp) {
                         Ok(en) => {
                             spans = List.append(spans, { start, end: en })
                             next_valid = en
@@ -877,26 +883,33 @@ Dfa := [].{
             ascii_ok = e.complete
             var pos = 0
             var s = s0
+            # Both bounds as U64 scalars with a sentinel, not `Try(U64, [NoEnd])`:
+            # a nullable tail is nullable at EVERY position, so this loop built
+            # two tags per byte. Worth ~0.8 ns a byte in `ends_fast`, and this
+            # one carries two of them.
+            #
             # nullable at the input start: `fl_begin_null` is exactly
             # `can_be_null and nullable(loc_begin)`, computed at state creation
-            var first = if Dfa.flags(e, s0).bitwise_and(Dfa.fl_begin_null) != 0 { Ok(0) } else { Err(NoEnd) }
-            var last = first
+            var lo = if Dfa.flags(e, s0).bitwise_and(Dfa.fl_begin_null) != 0 { 0 } else { Dfa.no_end }
+            var hi = lo
             while s != Dfa.dead {
                 k = List.get(nks, s.to_u64()) ?? Dfa.nk_notnull
                 if k != Dfa.nk_notnull {
                     if k == Dfa.nk_current {
-                        first = Dfa.min_end(first, pos)
-                        last = Dfa.max_end(last, pos)
+                        lo = if lo == Dfa.no_end or pos < lo { pos } else { lo }
+                        hi = if hi == Dfa.no_end or pos > hi { pos } else { hi }
                     } else if k == Dfa.nk_prev {
                         p1 = Utf8.retreat(hay, pos, 1)
-                        first = Dfa.min_end(first, p1)
-                        last = Dfa.max_end(last, p1)
+                        lo = if lo == Dfa.no_end or p1 < lo { p1 } else { lo }
+                        hi = if hi == Dfa.no_end or p1 > hi { p1 } else { hi }
                     } else if Dfa.flags(e, s).bitwise_and(Dfa.fl_pending) != 0 {
-                        last = Dfa.max_end(last, Utf8.retreat(hay, pos, (List.get(e.st_minpend, s.to_u64()) ?? 0).to_u64()))
-                        first = Dfa.min_end(first, Utf8.retreat(hay, pos, Dfa.pend_max_off(e, s)))
+                        h2 = Utf8.retreat(hay, pos, (List.get(e.st_minpend, s.to_u64()) ?? 0).to_u64())
+                        l2 = Utf8.retreat(hay, pos, Dfa.pend_max_off(e, s))
+                        hi = if hi == Dfa.no_end or h2 > hi { h2 } else { hi }
+                        lo = if lo == Dfa.no_end or l2 < lo { l2 } else { lo }
                     } else {
-                        first = Dfa.min_end(first, pos)
-                        last = Dfa.max_end(last, pos)
+                        lo = if lo == Dfa.no_end or pos < lo { pos } else { lo }
+                        hi = if hi == Dfa.no_end or pos > hi { pos } else { hi }
                     }
                 }
                 b = List.get(hay, pos) ?? 0
@@ -910,13 +923,13 @@ Dfa := [].{
                     pos = pos + d.len
                 }
                 if pos >= n {
-                    eb = Dfa.at_eoi_bounds(e, s, hay, n, { first, last })
-                    first = eb.first
-                    last = eb.last
+                    eb = Dfa.at_eoi_bounds(e, s, hay, n, { first: Dfa.from_pos(lo), last: Dfa.from_pos(hi) })
+                    lo = Dfa.to_pos(eb.first)
+                    hi = Dfa.to_pos(eb.last)
                     s = Dfa.dead
                 }
             }
-            { first, last }
+            { first: Dfa.from_pos(lo), last: Dfa.from_pos(hi) }
         }
     }
 
@@ -1596,6 +1609,17 @@ Dfa := [].{
             best
         }
     }
+
+    ## `Try(U64, [NoEnd])` as a scalar, so a loop that records an end on every
+    ## byte does not build a tag on every byte.
+    no_end : U64
+    no_end = 0xFFFF_FFFF_FFFF_FFFF
+
+    from_pos : U64 -> Try(U64, [NoEnd])
+    from_pos = |p| if p == Dfa.no_end { Err(NoEnd) } else { Ok(p) }
+
+    to_pos : Try(U64, [NoEnd]) -> U64
+    to_pos = |r| match r { Ok(p) => p, Err(_) => Dfa.no_end }
 
     null_fallback_fast : Dfa.E, U32, List(U8), U64, Try(U64, [NoEnd]) -> Try(U64, [NoEnd])
     null_fallback_fast = |e, s, hay, pos, best|
