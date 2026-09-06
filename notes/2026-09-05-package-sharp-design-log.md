@@ -1573,21 +1573,16 @@ That is 14.2 -> 10.1 ns per byte for the anchored pass.
 ### What it moved
 
 `tools/http-bench`: **2237 -> 2074 ns/request, 5.5x -> 5.0x** off `httparse`,
-framing 1459 -> 1257. And unlike the earlier short-input fixes this one is in a
-loop `find_all` runs too, so `tools/bench` moved as well — Sharp against Rust's
-meta engine improved on seven of eight rows and held on the eighth:
+framing 1459 -> 1257.
 
-| pattern | sharp/meta before | after |
-|---|---|---|
-| `[A-Za-z]+` | 0.98x | 0.97x |
-| `\p{L}+` | 1.11x | 1.08x |
-| `\bthe\b` | 1.31x | 1.25x |
-| `\w+\s+\w+` | 1.49x | 1.43x |
-| `Sherlock\|Holmes\|…` | 1.15x | 1.13x |
-| `.*Holmes` | 0.57x | 0.55x |
-
-(The untouched `Regex` column also drifted a little in the same direction, so
-read these as "no regression and a modest gain", not as the full 3-6%.)
+**Correction.** This entry first claimed the long-haystack bench "improved on
+seven of eight rows", from comparing two runs taken hours apart. A PAIRED run
+(see "Did the campaign cost long-haystack speed?" below) does not support that:
+against Rust's meta engine the campaign is better on six rows, worse on three
+and level on one, all inside the same few percent the untouched `Regex` column
+drifts by. The long-haystack effect is a wash, not a gain. The isolated
+measurement of this change — 3.87 -> 3.10 ns/byte in the end pass — stands; it
+is simply too small a share of `find_all` to show through the noise.
 
 ### One change reverted
 
@@ -1609,6 +1604,76 @@ upstream; it belongs with the two debug-helper crashes already owed.
 RE# corpus 331/331, node layer 57/57, fuzz plain 18000 cases 0 divergences,
 fuzz seed 42 unchanged at 16, RE# differential agree=5139 differ=0 of 5341 with
 ends differ=0, `examples/http.roc` 60/60, `tools/bench` counts all ok.
+
+## Did the campaign cost long-haystack speed? (2026-09-06)
+
+The owner asked whether the whole short-input campaign had been startup and
+teardown cost only, and whether it had hurt throughput on long haystacks. Two
+checks, because the first two claims in this log about long-haystack effects
+were both drawn from UNPAIRED runs and one of them was wrong.
+
+### The automaton is unchanged
+
+`Build.loop_register`'s min/max length is read by more than the accelerator:
+`or2_loop_subsume` uses it to decide whether a loop subsumes another branch and
+an alternation can collapse, and `min_len_or`/`max_len_and` propagate it through
+`Or`/`And`. So in principle giving non-singleton loop bodies a real length can
+change which node graph gets built, not merely which accelerator is chosen.
+
+Measured, it does not. Compiling the ten bench patterns plus `abab`,
+`(?:ab){2}` and `\r\n\r\n` before and after the campaign, **state counts and
+node counts are identical on all thirteen**. The only difference in the whole
+comparison is the three doubled literals going from `len=any override=none` to
+`len=4 override=abab`. The rewrite layer was not disturbed.
+
+### Throughput is a wash, and the control says so
+
+A paired run — pre-campaign tree at `23abd8b` in a worktree, post-campaign tree,
+alternated, twice each — on the 256 KB bench. Raw Sharp ns, best of both rounds:
+
+| pattern | pre | post | |
+|---|---|---|---|
+| `Holmes` | 28700 | 29950 | +4.4% |
+| `Moriarty` | 10600 | 10650 | +0.5% |
+| `Sherlock\|Holmes\|…` | 493050 | 494550 | +0.3% |
+| `[A-Za-z]+` | 2140850 | 2206650 | +3.1% |
+| `[0-9]{2,4}` | 194400 | 196950 | +1.3% |
+| `\bthe\b` | 263100 | 263350 | +0.1% |
+| `\w+\s+\w+` | 2255500 | 2276350 | +0.9% |
+| `(\w+)@(\w+)` | 73800 | 73700 | -0.1% |
+| `\p{L}+` | 2243900 | 2273550 | +1.3% |
+| `.*Holmes` | 367650 | 358450 | -2.5% |
+
+Slightly slower on eight rows, faster on two, none beyond ~4%. **The control
+settles it: `Regex`, whose code is byte-identical in both trees, drifts the
+same way in the same run** (+4.9%, +1.5%, +0.8%, +0.7%, +0.4% on five of its
+rows, -1.0% and -0.6% on two). A consistent sub-percent-to-few-percent shift
+appears in an engine the campaign never touched, so it is build layout and
+machine state, not the change.
+
+Ratios against Rust's meta engine are no better as a comparator here: in round
+2 the Rust side itself got ~6% faster mid-run, which moved every `sharp/M`
+figure up regardless of Sharp.
+
+**Conclusion: long-haystack throughput is unchanged within measurement error,
+and every row's match count agreed with Rust in every run.** The earlier
+"improved on seven of eight rows" in this log was two unpaired runs read as a
+trend; it has been struck.
+
+### Was it all startup cost?
+
+Nearly. Four of the five changes are per-call and vanish into a 256 KB scan:
+the literal-dispatch restructure, the precomputed padded literal, the
+`Deriv.nullable` walks replaced by flags, and `Teddy.build` moved into the
+artifact. Two qualifications:
+
+- **The doubled-literal fix is algorithm selection, not startup.** `\r\n\r\n`
+  now runs a SIMD literal scan instead of a reverse sweep plus forward pass.
+  That is a large win at any length for the patterns it reaches; the bench has
+  no doubled literal in it, which is why the table above does not move.
+- **The `Try`-tag fix is per-byte, not per-call.** It measured 3.87 -> 3.10
+  ns/byte in the end pass in isolation, but the end pass is a small enough
+  share of `find_all` that it does not clear the noise floor above.
 
 ## The port against the original (2026-09-06): `tools/sharp-bench`
 
