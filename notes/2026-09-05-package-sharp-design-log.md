@@ -869,3 +869,69 @@ reproducer in `upstream/2026-09-05-sharp-folded-constant-sections/` with the
 four apps and the section tables. The earlier claim that roughly 200 KB per
 Unicode pattern is recoverable stands as a rough size for the prize, but only
 upstream can collect it.
+
+## Narrowing the class trie (2026-09-05)
+
+`Trie.build` rejects any pattern needing more than 63 minterms, so a class id
+never reaches 64, yet `ascii`, `leaves` and `mt_of_atom` all stored ids as
+`U32`. Four bytes to hold a value under 64, and `leaves` was 86% of the trie
+for `\w`. Three changes:
+
+- class ids are `U8` in `ascii`, `leaves` and `mt_of_atom`, and `l1` is `U16`,
+  since a block index cannot exceed 4352;
+- leaves `0..n_classes-1` are the constant blocks, one per minterm, and every
+  block that is entirely one minterm points at its constant leaf rather than
+  getting a copy. For `\w` only 131 of 4352 blocks contain a boundary;
+- adjacent identical mixed blocks are still shared, as before.
+
+| pattern | trie before | trie after | binary before | binary after |
+|---|---|---|---|---|
+| `a+` baseline | 20004 | 9883 | 741776 | 725360 |
+| `[A-Za-z]+` | 20020 | 9893 | 725264 | 725264 |
+| `[0-9]{2,4}` | 20004 | 9883 | 741712 | 725296 |
+| `\bthe\b` | 220340 | 52289 | 1250720 | 823904 |
+| `\w+\s+\w+` | 220268 | 51467 | 1217744 | 823760 |
+| `(\w+)@(\w+)` | 220132 | 51382 | 1217888 | 823904 |
+| `\p{L}+` | 201828 | 47619 | 1184912 | 790928 |
+| `~(_*\d\d_*)` | 88708 | 21591 | 889520 | 758192 |
+
+A Unicode pattern's binary drops about a third, 427 KB on `\bthe\b`. Speed is
+neutral: on the bench set every row is within 0.94x to 1.08x on ASCII text and
+0.96x to 1.03x on 262 KB of mixed Greek, Cyrillic, CJK and Latin-1.
+
+### `class_of` has to stay two reads, no loop and no call
+
+The obvious further step is to drop `leaves` entirely. `cuts` and
+`mt_of_atom` are already stored, for printing, and together they ARE the
+codepoint map, so a search over them answers any lookup. That was built and
+measured: the trie fell to 16801 bytes for `\w`, a 13x reduction, and the
+whole bench set ran 1.5x to 1.6x slower on non-ASCII text.
+
+Isolating `class_of` in a loop over 262 KB of mixed-script text, per lookup:
+
+| variant | ns per pass | note |
+|---|---|---|
+| original, two reads | 1344000 | inlined |
+| search over `cuts` | 2705000 | loop in the function |
+| search, single-atom case inlined | 3147000 | no better |
+| uniform bit, then search | 1860000 | one extra branch |
+| the same lookup written in the caller | 1365000 | data layout is fine |
+
+The last row is the finding. Writing the new layout's lookup directly in the
+calling loop costs what the original did, so the tables were never the
+problem. Adding a loop, or a call, or even one more branch to `class_of` stops
+it being inlined, and it runs per non-ASCII symbol on the hot path. This is
+the same inlining boundary recorded under M4 stage 2 for the scan loops.
+
+So the shipped design keeps the original two-read shape exactly and takes its
+size from the element widths and the shared constant leaves. The cut-search
+version is smaller and remains available if a future workload is known to be
+ASCII-only, but it is not worth 1.6x on Unicode text.
+
+### A stale node-layer expectation
+
+The node tests were not re-run after the RE#-parity change, and one case had
+been failing since: `^a*b` derived by `a` now prints `(ε|_*^)a*b` rather than
+`(_*^)?a*b`, because `ε | X` no longer folds when X carries a lookaround. The
+test accepts a list of spellings and this one was added. Nothing else moved,
+and 57/57 pass again.

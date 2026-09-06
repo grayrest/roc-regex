@@ -109,7 +109,7 @@ Dfa := [].{
     ## Record the fold's extent; everything created later can be evicted. For a
     ## complete fold, also fuse the ASCII byte -> state table the fast scans use
     ## (`ascii` is the trie's byte -> class table).
-    freeze : Dfa.E, List(U32) -> Dfa.E
+    freeze : Dfa.E, List(U8) -> Dfa.E
     freeze = |e, ascii| {
         n = List.len(e.st_node)
         atable =
@@ -131,7 +131,7 @@ Dfa := [].{
     # whose transition leaves the state (for the initial state, also not to
     # dead) as an ASCII byte set; skippable when neither empty nor full and not
     # too common. Non-ASCII bytes stop a skip regardless (`Bset`).
-    skip_sets : Dfa.E, List(U32), U64 -> { ok : List(U8), lo : List(U8) }
+    skip_sets : Dfa.E, List(U8), U64 -> { ok : List(U8), lo : List(U8) }
     skip_sets = |e, ascii, n| {
         nmt = e.nmt.to_u64()
         List.fold(Arena.upto(n), { ok: [], lo: [] }, |acc, s| {
@@ -140,7 +140,7 @@ Dfa := [].{
                 d = (List.get(e.table, s * nmt + m) ?? 0).to_u64()
                 if d != s and (!initial or d != Dfa.dead.to_u64()) { TSet.union(ts, TSet.bit(m.to_u32_wrap())) } else { ts }
             })
-            bytes = List.keep_if(Arena.upto(128), |b| TSet.contains(ss, List.get(ascii, b) ?? 0)) |> List.map(|b| b.to_u8_wrap())
+            bytes = List.keep_if(Arena.upto(128), |b| TSet.contains(ss, (List.get(ascii, b) ?? 0).to_u32())) |> List.map(|b| b.to_u8_wrap())
             usable = s > Dfa.dead.to_u64() and ss != 0 and ss != TSet.full(e.nmt) and !Bset.too_common(bytes)
             { ok: List.append(acc.ok, if usable { 1 } else { 0 }), lo: List.concat(acc.lo, Bset.table(bytes)) }
         })
@@ -684,7 +684,7 @@ Dfa := [].{
                 while go and c < rem and pos < n {
                     b = List.get(hay, pos) ?? 0
                     if b < 0x80 {
-                        if (List.get(ascii, b.to_u64()) ?? 0) == cls {
+                        if (List.get(ascii, b.to_u64()) ?? 0).to_u32() == cls {
                             pos = pos + 1
                             c = c + 1
                         } else {

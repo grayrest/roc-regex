@@ -65,7 +65,7 @@ Rlit := [].{
                             ok = False
                         } else {
                             b = List.get(hay, pos) ?? 0
-                            cls = if b < 0x80 { List.get(ascii, b.to_u64()) ?? 0 } else { Rlit.class_at(t, hay, pos) }
+                            cls = if b < 0x80 { (List.get(ascii, b.to_u64()) ?? 0).to_u32() } else { Rlit.class_at(t, hay, pos) }
                             if TSet.contains(List.get(sets, m - 1 - j) ?? 0, cls) {
                                 pos = if b < 0x80 { pos + 1 } else { pos + (Utf8.decode(hay, pos)).len }
                                 j = j + 1
@@ -89,7 +89,7 @@ Rlit := [].{
                         } else {
                             bl = List.get(hay, start - 1) ?? 0
                             if bl < 0x80 {
-                                if TSet.contains(List.get(sets, m - k) ?? 0, List.get(ascii, bl.to_u64()) ?? 0) {
+                                if TSet.contains(List.get(sets, m - k) ?? 0, (List.get(ascii, bl.to_u64()) ?? 0).to_u32()) {
                                     start = start - 1
                                     k = k - 1
                                 } else {

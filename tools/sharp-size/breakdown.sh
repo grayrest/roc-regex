@@ -78,7 +78,7 @@ main! = |args| {
 	states = u32(List.len(e.st_node)) + List.len(e.st_flags) + List.len(e.st_nk) + u32(List.len(e.st_pend)) + u32(List.len(e.st_minpend)) + u32(List.len(e.node_state))
 	skips = List.len(e.skip_ok) + List.len(e.skip_lo)
 	# the codepoint-class trie, dominated by Unicode class data
-	trie = u32(List.len(t.ascii)) + u32(List.len(t.l1)) + u32(List.len(t.leaves)) + u64(List.len(t.set_tsets)) + u32(List.len(t.cuts)) + u32(List.len(t.mt_of_atom))
+	trie = List.len(t.ascii) + 2 * List.len(t.l1) + List.len(t.leaves) + u64(List.len(t.set_tsets)) + u32(List.len(t.cuts)) + List.len(t.mt_of_atom)
 	# the interned node graph, including its hash index and refsets
 	nodes = u32(List.len(a.cells)) + u32(List.len(a.offs)) + List.len(a.flags) + u64(List.len(a.sub)) + u32(List.len(a.minl)) + u32(List.len(a.maxl)) + u32(List.len(a.pend))
 	index = u32(List.len(a.islots)) + u32(List.len(a.ient_key)) + u32(List.len(a.ient_len)) + u32(List.len(a.ient_id)) + u32(List.len(a.ikeys))

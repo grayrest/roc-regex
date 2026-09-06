@@ -1,6 +1,8 @@
 # A large folded structure costs ~2.2x its data size, split across two sections
 
-Roc `release-fast-84812227`, macOS arm64, `--opt=size`.
+Roc `release-fast-84812227`, macOS arm64, `--opt=size`. Numbers re-measured
+after the trie in this repo was made byte-wide; the ratio is what matters and
+it did not change.
 
 ## What we expected
 
@@ -15,15 +17,16 @@ between them is 50024 `U32` elements, so 200096 bytes.
 
 | section | `[A-Za-z]+` | `\w+` | delta |
 |---|---|---|---|
-| `__TEXT,__const` | 43504 | 243600 | +200096 |
-| `__DATA_CONST,__const` | 62224 | 336240 | +274016 |
-| `__TEXT,__text` | 442012 | 443056 | +1044 |
+| `__TEXT,__const` | 33376 | 74608 | +41232 |
+| `__DATA_CONST,__const` | 55728 | 96376 | +40648 |
+| `__TEXT,__text` | 441952 | 442988 | +1036 |
 
-`__TEXT,__const` grows by exactly the 200096 bytes of table data, to the byte.
-`__DATA_CONST,__const` then grows by a further 274016 on top of that, so the
-pattern costs about 2.2x the data it actually holds. A second data point,
-`\d+`, grows `__TEXT,__const` by 68728 and `__DATA_CONST,__const` by 76904, so
-the excess scales with the table rather than being a fixed overhead.
+The two deltas are within 1.5% of each other, which is the whole point: the
+same table is charged twice, once per section.
+
+Each section grows by about the size of the table, so the pattern costs
+roughly twice the data it holds. The excess scales with the table rather than
+being a fixed overhead.
 
 The excess is not the source tables the trie was derived from. Those live in
 `package-sharp/Uni.roc` as hex strings totalling 62328 bytes for the whole
@@ -57,9 +60,9 @@ structure triggers the second copy is not established here.
 ## Why it matters
 
 Every folded pattern pays this, and it is the dominant term for any pattern
-using a Unicode class. On the bench set a `\w` pattern's binary is about 1.22
-MB against a 742 KB baseline, and roughly 270 KB of that increase is the
-duplicate rather than the table.
+using a Unicode class. On the bench set a `\w` pattern's binary is about 824 KB against a 725 KB
+baseline, and roughly half of that increase is the duplicate rather than the
+table.
 
 ## Repro
 

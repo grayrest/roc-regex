@@ -150,7 +150,7 @@ Accel := [].{
                                             skips = (List.get(ds.e.skip_ok, ds.id.to_u64()) ?? 0) == 1
                                             if nk != Dfa.nk_pending and !skips {
                                                 c = TSet.lowest(mt)
-                                                bytes = List.keep_if(Arena.upto(128), |b| (List.get(t.ascii, b) ?? 0) == c) |> List.map(|b| b.to_u8_wrap())
+                                                bytes = List.keep_if(Arena.upto(128), |b| (List.get(t.ascii, b) ?? 0).to_u32() == c) |> List.map(|b| b.to_u8_wrap())
                                                 { e: ds.e, len: SetLookup(plen, c, nk, Bset.table(bytes)) }
                                             } else {
                                                 { e: ds.e, len: PrefixEnd(plen, st.id) }
@@ -353,7 +353,7 @@ Accel := [].{
 
     # the ASCII bytes of a minterm set
     ascii_bytes : Trie.T, U64 -> List(U8)
-    ascii_bytes = |t, s| List.keep_if(Arena.upto(128), |b| TSet.contains(s, List.get(t.ascii, b) ?? 0)) |> List.map(|b| b.to_u8_wrap())
+    ascii_bytes = |t, s| List.keep_if(Arena.upto(128), |b| TSet.contains(s, (List.get(t.ascii, b) ?? 0).to_u32())) |> List.map(|b| b.to_u8_wrap())
 
     Anchor : { i : U64, single : Bool, b : U8, tab : List(U8), w : U64 }
 
