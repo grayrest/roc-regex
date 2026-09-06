@@ -1,0 +1,563 @@
+<?xml version="1.0" encoding="utf-8"?>
+<doc>
+<assembly><name>Resharp</name></assembly>
+<members>
+<member name="F:Resharp.ResharpOptions.DfaThreshold@">
+<summary>
+ default:100, Full dfa compilation state space threshold
+</summary>
+</member>
+<member name="F:Resharp.ResharpOptions.StartsetInferenceLimit@">
+<summary>
+ default:2000
+</summary>
+</member>
+<member name="F:Resharp.ResharpOptions.UseDotnetUnicode@">
+<summary>
+ default: true, Case insensitive k includes Kelvin symbol (K), case insensitive i includes turkish I (ı) etc..
+ these cost a lot for string literal optimizations and are disabled in HighThroughput defaults
+ this makes RE# more competitive in ASCII benchmarks, but otherwise it doesn&apos;t really matter
+</summary>
+</member>
+<member name="F:Resharp.ResharpOptions.FindPotentialStartSizeLimit@">
+<summary>
+ default: 200, increases search-time performance for large regexes at the expense of building the engine
+</summary>
+</member>
+<member name="F:Resharp.ResharpOptions.FindLookaroundPrefix@">
+<summary>
+ default: true, Attempt to optimize lookaround prefixes.
+ can be expensive with unbounded lookarounds
+</summary>
+</member>
+<member name="F:Resharp.ResharpOptions.MaxPrefixLength@">
+<summary>
+ default: 20, Maximum string literal prefix length.
+ generally does not make much difference
+</summary>
+</member>
+<member name="F:Resharp.ResharpOptions.MinimizePattern@">
+<summary>
+ default: true, Attempt to make smaller alternations at the cost of initialization time
+</summary>
+</member>
+<member name="F:Resharp.ResharpOptions.MaxDfaCapacity@">
+<summary>
+ default: 100_000, Maximum dfa size, symbolic DFA-s are generally very small,
+ but lookarounds may create arbitrarily large state spaces depending on input length.
+ This sets a hard limit to the number of states created and throws an exception if it is reached
+</summary>
+</member>
+<member name="F:Resharp.ResharpOptions.InitialDfaCapacity@">
+<summary>
+ default: 2048, Initial dfa size, can increase initial size to prevent dynamic array growth during match time
+</summary>
+</member>
+<member name="P:Resharp.ResharpOptions.UseDotnetUnicode(System.Boolean)">
+<summary>
+ default: true, Case insensitive k includes Kelvin symbol (K), case insensitive i includes turkish I (ı) etc..
+ these cost a lot for string literal optimizations and are disabled in HighThroughput defaults
+ this makes RE# more competitive in ASCII benchmarks, but otherwise it doesn&apos;t really matter
+</summary>
+</member>
+<member name="P:Resharp.ResharpOptions.StartsetInferenceLimit(System.Int32)">
+<summary>
+ default:2000
+</summary>
+</member>
+<member name="P:Resharp.ResharpOptions.MinimizePattern(System.Boolean)">
+<summary>
+ default: true, Attempt to make smaller alternations at the cost of initialization time
+</summary>
+</member>
+<member name="P:Resharp.ResharpOptions.MaxPrefixLength(System.Int32)">
+<summary>
+ default: 20, Maximum string literal prefix length.
+ generally does not make much difference
+</summary>
+</member>
+<member name="P:Resharp.ResharpOptions.MaxDfaCapacity(System.Int32)">
+<summary>
+ default: 100_000, Maximum dfa size, symbolic DFA-s are generally very small,
+ but lookarounds may create arbitrarily large state spaces depending on input length.
+ This sets a hard limit to the number of states created and throws an exception if it is reached
+</summary>
+</member>
+<member name="P:Resharp.ResharpOptions.InitialDfaCapacity(System.Int32)">
+<summary>
+ default: 2048, Initial dfa size, can increase initial size to prevent dynamic array growth during match time
+</summary>
+</member>
+<member name="P:Resharp.ResharpOptions.FindPotentialStartSizeLimit(System.Int32)">
+<summary>
+ default: 200, increases search-time performance for large regexes at the expense of building the engine
+</summary>
+</member>
+<member name="P:Resharp.ResharpOptions.FindLookaroundPrefix(System.Boolean)">
+<summary>
+ default: true, Attempt to optimize lookaround prefixes.
+ can be expensive with unbounded lookarounds
+</summary>
+</member>
+<member name="P:Resharp.ResharpOptions.DfaThreshold(System.Int32)">
+<summary>
+ default:100, Full dfa compilation state space threshold
+</summary>
+</member>
+<member name="P:Resharp.ResharpOptions.UseDotnetUnicode">
+<summary>
+ default: true, Case insensitive k includes Kelvin symbol (K), case insensitive i includes turkish I (ı) etc..
+ these cost a lot for string literal optimizations and are disabled in HighThroughput defaults
+ this makes RE# more competitive in ASCII benchmarks, but otherwise it doesn&apos;t really matter
+</summary>
+</member>
+<member name="P:Resharp.ResharpOptions.StartsetInferenceLimit">
+<summary>
+ default:2000
+</summary>
+</member>
+<member name="P:Resharp.ResharpOptions.SingleUseDefaults">
+<summary>
+ Skip all expensive optimizations as it&apos;s likely going to be used and discarded
+</summary>
+</member>
+<member name="P:Resharp.ResharpOptions.MinimizePattern">
+<summary>
+ default: true, Attempt to make smaller alternations at the cost of initialization time
+</summary>
+</member>
+<member name="P:Resharp.ResharpOptions.MaxPrefixLength">
+<summary>
+ default: 20, Maximum string literal prefix length.
+ generally does not make much difference
+</summary>
+</member>
+<member name="P:Resharp.ResharpOptions.MaxDfaCapacity">
+<summary>
+ default: 100_000, Maximum dfa size, symbolic DFA-s are generally very small,
+ but lookarounds may create arbitrarily large state spaces depending on input length.
+ This sets a hard limit to the number of states created and throws an exception if it is reached
+</summary>
+</member>
+<member name="P:Resharp.ResharpOptions.InitialDfaCapacity">
+<summary>
+ default: 2048, Initial dfa size, can increase initial size to prevent dynamic array growth during match time
+</summary>
+</member>
+<member name="P:Resharp.ResharpOptions.HighThroughputDefaults">
+<summary>
+ Attempt more expensive optimizations for high-throughput
+</summary>
+</member>
+<member name="P:Resharp.ResharpOptions.FindPotentialStartSizeLimit">
+<summary>
+ default: 200, increases search-time performance for large regexes at the expense of building the engine
+</summary>
+</member>
+<member name="P:Resharp.ResharpOptions.FindLookaroundPrefix">
+<summary>
+ default: true, Attempt to optimize lookaround prefixes.
+ can be expensive with unbounded lookarounds
+</summary>
+</member>
+<member name="P:Resharp.ResharpOptions.DfaThreshold">
+<summary>
+ default:100, Full dfa compilation state space threshold
+</summary>
+</member>
+<member name="M:Resharp.RegexBuilder`1.stripSuffixes(System.Int32)">
+<summary>
+ returns remaining pattern, suffix
+</summary>
+</member>
+<member name="M:Resharp.RegexBuilder`1.mkConcatChecked(System.Collections.Generic.IEnumerable{System.Int32})">
+<summary>
+ additional rewrites and checks if the pattern is supported
+</summary>
+</member>
+<member name="T:Resharp.RegexBuilder`1">
+<summary>
+ reuses nodes and ensures structural equality via indexed storage
+</summary>
+</member>
+<member name="M:Resharp.RegexMatcher`1.llmatch_ends_skip(Resharp.Common.ValueList{Resharp.Common.ValueMatch}@,Resharp.Common.ValueList{System.Int32}@,System.ReadOnlySpan{System.Char})">
+<summary>
+ see: `LengthLookup`
+</summary>
+</member>
+<member name="M:Resharp.RegexMatcher`1.llmatch_ends_setlookup_mt(Resharp.Common.ValueList{Resharp.Common.ValueMatch}@,Resharp.Common.ValueList{System.Int32}@,System.ReadOnlySpan{System.Char},System.Int32,System.Byte,Resharp.Types.NullKind)">
+<summary>
+ see: `LengthLookup`
+</summary>
+</member>
+<member name="M:Resharp.RegexMatcher`1.llmatch_ends_remaining_set(Resharp.Common.ValueList{Resharp.Common.ValueMatch}@,Resharp.Common.ValueList{System.Int32}@,System.ReadOnlySpan{System.Char},System.Int32,System.Byte,System.Byte)">
+<summary>
+ see: `LengthLookup`
+</summary>
+</member>
+<member name="M:Resharp.RegexMatcher`1.llmatch_ends_noskip(Resharp.Common.ValueList{Resharp.Common.ValueMatch}@,Resharp.Common.ValueList{System.Int32}@,System.ReadOnlySpan{System.Char})">
+<summary>
+ see: `LengthLookup`
+</summary>
+</member>
+<member name="M:Resharp.RegexMatcher`1.llmatch_ends_fixlen(Resharp.Common.ValueList{Resharp.Common.ValueMatch}@,Resharp.Common.ValueList{System.Int32}@,System.Int32)">
+<summary>
+ see: `LengthLookup`
+</summary>
+</member>
+<member name="M:Resharp.RegexMatcher`1.deriv_ptr(System.Int32,System.Int32@,System.ReadOnlySpan{System.Char},System.Int32)">
+<summary>
+ returns true if reference changed
+</summary>
+</member>
+<member name="M:Resharp.RegexMatcher`1.ValueMatches(System.ReadOnlySpan{System.Char})">
+<summary>
+ return just the positions of matches without allocating the result
+</summary>
+</member>
+<member name="M:Resharp.RegexMatcher`1.StateIsNullable2(Resharp.Types.StateFlags,Resharp.Types.LocationKind,System.Int32)">
+<summary>
+ already confirmed can be nullable
+</summary>
+</member>
+<member name="M:Resharp.RegexMatcher`1.Matches(System.ReadOnlySpan{System.Char})">
+<summary>
+ return all matches on input
+</summary>
+</member>
+<member name="M:Resharp.RegexMatcher`1.HandleZeroLengthString">
+<summary>
+ zero length strings need a special case for anchors
+</summary>
+</member>
+<member name="M:Resharp.RegexMatcher`1.GetOrCreateState(System.Int32)">
+<summary>
+ initialize regex in DFA
+</summary>
+</member>
+<member name="F:Resharp.RegexOptimizations`2.MatchOverride@">
+<summary>
+ if the pattern is simple enough that
+ we can use a specialized matching algorithm for it
+</summary>
+</member>
+<member name="P:Resharp.RegexOptimizations`2.MatchOverride">
+<summary>
+ if the pattern is simple enough that
+ we can use a specialized matching algorithm for it
+</summary>
+</member>
+<member name="P:Resharp.Regex.IsFullDFA">
+ <summary>
+ Whether the pattern was compiled to a full DFA at construction time.
+ Both full and lazy DFAs are thread-safe. A full DFA avoids lock overhead during matching.
+ Raise <see cref="ResharpOptions.DfaThreshold"/> to fully compile larger DFAs.
+ </summary>
+</member>
+<member name="M:Resharp.Regex.ValueMatches(System.ReadOnlySpan{System.Char})">
+ <summary>
+ Finds all non-overlapping matches as index/length slices, avoiding string allocations.
+ The returned <see cref="ValueList{ValueMatch}"/> must be disposed after use.
+ </summary>
+ <param name="input">The input text to search.</param>
+ <returns>A disposable list of <see cref="ValueMatch"/> values.</returns>
+</member>
+<member name="M:Resharp.Regex.Replace(System.ReadOnlySpan{System.Char},System.Func{System.String,System.String})">
+ <summary>Replaces all non-overlapping matches using a function that transforms each match.</summary>
+ <param name="input">The input text to search.</param>
+ <param name="replacement">A function that receives the matched text and returns the replacement.</param>
+ <returns>A new string with all matches replaced by the function results.</returns>
+</member>
+<member name="M:Resharp.Regex.Replace(System.ReadOnlySpan{System.Char},System.ReadOnlySpan{System.Char})">
+ <summary>Replaces all non-overlapping matches with the replacement string.</summary>
+ <param name="input">The input text to search.</param>
+ <param name="replacement">The replacement text.</param>
+ <returns>A new string with all matches replaced.</returns>
+</member>
+<member name="M:Resharp.Regex.Matches(System.ReadOnlySpan{System.Char})">
+ <summary>Finds all non-overlapping matches in the input.</summary>
+ <param name="input">The input text to search.</param>
+ <returns>An array of <see cref="MatchResult"/> with the matched text, index, and length.</returns>
+</member>
+<member name="M:Resharp.Regex.LongestEnd(System.ReadOnlySpan{System.Char})">
+ <summary>
+ Finds the end index of the longest match from the beginning of the input, anchored at <c>\A</c>.
+ </summary>
+ <param name="input">The input text to search.</param>
+ <returns>The end index of the longest match, or <c>-1</c> if no match.</returns>
+</member>
+<member name="M:Resharp.Regex.IsMatch(System.ReadOnlySpan{System.Char})">
+ <summary>
+ Returns whether the pattern matches anywhere in the input.
+ For a full-string match, anchor the pattern with <c>\A(pattern)\z</c>.
+ </summary>
+ <param name="input">The input text to search.</param>
+ <returns><c>true</c> if a match is found; otherwise <c>false</c>.</returns>
+</member>
+<member name="M:Resharp.Regex.FromRegex(System.String)">
+ <summary>
+ Converts a standard .NET regex pattern to RE# syntax by escaping the three
+ RE#-specific operators (<c>&amp;</c>, <c>~</c>, <c>_</c>) with a backslash.
+ </summary>
+ <param name="pattern">A standard .NET regex pattern.</param>
+ <returns>An equivalent RE# pattern.</returns>
+</member>
+<member name="M:Resharp.Regex.FirstEnd(System.ReadOnlySpan{System.Char})">
+ <summary>
+ Finds the end index of the first (shortest) match from the beginning of the input, anchored at <c>\A</c>.
+ </summary>
+ <param name="input">The input text to search.</param>
+ <returns>The end index of the first match, or <c>-1</c> if no match.</returns>
+</member>
+<member name="M:Resharp.Regex.Escape(System.String)">
+ <summary>
+ Escapes a string so it matches literally in an RE# pattern.
+ Escapes all standard regex metacharacters plus the RE#-specific operators
+ (<c>&amp;</c>, <c>~</c>, <c>_</c>).
+ </summary>
+ <param name="input">The literal string to escape.</param>
+ <returns>A pattern that matches the input string literally.</returns>
+</member>
+<member name="M:Resharp.Regex.Count(System.ReadOnlySpan{System.Char})">
+ <summary>Counts the number of non-overlapping matches in the input.</summary>
+ <param name="input">The input text to search.</param>
+ <returns>The number of matches found.</returns>
+</member>
+<member name="T:Resharp.Regex">
+ <summary>
+ High-performance regex engine supporting intersection (<c>&amp;</c>) and complement (<c>~</c>) operations.
+ Uses symbolic derivatives and automata-based matching.
+ This type is thread-safe: a single instance can be used concurrently from multiple threads.
+ </summary>
+ <param name="pattern">The regex pattern. Supports most standard syntax plus <c>&amp;</c> (intersection) and <c>~</c> (complement).</param>
+ <param name="options">Optional configuration. See <see cref="ResharpOptions"/> for defaults.</param>
+ <example>
+ <code>
+ let re = Resharp.Regex(@"\w+")
+ re.IsMatch("hello") // true
+ re.Count("one two three") // 3
+ </code>
+ </example>
+</member>
+<member name="M:Resharp.Internal.AbstractModule.item``3(Microsoft.FSharp.Core.FSharpFunc{``1,Microsoft.FSharp.Core.FSharpFunc{``0,``2}},``0,``1)">
+<summary>
+ unchecked indexer/key like `.Item`
+</summary>
+</member>
+<member name="M:Resharp.Internal.AbstractModule.catch``1(Microsoft.FSharp.Core.FSharpFunc{Microsoft.FSharp.Core.Unit,``0})">
+<summary>
+ wrap function that may throw exception
+</summary>
+</member>
+<member name="M:Resharp.Internal.AbstractModule.get``3(Microsoft.FSharp.Core.FSharpFunc{``1,Microsoft.FSharp.Core.FSharpFunc{``0,Microsoft.FSharp.Core.FSharpValueOption{``2}}},``0,``1)">
+<summary>
+ alias for try_item
+</summary>
+</member>
+<member name="M:Resharp.Internal.AbstractModule.try_item``3(Microsoft.FSharp.Core.FSharpFunc{``1,Microsoft.FSharp.Core.FSharpFunc{``0,Microsoft.FSharp.Core.FSharpValueOption{``2}}},``0,``1)">
+<summary>
+ checked indexer
+</summary>
+</member>
+<member name="M:Resharp.Internal.AbstractModule.iter_parallel``1(System.Int32,System.Action{``0},System.Collections.Generic.IEnumerable{``0})">
+<summary>
+ parallel iteration for convenience `iter_parallel num_threads f x`
+</summary>
+</member>
+<member name="M:Resharp.Internal.AbstractModule.iteri_rev``2(Microsoft.FSharp.Core.FSharpFunc{``1,Microsoft.FSharp.Core.FSharpFunc{Microsoft.FSharp.Core.FSharpFunc{``0,Microsoft.FSharp.Core.Unit},Microsoft.FSharp.Core.Unit}},Microsoft.FSharp.Core.FSharpFunc{System.Int32,Microsoft.FSharp.Core.FSharpFunc{``0,Microsoft.FSharp.Core.Unit}},``1)">
+<summary>
+ equivalent to `Seq.rev &gt;&gt; Seq.iteri`
+</summary>
+</member>
+<member name="M:Resharp.Internal.AbstractModule.iter_while``2(Microsoft.FSharp.Core.FSharpFunc{``1,Microsoft.FSharp.Core.FSharpFunc{Microsoft.FSharp.Core.FSharpFunc{``0,System.Boolean},System.Boolean}},Microsoft.FSharp.Core.FSharpFunc{``0,System.Boolean},``1)">
+<summary>
+ iterate while `cond` is true
+</summary>
+</member>
+<member name="M:Resharp.Internal.AbstractModule.iter_rev``2(Microsoft.FSharp.Core.FSharpFunc{``1,Microsoft.FSharp.Core.FSharpFunc{Microsoft.FSharp.Core.FSharpFunc{``0,Microsoft.FSharp.Core.Unit},Microsoft.FSharp.Core.Unit}},Microsoft.FSharp.Core.FSharpFunc{``0,Microsoft.FSharp.Core.Unit},``1)">
+<summary>
+ equivalent to `Seq.rev &gt;&gt; Seq.iter`
+</summary>
+</member>
+<member name="M:Resharp.Internal.AbstractModule.iter_len(Microsoft.FSharp.Core.FSharpFunc{System.Int32,Microsoft.FSharp.Core.Unit},System.Int32)">
+<summary>
+ same as a for loop from 0..len-1
+</summary>
+</member>
+<member name="M:Resharp.Internal.AbstractModule.enumv``2(``0)">
+<summary>
+ enum-to-value
+</summary>
+</member>
+<member name="M:Resharp.Internal.AbstractModule.enum``2(``0)">
+<summary>
+ value-to-enum (for enums backed by other than int32)
+</summary>
+</member>
+<member name="M:Resharp.Common.ValueMatch.GetText(System.ReadOnlySpan{System.Char})">
+<summary>
+ gets string from char span
+</summary>
+</member>
+<member name="M:Resharp.Common.ValueList`1.endsWith(Resharp.Common.ValueList{`0},`0)">
+<summary>
+ assumes non-empty list
+</summary>
+</member>
+<member name="T:Resharp.Common.ValueList`1">
+<summary>
+ disposable memory-pooled collection
+</summary>
+</member>
+<member name="T:Resharp.Common.TMinterm">
+<summary>
+ this constrains the max num of unique minterms to 256 to conserve memory
+</summary>
+</member>
+<member name="T:Resharp.Types.PredStartset">
+<summary>
+ collection of concrete startset chars for vectorization purposes
+</summary>
+</member>
+<member name="T:Resharp.Types.RegexNode`1.LookBehind">
+<summary>
+ lookbehind (?&lt;=...) - [0]=body, [1]=relativeTo, [2]=pendingId
+</summary>
+</member>
+<member name="T:Resharp.Types.RegexNode`1.LookAhead">
+<summary>
+ lookahead (?=...) - [0]=body, [1]=relativeTo, [2]=pendingId
+</summary>
+</member>
+<member name="T:Resharp.Types.RegexNode`1.Not">
+<summary>
+ ~RE - [0]=inner
+</summary>
+</member>
+<member name="T:Resharp.Types.RegexNode`1.And">
+<summary>
+ RE&amp;RE
+</summary>
+</member>
+<member name="T:Resharp.Types.RegexNode`1.Or">
+<summary>
+ RE|RE
+</summary>
+</member>
+<member name="T:Resharp.Types.RegexNode`1.Loop">
+<summary>
+ RE{𝑚, 𝑛}, \* = {0,int32.max} - [0]=body, [1]=lower, [2]=upper
+</summary>
+</member>
+<member name="T:Resharp.Types.RegexNode`1.Singleton">
+<summary>
+ 𝜓 predicate - [0]=tsetIndex
+</summary>
+</member>
+<member name="T:Resharp.Types.RegexNode`1.Concat">
+<summary>
+ RE.RE - [0]=head, [1]=tail
+</summary>
+</member>
+<member name="T:Resharp.Cache.MintermSearchValues`1">
+<summary>
+ pre-computed optimizations for a symbolic predicate
+</summary>
+</member>
+<member name="M:Resharp.Cache.SearchValuesKind.ofSearchValues``1(System.Buffers.SearchValues{``0})">
+<summary>
+ this is a maintenance nightmare, but
+ only some SearchValues&lt;&apos;t&gt; implementations are faster than RE# by itself.
+ there is also no correct answer either since it depends on what the input is
+ so we make some educated guesses
+</summary>
+</member>
+<member name="M:Resharp.Cache.SearchValuesKind.CommonalityScoreSimple(System.ReadOnlySpan{System.Char})">
+<summary>
+ this is a simple way to determine how common a character set is, lower is rarer
+ would get much better results with real probabilities
+</summary>
+</member>
+<member name="M:Resharp.Algorithm.RegexNode.isNullable``1(Resharp.RegexBuilder{``0},Resharp.Types.LocationKind,System.Int32)">
+<summary>
+ whether the regex matches an empty string
+</summary>
+</member>
+<member name="M:Resharp.Algorithm.RegexNode.rev``1(Resharp.RegexBuilder{``0},System.Int32)">
+<summary>
+ reverse a regex; asdf -&gt; fdsa
+</summary>
+</member>
+<member name="T:Resharp.Optimizations.MatchOverride`1">
+<summary>
+ override for trivial literal string search
+</summary>
+</member>
+<member name="T:Resharp.Optimizations.LengthLookup`1.MatchEnd">
+<summary>
+ default match end lookup
+</summary>
+</member>
+<member name="T:Resharp.Optimizations.LengthLookup`1.SetLookup">
+<summary>
+ avx lookup a single character
+</summary>
+</member>
+<member name="T:Resharp.Optimizations.LengthLookup`1.FixedLengthPrefixMatchEnd">
+<summary>
+ skip some transitions as we already know where match starts
+ e.g., hello.\*world starts looking at hello|-&gt;.\*end
+</summary>
+</member>
+<member name="T:Resharp.Optimizations.LengthLookup`1.FixedLength">
+<summary>
+ skip match end lookup entirely
+</summary>
+</member>
+<member name="T:Resharp.Optimizations.LengthLookup`1">
+<summary>
+ the default option to find the match end is to match again in reverse
+ often this is overkill and can be replaced with something much simpler
+</summary>
+</member>
+<member name="T:Resharp.Optimizations.InitialAccelerator`2.SearchValuesPotentialStart">
+<summary>
+ potential start prefix from searchvalues
+</summary>
+</member>
+<member name="T:Resharp.Optimizations.InitialAccelerator`2.StringPrefix">
+<summary>
+ ex. Twain ==&gt; (ε|Twain)
+</summary>
+</member>
+<member name="T:Resharp.Optimizations.InitialAccelerator`2">
+<summary>
+ initial prefix optimizations
+</summary>
+</member>
+<member name="M:Resharp.Optimizations.inferOverrideRegex``1(Resharp.Optimizations.InitialAccelerator{``0,System.Char},Resharp.Optimizations.LengthLookup{``0},Resharp.Cache.RegexCache{``0},System.Int32,System.Int32)">
+<summary>
+ heuristics to see if we should use regex at all
+</summary>
+</member>
+<member name="M:Resharp.Optimizations.getPrefixNodeCore``1(System.Boolean,Resharp.Cache.RegexCache{``0},System.Int32)">
+<summary>
+ strip parts irrelevant for prefix.
+ anchorOpt: apply Or-anchor optimization for lookback handling
+</summary>
+</member>
+<member name="M:Resharp.Optimizations.Inline.add``3(``0,``1)">
+<summary>
+ *mad scientist*: finally! `return` in F#
+</summary>
+</member>
+<member name="T:Resharp.Optimizations.Inline">
+<summary>
+ bypassing the F# type system to make sure there is no conversion magic happening
+ parts of this may be redundant since you never know what is a no-op and what is not
+ but we&apos;re going the extra mile to make sure there are no hidden tricks since the
+ whole algorithm is about optimizing one hot loop where any little surprise puts us at 2nd place
+</summary>
+</member>
+</members>
+</doc>
