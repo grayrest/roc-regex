@@ -234,6 +234,7 @@ Sharp := [].{
             match re.accel.init {
                 Prefix(p) => "prefix=${List.len(p.sets).to_str()}sets@${p.anchor.to_str()}(${anchor_of(p)})"
                 Potential(p) => "potential=${List.len(p.sets).to_str()}sets@${p.anchor.to_str()}(${anchor_of(p)})"
+                ClassRun(r) => "classrun=x${r.lo.to_str()}"
                 NoInit => "prefix=none"
             }
         len =

@@ -17,6 +17,7 @@ import Deriv
 import Lit
 import Ref
 import Rlit
+import Rrun
 import Teddy
 import Trie
 import TSet
@@ -643,7 +644,9 @@ Dfa := [].{
     # offsets are symbol counts, so they move by `Utf8.advance`/`retreat`.
 
     ## The accelerators the fast scans consult (S13; built by `Accel`)
-    Init : [NoInit, Prefix(Rlit.Prefix), Potential(Rlit.Prefix)]
+    ## How the reverse sweep starts. `ClassRun` replaces it outright: see
+    ## `Rrun`.
+    Init : [NoInit, Prefix(Rlit.Prefix), Potential(Rlit.Prefix), ClassRun(Rrun.Spec)]
     ## RE#'s `LengthLookup`, how the end pass finds a match's end. Lengths are
     ## in symbols. `PrefixEnd(k, st)`: the first `k` symbols are fixed, scan
     ## from there in state `st`. `SetLookup(k, cls, nk, tab)`: after `k`
@@ -1174,10 +1177,20 @@ Dfa := [].{
         if n == 0 {
             if Deriv.nullable(e.a, Deriv.loc_both, Dfa.st_node_of(e, e.s_rev_ts)) { [0] } else { [] }
         } else {
-            st = Dfa.sweep_prologue(e, t, hay)
-            col = Dfa.collect_fast(e, t, ini, hay, st.pos, st.s, st.acc, skip)
-            raw = Dfa.start_fast(e, col.s, col.acc, hay)
-            Dfa.order_starts(e.eflags.bitwise_and(Dfa.ef_starts_desc) != 0, raw)
+            match ini {
+                # `Rrun.collect` is the whole sweep, prologue and input-start
+                # step included: `lo >= 1` means the pattern is not nullable at
+                # the end of input, and the run reaching offset 0 is the
+                # input-start case `start_fast` would have handled. Descending
+                # by construction.
+                ClassRun(r) => Rrun.collect(hay, r.tab, r.lo)
+                _ => {
+                    st = Dfa.sweep_prologue(e, t, hay)
+                    col = Dfa.collect_fast(e, t, ini, hay, st.pos, st.s, st.acc, skip)
+                    raw = Dfa.start_fast(e, col.s, col.acc, hay)
+                    Dfa.order_starts(e.eflags.bitwise_and(Dfa.ef_starts_desc) != 0, raw)
+                }
+            }
         }
     }
 
@@ -1258,13 +1271,22 @@ Dfa := [].{
             if !List.is_empty(st.acc) {
                 st.acc
             } else {
-                col =
-                    match ini {
-                        NoInit => Dfa.collect_first_plain(e, t, hay, st.pos, st.s)
-                        Prefix(pf) => Dfa.collect_first_prefix(e, t, pf, hay, st.pos, st.s)
-                        Potential(pf) => Dfa.collect_first_prefix(e, t, pf, hay, st.pos, st.s)
+                match ini {
+                    # `Rrun` finds every start in one pipelined pass; stopping
+                    # early would only trade that for the re-entries it exists
+                    # to avoid
+                    ClassRun(r) => Rrun.collect(hay, r.tab, r.lo)
+                    _ => {
+                        col =
+                            match ini {
+                                NoInit => Dfa.collect_first_plain(e, t, hay, st.pos, st.s)
+                                Prefix(pf) => Dfa.collect_first_prefix(e, t, pf, hay, st.pos, st.s)
+                                Potential(pf) => Dfa.collect_first_prefix(e, t, pf, hay, st.pos, st.s)
+                                ClassRun(_) => Dfa.collect_first_plain(e, t, hay, st.pos, st.s)
+                            }
+                        if !List.is_empty(col.acc) { col.acc } else { Dfa.start_fast(e, col.s, [], hay) }
                     }
-                if !List.is_empty(col.acc) { col.acc } else { Dfa.start_fast(e, col.s, [], hay) }
+                }
             }
         }
     }
@@ -1369,6 +1391,8 @@ Dfa := [].{
             NoInit => Dfa.collect_plain(e, t, hay, pos0, s0, acc0, skip)
             Prefix(pf) => Dfa.collect_prefix(e, t, pf, hay, pos0, s0, acc0, skip)
             Potential(pf) => Dfa.collect_prefix(e, t, pf, hay, pos0, s0, acc0, skip)
+            # `starts_fast_opts` never reaches here with one
+            ClassRun(_) => Dfa.collect_plain(e, t, hay, pos0, s0, acc0, skip)
         }
 
     collect_plain : Dfa.E, Trie.T, List(U8), U64, U32, List(U64), Bool -> { s : U32, acc : List(U64) }

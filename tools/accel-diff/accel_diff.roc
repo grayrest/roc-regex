@@ -39,7 +39,16 @@ pats = [
 	# runs whose anchor is non-ASCII, so a hit lands inside a symbol
 	"παρά", "\\bκαι\\b", "λόγος",
 	# no accelerator at all, as a control
-	"\\w+\\s+\\w+", "[0-9]{2,4}",
+	"\\w+\\s+\\w+",
+	# ONE class repeated, which replaces the sweep outright (`Rrun`): the
+	# bounds, a class that is not a range, and classes whose runs are dense
+	# enough to cross window boundaries
+	"[0-9]{2,4}", "[0-9]", "[0-9]+", "[0-9]{3,}", "[0-9]{5}", "[0-9]{17}",
+	"[A-Za-z]+", "[A-Za-z]{2,3}", "[aeiou]+", "[^ ]+", "[^0-9]+", "\\S{4}",
+	"[0-9a-f]{2,}", "[ ]+", "[.,;:]+",
+	# rejected by the gate, and must still be right: `lo` of zero is nullable
+	# everywhere, and a class with non-ASCII members cannot use the kernel
+	"[0-9]*", "[A-Za-z]*", "\\p{L}+", "\\w+", "\\d+", "[α-ω]+",
 ]
 
 # Spans compare by count and by a positional checksum, so a reordering or a
@@ -77,6 +86,16 @@ edges = [
 	"the the the the the",
 	"a the b the c the d the e",
 	"was his her had was his her",
+	# runs against both edges, runs that cross a 16-byte window boundary, and
+	# runs shorter and longer than a bound
+	"1234567890123456789012345",
+	"99 the 1234 x 12345678901234567890 y 7",
+	"1",
+	"12",
+	"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	"       1234567890123456       ",
+	"παρά12345λόγος67890παρά",
+	"9999999999999999",
 ]
 
 run_edges : List(Str), U64, List(Str) -> List(Str)

@@ -2733,3 +2733,102 @@ structural: the sweep steps through each digit run to find where a match can
 start, and for a pattern like this the run's extent determines those positions
 outright -- a length lookup in reverse, the mirror of `Dfa.Len`. That is a
 feature, not a tuning, and it is not being started on the strength of one row.
+
+## The reverse length lookup (2026-09-07)
+
+The entry above closed `[0-9]{2,4}` at 1.18x saying what would actually move it
+was structural: "the sweep steps through each digit run to find where a match
+can start, and for a pattern like this the run's extent determines those
+positions outright -- a length lookup in reverse, the mirror of `Dfa.Len`."
+Built. **1.18x -> 0.59x**, and `[A-Za-z]+` 0.85x -> 0.73x.
+
+### What it is
+
+`Dfa.Init` gains `ClassRun`, and where it applies it does not accelerate the
+sweep, it REPLACES it. `_*·S{lo,hi}` is nullable at `p` exactly when `lo`
+symbols of `S` start at `p`, so for every maximal run of `S`-bytes `[a, b)` the
+match starts are `a .. b - lo` and nothing else -- no automaton, no prologue,
+no input-start step, and descending by construction.
+
+The gate, in `Accel.class_run`, is that the REVERSED pattern is one singleton
+node (a set of minterms) optionally under a loop, with `lo >= 1` and no
+non-ASCII codepoint in the set. Each clause earns its place:
+
+- **`lo >= 1`.** `S{0,n}` is nullable at every position, including ones with no
+  `S`-symbol at all, which no enumeration of `S`-runs can produce. `[0-9]*`
+  and `[A-Za-z]*` are in the differential to hold that line.
+- **No non-ASCII codepoint.** `Bset`'s nibble tables cannot represent a byte
+  >= 0x80 as a member, so a multibyte symbol has to read as a run boundary --
+  true only when the class really excludes it. `\p{L}+` fails this and keeps
+  the ordinary sweep; the check is `Dfa.nonascii_classes`, already there for
+  the skip's pass flag.
+
+`hi` is not consulted: whether a match can START at `p` depends on the minimum
+only.
+
+Before writing any of it, the claim was checked against the engine: an
+independent enumeration of "positions with `lo` class bytes after them" against
+the real sweep's output over 256 KB, element for element. `[0-9]{2,4}` 2863,
+`[A-Za-z]+` 205101, `[0-9]{3,}` 1408, `[0-9]` 4554 -- identical in every case,
+and `\p{L}+` differing by exactly the Greek letters, which is the gate showing
+its teeth before the gate existed.
+
+### Why it is worth a module of its own
+
+Because of what the sweep it replaces was actually spending. From the entry
+above: a re-entry into `Bset.rfind` costs ~16 ns against the kernel's 1.3 ns a
+window, and that survives hoisting the vectors (0.6 ns) and inlining the body
+(1.6 ns) -- it is a loop-carried dependency, the next window's address being a
+`clz` of the last hit's mask. `Rrun.collect`'s window loop decrements by 16
+whatever the window held, and the run bookkeeping rides beside it instead of
+feeding back into it. Runs are extracted from the mask with `clz` on the mask
+itself, so a window costs O(runs in it), not sixteen bit tests.
+
+New module rather than more of `Dfa`: the hot-loop rule, and it keeps
+`Rrun.roc` at 109 lines with `Dfa` gaining one `Init` arm and one dispatch.
+
+### What it moved
+
+A/B alternating, min-of-10 and 12, both runs agreeing:
+
+| | |
+|---|---|
+| `[0-9]{2,4}` | **0.500x / 0.503x** |
+| `[A-Za-z]+` | **0.836x / 0.844x** |
+| `\w+\s+\w+` | 1.017x |
+| `\p{L}+` | 1.007x / 1.022x |
+| `Holmes` | 1.018x / 1.025x |
+| everything else | 0.989-1.013x |
+
+The three rows above 1.0 are the register-pressure tax, and they are paid in
+2000, 44000 and 500 ns against 64000 and 300000 won. Against Rust's meta
+engine:
+
+| pattern | before | after |
+|---|---|---|
+| `[0-9]{2,4}` | 1.18x | **0.59x** |
+| `[A-Za-z]+` | 0.85x | **0.73x** |
+| `\p{L}+` | 0.97x | 0.99x |
+| `\w+\s+\w+` | 1.28x | 1.31x |
+
+Seven of ten rows are now at or below Rust: `.*Holmes` 0.48, `[0-9]{2,4}` 0.59,
+`[A-Za-z]+` 0.73, `\bthe\b` 0.97, `(\w+)@(\w+)` 0.98, `\p{L}+` 0.99,
+`Holmes` 1.02. The widest is `\w+\s+\w+` at 1.31x.
+
+### Checking it
+
+Gates: corpus 331/331, fuzz plain 18000 cases 0 divergences, a SECOND fuzz seed
+(7777, 14400 cases) 0 divergences, fuzz seed 42 16 (pre-existing), node layer
+57/57, skip differential 112/112, http 60/60, router 174/174.
+
+`tools/accel-diff` grew to 51 patterns over 20 haystacks, 1020/1020 -- class
+runs at both bounds, classes that are not ranges, `lo` of zero and non-ASCII
+classes that the gate must REJECT, and haystacks with runs against both edges,
+crossing 16-byte window boundaries, and shorter and longer than the bound.
+Three breaks, each caught:
+
+| break | result |
+|---|---|
+| the run's lower bound off by one | 959/1020 |
+| the gate stops requiring an ASCII-only class | 996/1020 |
+| runs no longer merge across a window boundary | 1001/1020 |

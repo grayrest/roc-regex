@@ -101,6 +101,22 @@ Bset := [].{
             Bset.find_tail(hay, tables, k, n, pos + 1)
         }
 
+    ## `member`/`mask` WITHOUT the "a non-ASCII byte is always a member" rule.
+    ## The nibble tables already say "no" for a byte >= 0x80 (its high nibble is
+    ## 8..15 and `hi_table` is 0 there), so these are the ordinary kernel minus
+    ## the high bit, not an extra test. Sound only for a set with no non-ASCII
+    ## member, where a multibyte symbol genuinely is not in it (`Rrun`).
+    member_ascii : List(U8), U64, U8 -> Bool
+    member_ascii = |tables, k, b|
+        (List.get(tables, k * 16 + b.bitwise_and(15).to_u64()) ?? 0).bitwise_and(List.get(Bset.hi_table, b.shr_zf_wrap(4).to_u64()) ?? 0) != 0
+
+    mask_ascii : U8x16, U8x16, U8x16 -> U16
+    mask_ascii = |lo, hi, chunk| {
+        nib = U8x16.splat(0x0F)
+        r = lo.table_lookup(chunk.bitwise_and(nib)).bitwise_and(hi.table_lookup(chunk.shr_zf_wrap(4).bitwise_and(nib)))
+        r.eq_lanes(U8x16.splat(0)).bitwise_not().to_bitmask()
+    }
+
     ## How often a byte occurs in English-ish text, per mille (rough: letters by
     ## frequency, space 170, newline and common punctuation 10-15, digits and
     ## capitals about 1 each, everything else 0.5 — stored ×2 so the rare

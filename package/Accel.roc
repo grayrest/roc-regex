@@ -16,6 +16,7 @@ import Build
 import Deriv
 import Dfa
 import Rlit
+import Rrun
 import Teddy
 import TSet
 import Trie
@@ -65,7 +66,36 @@ Accel := [].{
                     }
                 _ => NoOverride
             }
-        { e: ll.e, accel: { init: sp.init, len, override } }
+        # the strongest of the three: it replaces the sweep rather than
+        # accelerating it, so it wins where it applies
+        init =
+            match Accel.class_run(sp.e.a, t, rev) {
+                Ok(spec) => ClassRun(spec)
+                Err(_) => sp.init
+            }
+        { e: ll.e, accel: { init, len, override } }
+    }
+
+    ## `Rrun`'s gate: is the reversed pattern one set of minterms repeated at
+    ## least `lo >= 1` times, with no non-ASCII codepoint in it? Then a match
+    ## starts exactly where `lo` symbols of that set do, and the sweep is a
+    ## scan for its runs (see `Rrun`).
+    ##
+    ## `lo == 0` is excluded and not an oversight: `S{0,n}` is nullable at
+    ## EVERY position, including ones with no symbol of `S` at all, which no
+    ## enumeration of `S`-runs can produce.
+    class_run : Arena.A, Trie.T, U32 -> Try(Rrun.Spec, [NotRun])
+    class_run = |a, t, rev| {
+        looped = Arena.is_loop(a, rev)
+        body = if looped { Arena.head(a, rev) } else { rev }
+        lo = if looped { Arena.loop_lo(a, rev).to_u64() } else { 1 }
+        ts = Arena.tset(a, body)
+        if !Arena.is_singleton(a, body) or ts == 0 or lo < 1 or TSet.inter(ts, Dfa.nonascii_classes(t)) != 0 {
+            Err(NotRun)
+        } else {
+            bytes = Accel.ascii_bytes(t, ts)
+            if List.is_empty(bytes) { Err(NotRun) } else { Ok({ tab: Bset.table(bytes), lo }) }
+        }
     }
 
     ## the literal padded to 16 bytes, so a scan can load it as one vector

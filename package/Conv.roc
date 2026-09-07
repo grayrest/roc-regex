@@ -11,7 +11,7 @@ import TSet
 
 Conv := [].{
     nested_look_msg : Str
-    nested_look_msg = "sharp: a lookaround or \\b inside a lookaround body is unsupported (RE# accepts it and matches one symbol off)"
+    nested_look_msg = "a lookaround or \\b inside a lookaround body is unsupported (RE# accepts it and matches one symbol off)"
 
     ## the compiled alphabet: the pattern's sets (as collected) and their tsets,
     ## plus the `\w` and `\s` tsets for the word-border heuristic
