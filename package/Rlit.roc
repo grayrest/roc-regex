@@ -21,7 +21,7 @@ Rlit := [].{
     ## byte of that run is folded into the search (`pair_byte` at `pair_dist`
     ## before the anchor when `pair_back`, after it otherwise). It only filters
     ## candidates; verification below still checks every set.
-    Prefix : { sets : List(U64), anchor : U64, single : Bool, anchor_byte : U8, anchor_tab : List(U8), state : U32, land : Bool, pair : Bool, pair_byte : U8, pair_back : Bool, pair_dist : U64 }
+    Prefix : { sets : List(U64), anchor : U64, single : Bool, anchor_byte : U8, anchor_tab : List(U8), state : U32, land : Bool, pair : Bool, pair_byte : U8, pair_back : Bool, pair_dist : U64, pair2 : Bool, pair2_byte : U8, pair2_back : Bool, pair2_dist : U64 }
 
     Occ : { start : U64, end : U64 }
 
@@ -49,13 +49,24 @@ Rlit := [].{
         pb = pf.pair_byte
         pback = pf.pair_back
         pdist = pf.pair_dist
+        pair2 = pf.pair2
+        pb2 = pf.pair2_byte
+        pback2 = pf.pair2_back
+        pdist2 = pf.pair2_dist
         var end = end0
         var result = Err(NotFound)
         var searching = end >= m
         while searching {
             hit =
                 if pair {
-                    Rlit.rfind_pair(hay, ab, pb, pback, pdist, n, end - after)
+                    # nested inside the arm that already exists rather than
+                    # beside it: a third top-level test cost `.*Holmes` 3%,
+                    # and it takes the `pair` branch either way
+                    if pair2 {
+                        Rlit.rfind_pair2(hay, ab, pb, pback, pdist, pb2, pback2, pdist2, n, end - after)
+                    } else {
+                        Rlit.rfind_pair(hay, ab, pb, pback, pdist, n, end - after)
+                    }
                 } else if single {
                     Rlit.rfind_byte(hay, ab, end - after)
                 } else {
@@ -178,6 +189,44 @@ Rlit := [].{
         } else {
             Rlit.rfind_tail(hay, b, end)
         }
+
+    ## `rfind_pair` with a THIRD byte of the run ANDed in as well. Every hit
+    ## that leaves the window is a scan restart, and a restart costs ~16 ns
+    ## against the kernel's 1.3 ns a window: over the bench haystack `h` alone
+    ## leaves 13473, `th` 6043 and `the` 2394, for 1216 matches. Filtering
+    ## inside the window is what converts; verifying harder outside it does
+    ## not, and made the row 10% slower when tried (design log).
+    rfind_pair2 : List(U8), U8, U8, Bool, U64, U8, Bool, U64, U64, U64 -> Try(U64, [NotFound])
+    rfind_pair2 = |hay, b, pb, back, dist, pb2, back2, dist2, n, end|
+        if end >= 16 {
+            w = end - 16
+            bv = U8x16.splat(b)
+            m0 = (U8x16.load(hay, w) ?? bv).eq_lanes(bv).to_bitmask()
+            m1 = if m0 == 0 { 0 } else { m0.bitwise_and(Rlit.partner_mask(hay, w, pb, back, dist, n)) }
+            m = if m1 == 0 { 0 } else { m1.bitwise_and(Rlit.partner_mask(hay, w, pb2, back2, dist2, n)) }
+            if m == 0 {
+                Rlit.rfind_pair2(hay, b, pb, back, dist, pb2, back2, dist2, n, w)
+            } else {
+                Ok(w + 15 - (m.count_leading_zero_bits()).to_u64())
+            }
+        } else {
+            Rlit.rfind_tail(hay, b, end)
+        }
+
+    ## the lanes of the window at `w` whose partner byte matches at `dist`. A
+    ## window too close to an edge for the second load keeps every lane: the
+    ## partner is a filter, never a requirement, which is what keeps it sound.
+    partner_mask : List(U8), U64, U8, Bool, U64, U64 -> U16
+    partner_mask = |hay, w, pb, back, dist, n| {
+        pv = U8x16.splat(pb)
+        if back {
+            if w >= dist { (U8x16.load(hay, w - dist) ?? pv).eq_lanes(pv).to_bitmask() } else { 0xFFFF }
+        } else if w + dist + 16 <= n {
+            (U8x16.load(hay, w + dist) ?? pv).eq_lanes(pv).to_bitmask()
+        } else {
+            0xFFFF
+        }
+    }
 
     ## the position of the last `b` strictly before `end`
     rfind_byte : List(U8), U8, U64 -> Try(U64, [NotFound])

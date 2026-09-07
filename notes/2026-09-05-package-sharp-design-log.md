@@ -2560,3 +2560,93 @@ demonstrate that out-of-order output is reachable on this path at all. Every
 unbounded lookahead tried folds INCOMPLETE and goes to the threaded scan, which
 still checks order for itself. The real evidence is the corpus and the fuzz,
 which compare spans against the reference: a wrong order gives wrong spans.
+
+## `\bthe\b`: the scan was never the cost, the RESTARTS were (2026-09-07)
+
+1.24x, and the third row taken this session. Its end pass is
+`FixedLength(3)` and costs **6000 ns** of a 254000 ns row, so the row is the
+reverse sweep, and the sweep is the prefix accelerator: anchor `h`, with `t`
+one byte back as the rare-pair filter added earlier above.
+
+### The measurement that reframed it
+
+The same SIMD kernel, over the same 256 KB, in three drivers (min-of-60):
+
+| | ns |
+|---|---|
+| one pass, counting every hit, never leaving the loop | **22000** |
+| today's shape: `Rlit.rfind_byte` again per hit | 214000 |
+| the same scan as a `while` with the splat hoisted, per hit | 336000 |
+
+The kernel is 0.084 ns a byte. Restarting it 13473 times costs **~16 ns a
+call** on top -- ten times the scan itself. And rewriting the recursion as a
+`while` loop made it WORSE, so it is not recursion: it is that a call which
+scans one or two windows and returns can never get the loop going, while the
+single pass keeps everything in registers and pipelines the loads.
+
+So the lever on this row is the number of times the scan is re-entered, and the
+existing rare-pair filter is exactly the right tool -- it just was not applied
+far enough. Over this haystack:
+
+| leaves the window | count |
+|---|---|
+| `h` (anchor alone) | 13473 |
+| `he` | 3637 |
+| `th` (the shipped pair) | 6043 |
+| `the` | 2394 |
+| `\bthe\b` (matches) | 1216 |
+
+### A third byte in the window
+
+`Accel.run_of` now picks the two rarest other bytes of the single-codepoint run
+around the anchor, and `Rlit.rfind_pair2` ANDs both partner masks into the
+anchor mask. Same soundness argument as the pair: a window too close to an edge
+for a partner load keeps every lane, so the partner is a filter and never a
+requirement, and verification below still checks every set.
+
+Two things had to be right beyond the mask:
+
+- **It is gated on a COMMON anchor** (`Bset.freq2 >= 24`, i.e. `b` and up).
+  The third window compare costs about a nanosecond a window whether or not it
+  filters, and only a common anchor leaves enough restarts to pay for it. `h`
+  (96) qualifies; `H` and `@` (3 and 1) do not. Forced on, it cost `.*Holmes`
+  3-4% -- the only pattern in the suite whose anchor is already rare enough
+  that its restarts do not matter.
+- **The new test is nested inside the `pair` arm, not beside it.** As a third
+  top-level arm of `rfind_sets`'s dispatch it still cost `.*Holmes` ~3%, which
+  takes the `pair` branch either way. Inside the arm that already exists, that
+  row reads 0.976x. The hot-loop rule about folding into a branch that is
+  already there, once more.
+
+### What it moved
+
+A/B alternating against the previous commit, min-of-10:
+
+| | |
+|---|---|
+| `word_bound` | **0.812x** |
+| every other row | 0.974-1.001x |
+
+which is **1.24x -> 1.00x** against Rust's meta engine: 203400 against 204076.
+
+| pattern | vs Rust meta |
+|---|---|
+| `.*Holmes` | 0.48x |
+| `[A-Za-z]+` | 0.86x |
+| `\p{L}+` | 0.95x |
+| `(\w+)@(\w+)` | 0.97x |
+| `\bthe\b` | **1.00x** |
+| `Holmes` | 1.01x |
+| `Moriarty` | 1.03x |
+| `Sherlock\|Holmes\|…` | 1.10x |
+| `[0-9]{2,4}` | 1.17x |
+| `\w+\s+\w+` | 1.26x |
+
+Six of ten rows are at or below Rust, and the widest is 1.26x.
+
+Gates: corpus 331/331, fuzz plain 18000 cases 0 divergences, fuzz seed 42 16
+(pre-existing), node layer 57/57, skip differential 112/112, http 60/60, router
+174/174. Plus an accelerator differential written for this change -- `find_all`
+against `find_all_plain`, the same automaton with every accelerator off -- over
+31 literal-run patterns and four 256 KB haystacks, 124/124. It has teeth:
+breaking the second partner's distance by one reads 84/124.

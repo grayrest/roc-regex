@@ -396,7 +396,7 @@ Accel := [].{
                 } else {
                     st = Dfa.get_state({ ..e, a: applied.a }, applied.id, False)
                     r = Accel.run_of(t, sets, anchor.i)
-                    { e: st.e, init: Prefix({ sets, anchor: anchor.i, single: anchor.single, anchor_byte: anchor.b, anchor_tab: anchor.tab, state: st.id, land: True, pair: r.pair, pair_byte: r.byte, pair_back: r.back, pair_dist: r.dist }) }
+                    { e: st.e, init: Prefix({ sets, anchor: anchor.i, single: anchor.single, anchor_byte: anchor.b, anchor_tab: anchor.tab, state: st.id, land: True, pair: r.pair, pair_byte: r.byte, pair_back: r.back, pair_dist: r.dist, pair2: r.pair2, pair2_byte: r.byte2, pair2_back: r.back2, pair2_dist: r.dist2 }) }
                 }
             }
         }
@@ -443,7 +443,7 @@ Accel := [].{
                     } else {
                         {
                             r = Accel.run_of(t, sets, anchor.i)
-                            Potential({ sets, anchor: anchor.i, single: anchor.single, anchor_byte: anchor.b, anchor_tab: anchor.tab, state: rev_ts_state, land: False, pair: r.pair, pair_byte: r.byte, pair_back: r.back, pair_dist: r.dist })
+                            Potential({ sets, anchor: anchor.i, single: anchor.single, anchor_byte: anchor.b, anchor_tab: anchor.tab, state: rev_ts_state, land: False, pair: r.pair, pair_byte: r.byte, pair_back: r.back, pair_dist: r.dist, pair2: r.pair2, pair2_byte: r.byte2, pair2_back: r.back2, pair2_dist: r.dist2 })
                         }
                     }
             }
@@ -455,7 +455,13 @@ Accel := [].{
 
     ## A second byte the anchor's occurrence must be accompanied by, at a fixed
     ## distance: `pair` is False when there is none.
-    Run : { pair : Bool, byte : U8, back : Bool, dist : U64 }
+    Run : { pair : Bool, byte : U8, back : Bool, dist : U64, pair2 : Bool, byte2 : U8, back2 : Bool, dist2 : U64 }
+
+    ## `Bset.freq2` of the rarest anchor worth a third window compare: `b`, so
+    ## every letter from `b` up qualifies and the capitals, digits and
+    ## punctuation that make good anchors on their own do not.
+    pair2_min_freq : U64
+    pair2_min_freq = 24
 
     ## `\bthe\b` anchors on `h`, which occurs 13473 times on the bench haystack
     ## against 1216 matches, so nearly every hit is rejected and the sweep is
@@ -472,7 +478,7 @@ Accel := [].{
     run_of = |t, sets, anchor| {
         m = List.len(sets)
         ja = m - 1 - anchor
-        no_pair = { pair: False, byte: 0, back: False, dist: 0 }
+        no_pair = { pair: False, byte: 0, back: False, dist: 0, pair2: False, byte2: 0, back2: False, dist2: 0 }
         match Accel.byte_at(t, sets, m, ja) {
             Err(_) => no_pair
             Ok(_) => {
@@ -481,15 +487,37 @@ Accel := [].{
                 if hi == lo {
                     no_pair
                 } else {
-                    best = List.fold(Arena.upto(hi - lo + 1), { j: ja, rank: 255 }, |acc, i| {
-                        j = lo + i
-                        r = Rlit.rank(Accel.byte_at(t, sets, m, j) ?? 0)
-                        if j != ja and r < acc.rank { { j, rank: r } } else { acc }
-                    })
-                    { pair: True, byte: Accel.byte_at(t, sets, m, best.j) ?? 0, back: best.j < ja, dist: if best.j < ja { ja - best.j } else { best.j - ja } }
+                    best = Accel.rarest_other(t, sets, m, ja, lo, hi, ja)
+                    # a THIRD byte of the run, excluding the two already taken.
+                    # `\bthe\b` keeps 6043 of 13473 hits on `th` and 2394 on
+                    # `the`, and every hit that survives the window is a scan
+                    # restart at ~16 ns (design log).
+                    # only when the anchor is a COMMON byte. The third window
+                    # compare costs about a nanosecond a window whether or not
+                    # it filters, and only a common anchor leaves enough
+                    # restarts for it to pay: `h` (96) does, `H` and `@` (3 and
+                    # 1) do not, and forcing it on them cost `.*Holmes` 3-4%.
+                    ab = Accel.byte_at(t, sets, m, ja) ?? 0
+                    best2 = if Bset.freq2(ab) >= Accel.pair2_min_freq { Accel.rarest_other(t, sets, m, ja, lo, hi, best) } else { ja }
+                    { pair: True,
+                      byte: Accel.byte_at(t, sets, m, best) ?? 0, back: best < ja, dist: if best < ja { ja - best } else { best - ja },
+                      pair2: best2 != ja and best2 != best,
+                      byte2: Accel.byte_at(t, sets, m, best2) ?? 0, back2: best2 < ja, dist2: if best2 < ja { ja - best2 } else { best2 - ja } }
                 }
             }
         }
+    }
+
+    # the rarest index of the run in `lo..hi` that is neither the anchor `ja`
+    # nor `taken`; `ja` back when there is none
+    rarest_other : Trie.T, List(U64), U64, U64, U64, U64, U64 -> U64
+    rarest_other = |t, sets, m, ja, lo, hi, taken| {
+        best = List.fold(Arena.upto(hi - lo + 1), { j: ja, rank: 255 }, |acc, i| {
+            j = lo + i
+            r = Rlit.rank(Accel.byte_at(t, sets, m, j) ?? 0)
+            if j != ja and j != taken and r < acc.rank { { j, rank: r } } else { acc }
+        })
+        best.j
     }
 
     # the byte of forward index `j`, when its set is one ASCII codepoint
