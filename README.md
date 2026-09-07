@@ -6,7 +6,7 @@ There are two novelties: the engine is a pure function so Roc's constant folding
 compile the pattern at build time (including syntax checking) while other engines do
 the compilation at runtime. The other unsual feature is that this engine uses
 [RE#](https://github.com/ieviev/resharp) engine's matching algorithm which offers a
-slighly different feautre set:
+slighly different feature set:
 
 - **Leftmost-longest matches.** `a|ab` on `ab` matches `ab`. Perl, Rust and
   JavaScript would match `a`.
@@ -22,10 +22,10 @@ slighly different feautre set:
 
 The main reason is speed. This originally ported Rust's `regex` crate, which
 is still available in `./package-dfa` but the RE# approach turned out to be
-better on every metric (speed, startup, output size) outside of som adversarial
+better on every metric (speed, startup, output size) outside of some adversarial
 edge cases.
 
-This library is a LLM driven port of the `regex` crate and RE#. Credit for the
+This library is an LLM driven port of the `regex` crate and RE#. Credit for the
 clever parts go entirely to them. This is a purely deriviative implementation
 with no novel research.
 
@@ -389,12 +389,13 @@ but not included.
 
 ### Flags
 
-`(?i)` at the very start of the pattern, or `(?i:…)` around part of it, makes
-that part case-insensitive using Unicode simple case folding. Every other
-flag (`(?s)`, `(?m)`, `(?x)`, `(?U)`, `(?-i)`) and a `(?i)` anywhere but the
-start are errors, so a pattern cannot silently mean something else. `.`
-already excludes newline and `^`/`$` are already per line, so `s` and `m`
-have nothing to switch.
+The only flag supported is case-insensitivity: `(?i)` at the very start of
+the pattern flags the entire pattern while `(?i:…)` flags part of it. Matching
+is case-insensitive using Unicode simple case folding.
+
+Every other flag is an error. Multi-line matching is handled via `.`
+(single-line) vs `_` (multi-line) and `^`/`$` (line match) vs `\A`/`\Z`
+(pattern start/end). Unicode is always on.
 
 ### Matches
 
