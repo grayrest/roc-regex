@@ -2891,12 +2891,22 @@ scanning is the floor of doing it in two passes. What would move it is
 the non-ASCII stretches reintroduces the per-restart cost `Rrun` exists to
 avoid. Not started on the strength of one row.
 
-### An unexplained compiler observation
+### A compiler observation, withdrawn
 
-The one-line trim above -- deleting two arms of an `if` chain in
-`collect_plain` -- took `roc build` **58 minutes** against the 45-50 seconds
-every other build in this session took, and produced a correct binary. Seen
-once, not reduced, not filed: re-testing costs an hour and it was measurement
-scaffolding that is now reverted. The variant is kept at
-`/tmp/Dfa_trimmed_slowbuild.roc` for the session. Noted so that a future
-inexplicable build time has a precedent.
+I first recorded here that the one-line trim above -- deleting two arms of an
+`if` chain in `collect_plain` -- took `roc build` **58 minutes** against the
+45-50 seconds every other build in this session took, and flagged it as an
+unexplained pathology worth a precedent.
+
+**It is not one.** This machine is a laptop, `roc build` was running in the
+background, and the elapsed time a background command reports is wall clock,
+which includes the machine being suspended. 58 minutes of wall clock across a
+suspend is 45 seconds of compiling. Owner's diagnosis, and it is the obvious
+one; I should have reached for it before writing down a 70x compiler
+regression from removing two branches.
+
+Worth keeping only for what it says about method: every performance number in
+this log is a MINIMUM over repetitions, taken in process, and a suspend can
+only inflate a sample. That is why the benchmark rows are unaffected by the
+same hazard that made this observation meaningless -- the one measurement in
+the session that was a single elapsed reading is the one that was wrong.
