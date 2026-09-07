@@ -38,3 +38,6 @@ tools/route-diff/rust/Cargo.lock
 /skip_diff
 /accel_diff
 /readme
+
+# filed compiler reproducers, kept locally
+/upstream/
