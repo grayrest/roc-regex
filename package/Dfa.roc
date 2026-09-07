@@ -64,9 +64,23 @@ Dfa := [].{
         # `skip_sets` for the two conditions that earns.
         skip_ok : List(U8),
         skip_lo : List(U8),
-        # does any state skip? (the per-step skip check costs ~0.6 ns; off when useless)
-        any_skip : Bool,
+        # `ef_*` bits below: one byte rather than a Bool per question, because
+        # the record is threaded through every entry point and each field it
+        # gains has cost 1.1-1.3x on the short-haystack rows (design log).
+        eflags : U8,
     }
+
+    # `E.eflags`
+    # does any state skip? (the per-step skip check costs ~0.6 ns; off when useless)
+    ef_any_skip : U8
+    ef_any_skip = 1
+    # can the sweep only ever append positions in descending order? True when no
+    # state records at the PREVIOUS position (`nk_prev`) and none is pending: the
+    # loops walk right to left, so every other append is `pos` itself. Lets the
+    # scan skip `is_descending`, a full pass over a start list that is four
+    # fifths as long as the haystack on a dense class.
+    ef_starts_desc : U8
+    ef_starts_desc = 2
 
     dead : U32
     dead = 1
@@ -109,7 +123,7 @@ Dfa := [].{
             st_node: [0], st_flags: [0], st_nk: [Dfa.nk_notnull], st_pend: [0], st_minpend: [0],
             node_state: [], table: List.repeat(0.U32, a.nmt.to_u64()), end_table: List.repeat(0.U32, a.nmt.to_u64()),
             s_rev_ts: 0, s_noprefix: 0, s_anchored: 0, max_states, complete: True,
-            fold_states: 0, fold_marks: Arena.marks(a), runtime_cap: Dfa.default_runtime_cap, atable: [], skip_ok: [], skip_lo: [], any_skip: False,
+            fold_states: 0, fold_marks: Arena.marks(a), runtime_cap: Dfa.default_runtime_cap, atable: [], skip_ok: [], skip_lo: [], eflags: 0,
         }
         d = Dfa.get_state(e0, Arena.bot, False)
         r1 = Dfa.get_state(d.e, rev_ts, True)
@@ -144,8 +158,21 @@ Dfa := [].{
                 []
             }
         sk = if e.complete { Dfa.skip_sets(e, ascii, Dfa.nonascii_classes(t), n) } else { { ok: [], lo: [] } }
-        { ..e, fold_states: n, fold_marks: Arena.marks(e.a), atable, skip_ok: sk.ok, skip_lo: sk.lo, any_skip: List.any(sk.ok, |x| x != 0) }
+        ef =
+            (if List.any(sk.ok, |x| x != 0) { Dfa.ef_any_skip } else { 0 })
+            .bitwise_or(if Dfa.only_current_null(e) { Dfa.ef_starts_desc } else { 0 })
+        { ..e, fold_states: n, fold_marks: Arena.marks(e.a), atable, skip_ok: sk.ok, skip_lo: sk.lo, eflags: ef }
     }
+
+    # Does every state record its nullability AT the current position, with none
+    # pending? Those are the two appends that can go backwards: `nk_prev` records
+    # `pos + 1` symbol, and a pending state records whatever its lookaround
+    # resolved to. Without them the sweep, the prologue and `start_fast` all
+    # append `pos` or 0 while `pos` only decreases.
+    only_current_null : Dfa.E -> Bool
+    only_current_null = |e|
+        List.all(e.st_nk, |k| k == Dfa.nk_notnull or k == Dfa.nk_current)
+        and List.all(e.st_flags, |f| f.bitwise_and(Dfa.fl_pending) == 0)
 
     # The minterms holding at least one non-ASCII codepoint, plus `Invalid`.
     # Atom `a` covers `[cuts[a], cuts[a+1])`, so it reaches past ASCII exactly
@@ -653,16 +680,14 @@ Dfa := [].{
                     Dfa.find_all_literal(hay, lit, padded, mask)
                 }
             NoOverride => {
-                sk = skip and e.any_skip
-                raw = Dfa.starts_fast_opts(e, t, ac.init, hay, sk)
-                # RE#'s `llmatch_ends` walks its accumulator backwards, which is
-                # already ascending position order, instead of materializing a
-                # sorted copy. That copy cost 15-25% of the scan on a dense class,
-                # where the sweep records 5-9 starts for every match it keeps. The
-                # sort is still needed when lookarounds resolved out of order.
-                desc = Dfa.is_descending(raw)
-                sts = if desc { raw } else { List.sort_with(raw, |x, y| U64.order_relative_to(x, y)) }
-                Dfa.ends_fast(e, t, ac.len, hay, sts, sk, desc, first_only)
+                sk = skip and e.eflags.bitwise_and(Dfa.ef_any_skip) != 0
+                # `starts_fast_opts` guarantees descending, so `ends_fast` walks
+                # it backwards -- ascending position order -- in place. Deciding
+                # that HERE instead cost 4-7% on the two literal rows, which do
+                # not run this branch at all: one more live value in the
+                # procedure the whole scan inlines into (design log).
+                sts = Dfa.starts_fast_opts(e, t, ac.init, hay, sk)
+                Dfa.ends_fast(e, t, ac.len, hay, sts, sk, True, first_only)
             }
         }
 
@@ -1135,6 +1160,14 @@ Dfa := [].{
     starts_fast : Dfa.E, Trie.T, Dfa.Init, List(U8) -> List(U64)
     starts_fast = |e, t, ini, hay| Dfa.starts_fast_opts(e, t, ini, hay, True)
 
+    ## The match starts, ALWAYS in descending position order. RE#'s
+    ## `llmatch_ends` walks its accumulator backwards, which is ascending
+    ## position order, instead of materializing a sorted copy -- that copy cost
+    ## 15-25% of the scan on a dense class, where the sweep records 5-9 starts
+    ## for every match it keeps. The sweep emits descending by construction
+    ## unless a pending lookaround resolved out of order, and `ef_starts_desc`
+    ## says at fold time when that cannot happen; otherwise the order is
+    ## checked, and sorted on the rare failure.
     starts_fast_opts : Dfa.E, Trie.T, Dfa.Init, List(U8), Bool -> List(U64)
     starts_fast_opts = |e, t, ini, hay, skip| {
         n = List.len(hay)
@@ -1143,9 +1176,20 @@ Dfa := [].{
         } else {
             st = Dfa.sweep_prologue(e, t, hay)
             col = Dfa.collect_fast(e, t, ini, hay, st.pos, st.s, st.acc, skip)
-            Dfa.start_fast(e, col.s, col.acc, hay)
+            raw = Dfa.start_fast(e, col.s, col.acc, hay)
+            Dfa.order_starts(e.eflags.bitwise_and(Dfa.ef_starts_desc) != 0, raw)
         }
     }
+
+    # Its own function so the sort and its comparator stay out of the procedure
+    # the whole scan inlines into; it runs once per scan either way.
+    order_starts : Bool, List(U64) -> List(U64)
+    order_starts = |claimed, raw|
+        if claimed or Dfa.is_descending(raw) {
+            raw
+        } else {
+            List.sort_with(raw, |x, y| U64.order_relative_to(y, x))
+        }
 
     ## `HandleInputEnd`: the End-location first step, and whatever it records.
     ## Shared by the full sweep and the stop-at-first one; it runs once per scan,

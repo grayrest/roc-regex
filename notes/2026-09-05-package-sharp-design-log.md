@@ -2447,3 +2447,116 @@ the pass path. No pattern measured here would use it: a prefix accelerator
 implies a literal run, and `\bthe\b`'s skip set contains the word class, which
 is not ASCII-only. Adding it is three more perturbations of hot loops with no
 row to show for them.
+
+## `\w+\s+\w+`, and the ordering check nobody was paying attention to (2026-09-07)
+
+With `[0-9]{2,4}` fixed, `two_words` was the widest row at 1.41x. It has **no
+accelerators at all**: `\w` and `\s` are both too common for a skip set, there
+is no literal and no prefix, so `init = NoInit`, `any_skip = false`, and both
+passes are the bare DFA. The decomposition (min-of-40 in process, 256 KB):
+
+| | ns |
+|---|---|
+| reverse sweep | 935000 |
+| forward end pass | 1055000 |
+| `find_all` | 2123000 |
+
+and the sweep splits, by running the same loop shapes over an all-ASCII copy of
+the haystack of identical length:
+
+| | ns |
+|---|---|
+| the ASCII step alone | 491000 |
+| + the non-ASCII arm, never taken | +0 |
+| + the nullability read and its branch | +259000 |
+| the 4950 real non-ASCII symbols | +61000 |
+| the 210198 start appends | +155000 |
+
+The sweep records **210198 starts for 21091 matches** -- four fifths of every
+position in the haystack.
+
+### Three levers, measured and dropped
+
+- **Fusing the nullability read into `atable`** would take the 259000. Already
+  tried and recorded above ("do not re-propose transition-entry tagging");
+  not retried.
+- **Pre-sizing the start accumulator.** 210198 appends growing from `[]` cost
+  229000 ns in isolation; from `List.with_capacity(210198)` they cost
+  **390000**, and from a haystack-sized reserve 315000. Reserving is worse in
+  Roc, not better. Dropped.
+- **Compressing runs of consecutive starts.** Only the leftmost of a
+  consecutive run can survive `ends_fast`, which drops every start inside the
+  previous match. Compressing 210198 -> 45917 gives the same 21091 matches and
+  takes the end pass 1055000 -> 852000; done in the sweep it would also take
+  most of the 155000 of appends. About 15% of the row.
+  **It is unsound in general**, which is why it is not here: a start whose
+  forward scan finds no end does NOT advance `next_valid`, so dropping its
+  neighbour loses a match. Making it safe needs a gate saying the sweep is
+  exact, which the engine does not compute, and the change lands in
+  `collect_plain`, where every perturbation has cost ~4%.
+
+Which leaves the 133000 ns that is neither pass.
+
+### `is_descending` was 4% of the row and 6-12% of four others
+
+`find_all_fast_opts` called `Dfa.is_descending(raw)` on every search: a full
+pass over a start list four fifths as long as the haystack, to decide whether
+`ends_fast` may walk it backwards in place. **87000 ns on this row**, and the
+answer is a property of the automaton, not of the haystack. The sweep walks
+right to left and appends `pos`; the only appends that can go backwards are
+`nk_prev`, which records `pos` plus one symbol, and a pending state, which
+records whatever its lookaround resolved to. So `ef_starts_desc` is set at
+fold time when no state is either, and `starts_fast_opts` now GUARANTEES
+descending output -- checking, and sorting on the rare failure, inside itself
+instead of at the call site.
+
+`any_skip : Bool` became `eflags : U8` to carry the second answer without
+widening `Dfa.E`; a field added to that record has cost 1.1-1.3x before.
+
+A/B alternating, min-of-10 to 14, against the previous commit:
+
+| | restructure only | + the flag |
+|---|---|---|
+| `class_plus` | 0.987x | **0.916x** |
+| `uni_letters` | 0.984x | **0.924x** |
+| `two_words` | 0.967x | **0.923x** |
+| `dotstar_lit` | 0.909x | 0.922x |
+| `caps_email` | 0.991x | 0.948x |
+| `literal_dense` | 1.013x | **1.075x** |
+
+The first column is the same code with the flag forced off, so it isolates
+moving the decision out of the procedure the whole scan inlines into: that part
+is free. The flag itself buys another ~5% on the three dense rows and costs
+~6% on `literal_dense`, a row that takes the literal override and never runs
+this code -- the register-pressure lottery the hot-loop notes describe, once
+more. It is 1700 ns against 420000, so it ships; recorded rather than hidden
+because the row's ratio moves 1.02x -> 1.09x.
+
+### Standing after both changes
+
+| pattern | vs Rust meta before | after |
+|---|---|---|
+| `[A-Za-z]+` | 0.95x | **0.86x** |
+| `\p{L}+` | 1.05x | **0.96x** |
+| `(\w+)@(\w+)` | 1.04x | **0.98x** |
+| `.*Holmes` | 0.55x | **0.50x** |
+| `\w+\s+\w+` | 1.41x | **1.29x** |
+| `[0-9]{2,4}` | 1.75x | 1.20x |
+| `Holmes` | 1.02x | 1.09x |
+
+Five of ten rows are now at or below Rust's meta engine. `\w+\s+\w+` is still
+the widest at 1.29x, and what is left of it is the structural floor: 491000 of
+reverse stepping and ~820000 of forward scanning is two passes over the text,
+against Rust's 1545687 for the whole search.
+
+Gates: corpus 331/331, fuzz plain 18000 cases 0 divergences, fuzz seed 42 16
+divergences (pre-existing), node layer 57/57, skip differential 112/112, http
+60/60, router 174/174.
+
+**One caveat on the evidence.** A probe asserting `ef_starts_desc` implies a
+descending sweep passes 376/376 over 47 patterns rich in anchors, `\b` and
+lookarounds -- but it passes 376/376 with the gate REMOVED too, so it does not
+demonstrate that out-of-order output is reachable on this path at all. Every
+unbounded lookahead tried folds INCOMPLETE and goes to the threaded scan, which
+still checks order for itself. The real evidence is the corpus and the fuzz,
+which compare spans against the reference: a wrong order gives wrong spans.
