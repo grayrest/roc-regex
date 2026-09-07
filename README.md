@@ -565,4 +565,5 @@ so it can be formally part of the public interface.
 | [`upstream/`](upstream/) | reproducers for the Roc compiler bugs found along the way |
 | [PERFORMANCE.md](PERFORMANCE.md) | benchmark details, what limits engine performance |
 
-`package/README.md` has the fuzz, differential, size and benchmark commands.
+[PERFORMANCE.md](PERFORMANCE.md)'s last section lists the fuzz, differential,
+size and benchmark commands and what each one measures.

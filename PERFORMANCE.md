@@ -189,10 +189,11 @@ In order of how much of the remaining gap each accounts for.
 The reverse sweep followed by a forward pass is RE#'s algorithm and the source
 of leftmost-longest semantics, boolean operators and lookarounds in DFA states.
 On a pattern with a match every few bytes it records a start at most positions
-and then walks most of the text a second time. `\w+\s+\w+` is entirely this, and is now the only row that is.
-Nothing about per-byte codegen is wrong on those rows; on an all-ASCII copy of
-the haystack `[0-9]{2,4}` already beat Rust before any of this. What moved them
-was structural, and one of the three below has since landed:
+and then walks most of the text a second time. `\w+\s+\w+` is entirely this,
+and is now the only row that is. Nothing about per-byte codegen is wrong there:
+on an all-ASCII copy of the haystack `[0-9]{2,4}` already beat Rust before any
+of this. What moved these rows was structural, and one of the three below has
+since landed:
 
 - ~~**Compressing runs of consecutive starts**~~ — **this does not work, and
   the earlier entry here saying it "needs an exactness gate" was wrong.** The
@@ -345,8 +346,9 @@ tables from their element counts.
 
 **A complete fold costs no measurable build time.** A build of a folded
 pattern is ~8.5 s and ~1.0 GB of compiler RSS, and a build whose pattern is
-compiled at run time is no faster; that is the compiler compiling the package. The one exception is a pattern
-whose state space depends on the input, such as `a(?=.*b)`: exploring it
+compiled at run time is no faster; that is the compiler compiling the package.
+The one exception is a pattern whose state space depends on the input, such as
+`a(?=.*b)`: exploring it
 uncapped reached 13108 states at +10 s, +4.3 GB and +3.7 MB of binary, which
 is why the fold stops at 1024 states and the scan extends the table at run
 time past that.
