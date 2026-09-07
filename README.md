@@ -226,19 +226,20 @@ runs. Apple M1, Roc `release-fast-5f9a6e18`, 2026-09-07.
 
 | pattern | Roc ns | Rust ns | Roc / Rust | what it exercises |
 |---|---|---|---|---|
-| `Holmes` | 29150 | 27482 | 1.06x | literal search, dense hits |
-| `Moriarty` | 10350 | 9877 | 1.05x | literal search, rare hits |
-| `Sherlock\|Holmes\|Watson\|…` (8 names) | 485200 | 425295 | 1.14x | Teddy multi-literal scan |
-| `[A-Za-z]+` | 1652300 | 2215098 | 0.75x | one class repeated: no reverse automaton |
-| `[0-9]{2,4}` | 65350 | 109102 | 0.60x | the same, over a sparse class |
-| `\bthe\b` | 201800 | 205131 | 0.98x | prefix search plus word boundaries |
-| `\w+\s+\w+` | 2069450 | 1555875 | 1.33x | bare automaton, no accelerator |
-| `(\w+)@(\w+)` | 68250 | 68616 | 0.99x | prefix search on a rare byte |
-| `\p{L}+` | 2067000 | 2068241 | 1.00x | Unicode class, non-ASCII decoding |
-| `.*Holmes` | 310750 | 653763 | 0.48x | prefix search plus newline skipping |
+| `Holmes` | 28350 | 27027 | 1.05x | literal search, dense hits |
+| `Moriarty` | 10250 | 9969 | 1.03x | literal search, rare hits |
+| `Sherlock\|Holmes\|Watson\|…` (8 names) | 479750 | 425248 | 1.13x | Teddy multi-literal scan |
+| `[A-Za-z]+` | 1613400 | 2205824 | 0.73x | one class repeated: no reverse automaton |
+| `[0-9]{2,4}` | 64250 | 108872 | 0.59x | the same, over a sparse class |
+| `\bthe\b` | 209300 | 204994 | 1.02x | prefix search plus word boundaries |
+| `\w+\s+\w+` | 2055750 | 1544425 | 1.33x | bare automaton, no accelerator |
+| `(\w+)@(\w+)` | 67350 | 68611 | 0.98x | prefix search on a rare byte |
+| `\p{L}+` | 2007550 | 2061462 | 0.97x | Unicode class, non-ASCII decoding |
+| `.*Holmes` | 313550 | 644285 | 0.49x | prefix search plus newline skipping |
 
-This engine is generally in the same ballpark as Rust's. Six of ten rows are at
-or below Rust's engine, two more are within 6%, and the widest is 1.33x. Both
+This engine is generally in the same ballpark as Rust's. Five of ten rows are
+at or below Rust's engine, three more are within 5%, and the widest is 1.33x.
+`\bthe\b` sits at parity and reads either side of 1.00 between runs. Both
 engines are DFA with SIMD prefilters, and where the same accelerator fires on
 both sides the rows land within a few percent. Where this engine is behind, it
 is running its two passes over text that Rust covers in one. Where it is ahead,
@@ -263,7 +264,7 @@ before it; adjacent atoms match in sequence; `&` intersects; `|` alternates.
 So `ab|cd` is `(ab)|(cd)` and `a|b&c` is `a|(b&c)`. Parentheses group and do not
 capture.
 
-### One character
+### Atoms
 
 | syntax | matches |
 |---|---|
