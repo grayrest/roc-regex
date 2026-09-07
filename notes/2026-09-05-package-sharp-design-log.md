@@ -2661,3 +2661,75 @@ distinction is load-bearing -- read a clean 124/124, because that fallback is
 reachable only in the first and last 16-byte window and none of those haystacks
 puts a match there. Eight short haystacks with a match in both windows close
 it: 365/372 on that break, 310 and 301 on the other two.
+
+## `[0-9]{2,4}` revisited: no clean lever left (2026-09-07)
+
+Fourth row of the session, and the first with nothing to ship. It sits at
+1.18x after the ASCII-pass skip. Decomposed on the mixed haystack and on an
+all-ASCII copy of identical length (min-of-60 in process, two agreeing runs):
+
+| | mixed | all-ASCII |
+|---|---|---|
+| `find_all` | 110000 | 80000 |
+| the end pass alone | 13500 | 12000 |
+| the `Bset` kernel, one pass over the haystack | 21000 | 21000 |
+
+Counts: 4554 digits in 1691 runs, 9900 non-ASCII bytes in 842 runs, 2863
+starts (exactly `digits - runs`, which is the number of positions with two
+digits after them), 1455 matches.
+
+So the scan kernel is already 0.08 ns a byte -- memchr class -- and the row is
+made of what happens BETWEEN scans: 2533 re-entries, the byte walk over the
+non-ASCII runs, 4554 digit steps and 2863 appends.
+
+### Three things tried, none kept
+
+- **The SIMD pass scan, re-tested.** `Bset.rfind_ascii` in the non-ASCII arm
+  was rejected on 2026-09-07 (above) for taxing the heavy-sweep rows 3%.
+  Re-tested here because the enclosing procedure changed shape in between (the
+  ordering restructure took the sort decision out of it), which is the kind of
+  change that moves the register-pressure lottery. It did not: `bounded_num`
+  0.815x, but `class_plus` 1.035, `two_words` 1.041, `dotstar_lit` 1.072 and
+  `uni_letters` **1.076** -- worse than the first time. 24000 ns won here
+  against 316000 lost elsewhere. **Rejected twice; do not re-test again
+  without a reason more specific than "the code moved".**
+- **A four-wide scalar walk** over the non-ASCII runs: a byte is non-ASCII iff
+  its high bit is set, so the AND of four bytes is >= 0x80 iff all four are.
+  `bounded_num` 0.973x, worth 3400 ns; `caps_email` 1.030, `two_words` 1.014,
+  `uni_letters` 1.014. Rejected on the same arithmetic.
+- **Hoisting the scan's vectors, and inlining the scan entirely.** Both
+  measured, neither worth wiring: over 14454 re-entries, building the two
+  `U8x16`s once instead of per call saves 0.6 ns a call, and removing the call
+  altogether saves 1.6 ns.
+
+### Why the re-entries cost what they do
+
+That last measurement is the useful one. A restart is not expensive because it
+is a call. The one-pass kernel is 1.3 ns a window; the same kernel re-entered
+per hit is ~11 ns a window, and the difference survives hoisting the vectors
+and inlining the body. It is a loop-carried dependency: the next window's
+address is the previous hit's position, which comes out of a `clz` of a mask
+that comes out of a load. One pass has none of that and the machine runs eight
+windows ahead of itself.
+
+That is the same 16 ns a restart measured on `\bthe\b` (above), and it is why
+the fix there was to leave the scan fewer times rather than to make leaving it
+cheaper. Here there is no filter to add: every digit run is a genuine state
+change, and every non-ASCII run is one the skip cannot pass without the kernel
+that does not convert.
+
+### Where that leaves it
+
+| | ns |
+|---|---|
+| the scan, at its floor | 21000 |
+| 2533 re-entries | ~40000 |
+| the non-ASCII byte walk | ~15000 |
+| the end pass | ~13500 |
+| digit steps and appends | ~5000 |
+
+against Rust's 107768 for the whole search. What would actually move it is
+structural: the sweep steps through each digit run to find where a match can
+start, and for a pattern like this the run's extent determines those positions
+outright -- a length lookup in reverse, the mirror of `Dfa.Len`. That is a
+feature, not a tuning, and it is not being started on the strength of one row.
