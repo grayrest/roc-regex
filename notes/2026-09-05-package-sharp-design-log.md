@@ -2417,10 +2417,28 @@ longer the row where `Regex` wins.
 Gates: corpus 331/331, fuzz plain 1500 patterns / 18000 cases 0 divergences,
 fuzz seed 42 full 16 divergences (the pre-existing `$`-before-nullable family,
 unchanged), node layer 57/57, `examples/http.roc` 60/60, router differential
-174/174. Plus a differential written for this change: `find_all` against
-`find_all_noskip` -- same automaton, skips off -- for 18 patterns over four
-256 KB haystacks (mixed, lone continuation bytes at every 997th position,
-`0xFF` at every 997th position, all-ASCII), 72/72 identical.
+174/174. Plus a differential written for this change and landed as
+`tools/skip-diff`: `find_all` against `find_all_noskip` -- same automaton,
+skips off -- over four 256 KB haystacks (mixed, lone continuation bytes at
+every 997th position, `0xFF` at every 997th position, all-ASCII).
+
+**The first version of it could not fail.** 18 patterns, 72/72, and removing
+EITHER soundness condition from `skip_sets` still gave 72/72. Two holes: the
+patterns spelled their non-ASCII with `é`, which this haystack does not
+contain (it is Greek), and none of them had a nullable skip state, so that
+condition never flipped a flag. Fixed by adding leaving sets over codepoints
+the haystack really holds (`[0-9λ]`, `μ[a-z]`, `[.,;:ω]`) and a nullable one
+(`[0-9]{0,3}`). At 28 patterns / 112 cases the correct build passes and each
+condition removed is caught:
+
+| condition removed | result |
+|---|---|
+| no non-ASCII minterm leaves the state | 103/112 -- `[0-9λ]`, `[.,;:ω]`, `[0-9ε]+` |
+| the state is not nullable | 109/112 -- `[0-9]{0,3}`, ~4100 empty matches lost |
+
+The second row is also the evidence that the nullability condition is
+necessary rather than defensive: without it a passed-over Greek run swallows
+every interior symbol boundary a nullable state should have recorded.
 
 ### Not done
 
