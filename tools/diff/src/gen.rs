@@ -30,7 +30,7 @@ fn main() {
     println!("\tre: \"/Users/grayrest/dev/roc/regex/package-dfa/main.roc\",");
     println!("}}");
     println!("import pf.Stdout");
-    println!("import re.Regex\n");
+    println!("import re.Dfa\n");
     println!("cases : List({{ pat : Str, hay : Str, want : Str }})");
     println!("cases = [");
     for p in pats {
@@ -109,30 +109,30 @@ fn roc_str(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"").replace('\t', "\\t").replace('\n', "\\n")
 }
 
-const RUNNER: &str = r#"spans_str : Regex.T, Str -> Str
+const RUNNER: &str = r#"spans_str : Dfa.T, Str -> Str
 spans_str = |re, hay|
-	Regex.find_all(re, Str.to_utf8(hay))
+	Dfa.find_all(re, Str.to_utf8(hay))
 	|> List.map(|s| "${s.start.to_str()}-${s.end.to_str()}")
 	|> Str.join_with(",")
 
 # `find` and `is_match` share `find_all`'s plan, so they are checked against the
 # same oracle: the first match must be find_all's first span, and is_match must
 # agree with whether there is one.
-first_str : Regex.T, Str -> Str
+first_str : Dfa.T, Str -> Str
 first_str = |re, hay|
-	match Regex.find(re, Str.to_utf8(hay)) {
+	match Dfa.find(re, Str.to_utf8(hay)) {
 		Ok(s) => "${s.start.to_str()}-${s.end.to_str()}"
 		Err(_) => ""
 	}
 
 main! = |_a| {
 	results = List.map(cases, |c| {
-		got = match Regex.compile(c.pat) {
+		got = match Dfa.compile(c.pat) {
 			Ok(re) => {
 				all = spans_str(re, c.hay)
 				want_first = List.first(Str.split_on(c.want, ",")) ?? ""
 				first = first_str(re, c.hay)
-				im = Regex.is_match(re, Str.to_utf8(c.hay))
+				im = Dfa.is_match(re, Str.to_utf8(c.hay))
 				if first != want_first {
 					"find=${first} want=${want_first}"
 				} else if im != (c.want != "") {

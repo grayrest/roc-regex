@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fold-cost and artifact probe for `package` (plan S14 unknowns 2–4).
 #
-# For each pattern: build a minimal app whose `rx = Sharp.compile("<lit>")` is
+# For each pattern: build a minimal app whose `rx = Regex.compile("<lit>")` is
 # a TOP-LEVEL constant (so it folds), under /usr/bin/time -l (wall, max RSS);
 # record the binary size; then run it on a haystack file and print the fold's
 # state count, whether exploration completed, the match count, and the mean
@@ -45,15 +45,15 @@ import pf.Stdout
 import pf.Path
 import pf.OsStr
 import pf.Utc
-import re.Sharp
+import re.Regex
 
-rx : Sharp.T
-rx = Sharp.unwrap(Sharp.compile("$1"))
+rx : Regex.Pattern
+rx = Regex.build("$1")
 
 iters : U64
 iters = 20
 
-checksum : List(Sharp.Span) -> U64
+checksum : List(Regex.Span) -> U64
 checksum = |spans| List.fold(spans, 0, |acc, sp| acc + sp.start + sp.end)
 
 # min over iterations of one find_all, in ns (noise only inflates a run)
@@ -61,7 +61,7 @@ time_min! : List(U8), U64, U128, U64 => (U128, U64)
 time_min! = |hay, n, best, cs|
 	if n == 0 { (best, cs) } else {
 		t0 = Utc.now!()
-		c = checksum(Sharp.find_all(rx, hay))
+		c = checksum(Regex.find_all(rx, hay))
 		t1 = Utc.now!()
 		d = if t1 > t0 { t1 - t0 } else { 0 }
 		time_min!(hay, n - 1, if d < best { d } else { best }, cs + c)
@@ -78,8 +78,8 @@ last_arg = |args| {
 main! = |args| {
 	hay = match last_arg(args) { Ok(a) => Path.read_bytes!(Path.from_os_str(a))? Err(_) => [] }
 	(per, cs) = time_min!(hay, iters, 0xFFFF_FFFF_FFFF_FFFF, 0)
-	n = List.len(Sharp.find_all(rx, hay))
-	Stdout.line!("states=\${Sharp.n_states(rx).to_str()} complete=\${if Sharp.is_complete(rx) { "yes" } else { "no" }} nodes=\${Sharp.n_nodes(rx).to_str()} matches=\${n.to_str()} ns_per_find_all=\${per.to_str()} cs=\${cs.to_str()}")
+	n = List.len(Regex.find_all(rx, hay))
+	Stdout.line!("states=\${Regex.n_states(rx).to_str()} complete=\${if Regex.is_complete(rx) { "yes" } else { "no" }} nodes=\${Regex.n_nodes(rx).to_str()} matches=\${n.to_str()} ns_per_find_all=\${per.to_str()} cs=\${cs.to_str()}")
 }
 APP
 }

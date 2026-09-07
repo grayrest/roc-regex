@@ -3,7 +3,7 @@ app [main!] {
 	re: "../package-dfa/main.roc",
 }
 import pf.Stdout
-import re.Regex
+import re.Dfa
 
 Case : { pat : Str, hay : Str, want : Str }
 
@@ -34,16 +34,16 @@ cases = [
 
 run_one : Case -> { ok : Bool, got : Str }
 run_one = |c| {
-	re = Regex.unwrap(Regex.compile(c.pat))
+	re = Dfa.unwrap(Dfa.compile(c.pat))
 	got =
-		match Regex.find_str(re, c.hay) {
+		match Dfa.find_str(re, c.hay) {
 			Ok(s) => "${s.start.to_str()}-${s.end.to_str()}"
 			Err(_) => "none"
 		}
 	{ ok: got == c.want, got }
 }
 
-# `find` walks a GROWING PREFIX of the haystack (Regex.find_chunked), so a
+# `find` walks a GROWING PREFIX of the haystack (Dfa.find_chunked), so a
 # needle past the first few rounds exercises a path the short cases above never
 # reach. Each check asserts the three entry points agree: `find` must return
 # `find_all`'s first span, and `is_match` must agree that there is one.
@@ -58,11 +58,11 @@ long_hay = {
 
 run_long : Str -> { ok : Bool, got : Str }
 run_long = |src| {
-	re = Regex.unwrap(Regex.compile(src))
+	re = Dfa.unwrap(Dfa.compile(src))
 	span_str = |r| match r { Ok(sp) => "${sp.start.to_str()}-${sp.end.to_str()}", Err(_) => "none" }
-	want = span_str(List.first(Regex.find_all(re, long_hay)))
-	got = span_str(Regex.find(re, long_hay))
-	im = Regex.is_match(re, long_hay)
+	want = span_str(List.first(Dfa.find_all(re, long_hay)))
+	got = span_str(Dfa.find(re, long_hay))
+	im = Dfa.is_match(re, long_hay)
 	{ ok: got == want and im == (want != "none"), got: "${got} (find_all ${want})" }
 }
 

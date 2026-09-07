@@ -11,7 +11,7 @@ tools/bench/run.sh [haystack_bytes]     # default 262144
 - `src/bench.rs` — Rust side: times `Regex::new` (compile) separately from a
   `find_iter` loop (match), prints `id,compile_ns,match_ns_per_iter,count,checksum`.
 - `examples/bench.roc` — Roc side (`Regex`), same patterns and output shape.
-- `examples/bench_sharp.roc` — the same for `package` (`Sharp`), ids prefixed `sharp_`;
+- `examples/bench_sharp.roc` — the same for `package` (`Regex`), ids prefixed `sharp_`;
   `run.sh` pairs the rows and checks both engines' match counts against Rust.
 
 The pattern list is duplicated between `src/bench.rs`, `examples/bench.roc` and `examples/bench_sharp.roc`

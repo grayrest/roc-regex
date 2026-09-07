@@ -1,5 +1,13 @@
 # package-sharp — design log
 
+**Names.** This log calls the engine `Sharp` and its directory `package-sharp`
+throughout, which is what they were called while it was written. On 2026-09-07
+`package-sharp/` became `package/`, the `Sharp` module became `Regex`, the
+Rust-`regex` port's `Regex` module became `Dfa`, `Sharp.T` became
+`Regex.Pattern`, `unwrap`/`unwrap_labeled` became `report_errs`/`labeled_errs`,
+and `Regex.build(src)` was added for the literal idiom. The log is left in the
+old names rather than rewritten: it is a record of when things were measured.
+
 **Date:** 2026-09-05
 **Branch:** `claude/resharp-regex-design-review-60cff0`
 **Scope:** a second Roc regex engine porting RE# (`~/Repositories/resharp-dotnet`) —

@@ -24,11 +24,11 @@ import Trie
 import TSet
 import Utf8
 
-Sharp := [].{
+Regex := [].{
     ## The compiled pattern. `root` is the raw pattern node, `rev` its reversal,
     ## `rev_ts` `_*·rev` (the reverse search start), `noprefix` the pattern with
     ## its lookbehind prefix stripped (the forward end pass). Documented-unstable.
-    T : { a : Arena.A, trie : Trie.T, root : U32, rev : U32, rev_ts : U32, ts : U32, noprefix : U32, e : Dfa.E, accel : Accel.T, lits : Sharp.Lits }
+    Pattern : { a : Arena.A, trie : Trie.T, root : U32, rev : U32, rev_ts : U32, ts : U32, noprefix : U32, e : Dfa.E, accel : Accel.T, lits : Regex.Lits }
 
     ## The literal-alternation accelerator, with its Teddy tables ALREADY BUILT.
     ## They used to be built inside `lit_set_spans`, which is to say once per
@@ -45,7 +45,7 @@ Sharp := [].{
     max_states : U32 -> U64
     max_states = |nmt| {
         by_bytes = 262144 // (nmt.to_u64() * 4)
-        if by_bytes < Sharp.fold_state_cap { by_bytes } else { Sharp.fold_state_cap }
+        if by_bytes < Regex.fold_state_cap { by_bytes } else { Regex.fold_state_cap }
     }
 
     fold_state_cap : U64
@@ -54,11 +54,11 @@ Sharp := [].{
     ## A match, as half-open byte offsets into the haystack.
     Span : { start : U64, end : U64 }
 
-    compile : Str -> Try(Sharp.T, Err.Error)
+    compile : Str -> Try(Regex.Pattern, Err.Error)
     compile = |src|
         match Ast.parse(src) {
             Err(e) => Err(e)
-            Ok(ast) => Sharp.compile_ast(src, ast)
+            Ok(ast) => Regex.compile_ast(src, ast)
         }
 
     nl_set : Ast.Set
@@ -68,20 +68,20 @@ Sharp := [].{
     s_set : Ast.Set
     s_set = { neg: False, ranges: Ast.ranges_s }
 
-    compile_ast : Str, Ast -> Try(Sharp.T, Err.Error)
+    compile_ast : Str, Ast -> Try(Regex.Pattern, Err.Error)
     compile_ast = |src, ast| {
         has_wb = Ast.has_wordb(ast)
         has_line = Ast.has_line_anchor(ast)
         sets0 = Ast.collect_sets(ast, [])
-        sets1 = if has_wb { Ast.add_set(Ast.add_set(sets0, Sharp.w_set), Sharp.s_set) } else { sets0 }
-        sets = if has_line { Ast.add_set(sets1, Sharp.nl_set) } else { sets1 }
+        sets1 = if has_wb { Ast.add_set(Ast.add_set(sets0, Regex.w_set), Regex.s_set) } else { sets0 }
+        sets = if has_line { Ast.add_set(sets1, Regex.nl_set) } else { sets1 }
         match Trie.build(Ast.flat_sets(sets)) {
             Err(TooManyClasses(n)) => Err(Err.whole(src, TooManyClasses({ limit: 63, given: n })))
             Ok(trie) => {
                 ctx = { sets, tsets: trie.set_tsets, wordc: 0, spacec: 0 }
-                wordc = if has_wb { Conv.tset_of(ctx, Sharp.w_set) } else { 0 }
-                spacec = if has_wb { Conv.tset_of(ctx, Sharp.s_set) } else { 0 }
-                nl = if has_line { Conv.tset_of(ctx, Sharp.nl_set) } else { 0 }
+                wordc = if has_wb { Conv.tset_of(ctx, Regex.w_set) } else { 0 }
+                spacec = if has_wb { Conv.tset_of(ctx, Regex.s_set) } else { 0 }
+                nl = if has_line { Conv.tset_of(ctx, Regex.nl_set) } else { 0 }
                 a0 = Arena.init(trie.n_classes)
                 a1 = Build.init_anchors(a0, wordc, TSet.compl(wordc, a0.nmt), nl)
                 root = Conv.convert(a1, { ..ctx, wordc, spacec }, ast)
@@ -96,7 +96,7 @@ Sharp := [].{
                             Unsup(msg) => Err(Err.whole(src, Unsupported(msg)))
                             NoErr => {
                                 ais = Deriv.at_input_start(np.a, root.id)
-                                e0 = Dfa.init(ais.a, rts.id, np.id, ais.id, Sharp.max_states(trie.n_classes))
+                                e0 = Dfa.init(ais.a, rts.id, np.id, ais.id, Regex.max_states(trie.n_classes))
                                 ac = Accel.analyze(e0, trie, root.id, rv.id, rts.id, np.id)
                                 e = Dfa.freeze(Dfa.explore(ac.e), trie)
                                 lits =
@@ -121,17 +121,22 @@ Sharp := [].{
         }
     }
 
-    ## The literal-pattern idiom: fold, and crash-with-message on a bad literal
-    ## so the build fails.
-    unwrap : Try(Sharp.T, Err.Error) -> Sharp.T
-    unwrap = |r|
+    ## The literal-pattern idiom: `Regex.build("…")` folds the pattern at build
+    ## time and fails the BUILD with the rendered message when the literal is
+    ## bad. `report_errs` is the same thing over an already-compiled `Try`, for
+    ## a caller that wants `compile` and the crash separately.
+    build : Str -> Regex.Pattern
+    build = |src| Regex.report_errs(Regex.compile(src))
+
+    report_errs : Try(Regex.Pattern, Err.Error) -> Regex.Pattern
+    report_errs = |r|
         match r {
             Ok(re) => re
             Err(e) => crash Err.render(e)
         }
 
-    unwrap_labeled : Str, Try(Sharp.T, Err.Error) -> Sharp.T
-    unwrap_labeled = |label, r|
+    labeled_errs : Str, Try(Regex.Pattern, Err.Error) -> Regex.Pattern
+    labeled_errs = |label, r|
         match r {
             Ok(re) => re
             Err(e) => crash "[${label}] ${Err.render(e)}"
@@ -147,7 +152,7 @@ Sharp := [].{
     ## Dispatched here rather than inside `Dfa.find_all_fast_opts`: putting
     ## another arm in that function cost 3-25% on every pattern, the target row
     ## included, so the hot scan does not learn about this at all.
-    lit_set_spans : Sharp.Lits, List(U8) -> Try(List(Sharp.Span), [NoSet])
+    lit_set_spans : Regex.Lits, List(U8) -> Try(List(Regex.Span), [NoSet])
     lit_set_spans = |lits, hay|
         match lits {
             NoLits => Err(NoSet)
@@ -163,9 +168,9 @@ Sharp := [].{
                 }
         }
 
-    find_all : Sharp.T, List(U8) -> List(Sharp.Span)
+    find_all : Regex.Pattern, List(U8) -> List(Regex.Span)
     find_all = |re, hay|
-        match Sharp.lit_set_spans(re.lits, hay) {
+        match Regex.lit_set_spans(re.lits, hay) {
             Ok(sp) => sp
             Err(_) =>
                 if re.e.complete {
@@ -179,18 +184,18 @@ Sharp := [].{
         }
 
     ## `find_all` on the fast scan with every accelerator off (A/B measurement)
-    find_all_plain : Sharp.T, List(U8) -> List(Sharp.Span)
+    find_all_plain : Regex.Pattern, List(U8) -> List(Regex.Span)
     find_all_plain = |re, hay|
-        if re.e.complete { Dfa.find_all_fast_opts(re.e, re.trie, Accel.none, hay, False, False) } else { Sharp.find_all_threaded(re, hay) }
+        if re.e.complete { Dfa.find_all_fast_opts(re.e, re.trie, Accel.none, hay, False, False) } else { Regex.find_all_threaded(re, hay) }
 
     ## `find_all` with the compile-time accelerators but no per-state skips
-    find_all_noskip : Sharp.T, List(U8) -> List(Sharp.Span)
+    find_all_noskip : Regex.Pattern, List(U8) -> List(Regex.Span)
     find_all_noskip = |re, hay|
-        if re.e.complete { Dfa.find_all_fast_opts(re.e, re.trie, re.accel, hay, False, False) } else { Sharp.find_all_threaded(re, hay) }
+        if re.e.complete { Dfa.find_all_fast_opts(re.e, re.trie, re.accel, hay, False, False) } else { Regex.find_all_threaded(re, hay) }
 
     ## `find_all` on the threaded (extensible) scan regardless of completeness —
     ## the corpus cross-checks it against the fast path
-    find_all_threaded : Sharp.T, List(U8) -> List(Sharp.Span)
+    find_all_threaded : Regex.Pattern, List(U8) -> List(Regex.Span)
     find_all_threaded = |re, hay| {
         h = Ref.prepare(re.trie, hay)
         r = Dfa.find_all(re.e, h)
@@ -200,7 +205,7 @@ Sharp := [].{
     ## `find_all`, also returning the regex with every state the scan minted
     ## (S5): a caller looping over haystacks threads it so an incomplete fold
     ## is not re-derived per call.
-    find_all_grow : Sharp.T, List(U8) -> (Sharp.T, List(Sharp.Span))
+    find_all_grow : Regex.Pattern, List(U8) -> (Regex.Pattern, List(Regex.Span))
     find_all_grow = |re, hay| {
         h = Ref.prepare(re.trie, hay)
         r = Dfa.find_all(re.e, h)
@@ -210,16 +215,16 @@ Sharp := [].{
     ## The runtime state cap (RE#'s `MaxDfaCapacity`, default 100k): past it a
     ## scan evicts back to the folded prefix and continues (S4). Exposed so the
     ## corpus can force eviction.
-    with_runtime_cap : Sharp.T, U64 -> Sharp.T
+    with_runtime_cap : Regex.Pattern, U64 -> Regex.Pattern
     with_runtime_cap = |re, cap| { ..re, e: { ..re.e, runtime_cap: cap } }
 
     ## The same, on the brute-force reference (S2.2) — the differential's oracle.
-    find_all_ref : Sharp.T, List(U8) -> List(Sharp.Span)
+    find_all_ref : Regex.Pattern, List(U8) -> List(Regex.Span)
     find_all_ref = |re, hay| Ref.find_all(re.a, re.trie, re.root, hay)
 
     ## The reverse sweep's match-start positions as byte offsets, in the order
     ## recorded (RE#'s `nullable_positions` tests).
-    match_starts : Sharp.T, List(U8) -> List(U64)
+    match_starts : Regex.Pattern, List(U8) -> List(U64)
     match_starts = |re, hay| {
         h = Ref.prepare(re.trie, hay)
         r = Dfa.starts(re.e, h)
@@ -227,7 +232,7 @@ Sharp := [].{
     }
 
     ## the accelerators chosen for this pattern, for tests
-    accel_str : Sharp.T -> Str
+    accel_str : Regex.Pattern -> Str
     accel_str = |re| {
         anchor_of = |p| if p.single { Str.from_utf8_lossy([p.anchor_byte]) } else { "set" }
         init =
@@ -258,23 +263,23 @@ Sharp := [].{
     }
 
     ## the fast reverse sweep alone (profiling): match starts, accelerated or not
-    match_starts_fast : Sharp.T, List(U8), Bool -> List(U64)
+    match_starts_fast : Regex.Pattern, List(U8), Bool -> List(U64)
     match_starts_fast = |re, hay, accel|
         if accel { Dfa.starts_fast(re.e, re.trie, re.accel.init, hay) } else { Dfa.starts_fast_opts(re.e, re.trie, NoInit, hay, False) }
 
     ## the reverse sweep with the prefix accelerator but no per-state skips
-    match_starts_noskip : Sharp.T, List(U8) -> List(U64)
+    match_starts_noskip : Regex.Pattern, List(U8) -> List(U64)
     match_starts_noskip = |re, hay| Dfa.starts_fast_opts(re.e, re.trie, re.accel.init, hay, False)
 
     ## how many states of a complete fold carry a skip set (S13 diagnostics)
-    n_skip_states : Sharp.T -> U64
+    n_skip_states : Regex.Pattern -> U64
     n_skip_states = |re| List.count_if(re.e.skip_ok, |x| x != 0)
 
     ## Did the fold explore every reachable state?
-    is_complete : Sharp.T -> Bool
+    is_complete : Regex.Pattern -> Bool
     is_complete = |re| re.e.complete
 
-    n_states : Sharp.T -> U64
+    n_states : Regex.Pattern -> U64
     n_states = |re| Dfa.n_states(re.e)
 
     ## The first match. Documented as a full sweep: the reverse pass has to reach
@@ -282,9 +287,9 @@ Sharp := [].{
     ## The leftmost match, as a list of zero or one. `find` and `is_match` share
     ## it so that neither computes every match to answer about one: on a dense
     ## class that was 40056 spans for a question about the first.
-    find_first : Sharp.T, List(U8) -> List(Sharp.Span)
+    find_first : Regex.Pattern, List(U8) -> List(Regex.Span)
     find_first = |re, hay|
-        match Sharp.find(re, hay) {
+        match Regex.find(re, hay) {
             Ok(s) => [s]
             Err(_) => []
         }
@@ -301,19 +306,19 @@ Sharp := [].{
     ## the SIMD kernel itself is 22 ns and getting to it cost about 750. Same
     ## rule as `Regex.verify_candidates`: dispatch once, outside, and hand the
     ## loop only what it reads.
-    find : Sharp.T, List(U8) -> Try(Sharp.Span, [NoMatch])
+    find : Regex.Pattern, List(U8) -> Try(Regex.Span, [NoMatch])
     find = |re, hay|
         match re.accel.override {
             Literal(lit, padded, mask) => Dfa.first_literal(hay, lit, padded, mask)
             NoOverride =>
-                match Sharp.lit_set_spans(re.lits, hay) {
+                match Regex.lit_set_spans(re.lits, hay) {
                     Ok(sp) =>
                         match List.first(sp) {
                             Ok(s) => Ok(s)
                             Err(_) => Err(NoMatch)
                         }
                     Err(_) => {
-                        r = if re.e.complete { Dfa.find_first_fast(re.e, re.trie, re.accel, hay) } else { Sharp.find_all_threaded(re, hay) }
+                        r = if re.e.complete { Dfa.find_first_fast(re.e, re.trie, re.accel, hay) } else { Regex.find_all_threaded(re, hay) }
                         match List.first(r) {
                             Ok(s) => Ok(s)
                             Err(_) => Err(NoMatch)
@@ -328,7 +333,7 @@ Sharp := [].{
     ## the forward pass, and a candidate that yields no end falls back to the
     ## full scan, so the answer does not depend on assuming that a recorded
     ## start always has one.
-    is_match : Sharp.T, List(U8) -> Bool
+    is_match : Regex.Pattern, List(U8) -> Bool
     is_match = |re, hay|
         if re.e.complete {
             match re.accel.override {
@@ -344,22 +349,22 @@ Sharp := [].{
                         if List.len(Dfa.ends_fast(re.e, re.trie, re.accel.len, hay, asc, True, False, True)) > 0 {
                             True
                         } else {
-                            List.len(Sharp.find_first(re, hay)) > 0
+                            List.len(Regex.find_first(re, hay)) > 0
                         }
                     }
                 }
             }
         } else {
-            List.len(Sharp.find_first(re, hay)) > 0
+            List.len(Regex.find_first(re, hay)) > 0
         }
 
-    count : Sharp.T, List(U8) -> U64
-    count = |re, hay| List.len(Sharp.find_all(re, hay))
+    count : Regex.Pattern, List(U8) -> U64
+    count = |re, hay| List.len(Regex.find_all(re, hay))
 
     ## The oracle for the two above: every end of a match anchored at offset 0,
     ## from the structural reference. Ascending, so its first and last are what
     ## `first_end` and `longest_end` must return.
-    ends_at_start_ref : Sharp.T, List(U8) -> List(U64)
+    ends_at_start_ref : Regex.Pattern, List(U8) -> List(U64)
     ends_at_start_ref = |re, hay| Ref.ends_at_start(re.a, re.trie, re.root, hay)
 
     ## The end of the SHORTEST match anchored at offset 0, if any.
@@ -372,7 +377,7 @@ Sharp := [].{
     ## A nullable pattern legitimately answers `Ok(0)`; a caller stepping a
     ## sequence must check that it made progress. `end == List.len(hay)` says
     ## the match ran to the edge of the slice and might extend given more input.
-    first_end : Sharp.T, List(U8) -> Try(U64, [NoMatch])
+    first_end : Regex.Pattern, List(U8) -> Try(U64, [NoMatch])
     first_end = |re, hay|
         if re.e.complete {
             match (Dfa.ends_at_start_fast(re.e, re.trie, hay)).first {
@@ -388,7 +393,7 @@ Sharp := [].{
 
     ## The end of the LONGEST match anchored at offset 0, if any. See
     ## `first_end` for the slice semantics.
-    longest_end : Sharp.T, List(U8) -> Try(U64, [NoMatch])
+    longest_end : Regex.Pattern, List(U8) -> Try(U64, [NoMatch])
     longest_end = |re, hay|
         if re.e.complete {
             match (Dfa.ends_at_start_fast(re.e, re.trie, hay)).last {
@@ -404,13 +409,13 @@ Sharp := [].{
 
     ## Replace every match. `rep` may contain `$0` (the match) and `$$` (`$`);
     ## RE# has no groups, so there is nothing else to reference.
-    replace_all : Sharp.T, List(U8), List(U8) -> List(U8)
+    replace_all : Regex.Pattern, List(U8), List(U8) -> List(U8)
     replace_all = |re, hay, rep| {
-        spans = Sharp.find_all(re, hay)
+        spans = Regex.find_all(re, hay)
         r = List.fold(spans, { out: [], last: 0 }, |st, sp| {
             before = List.sublist(hay, { start: st.last, len: sp.start - st.last })
             matched = List.sublist(hay, { start: sp.start, len: sp.end - sp.start })
-            { out: List.concat(List.concat(st.out, before), Sharp.expand(rep, matched, 0, [])), last: sp.end }
+            { out: List.concat(List.concat(st.out, before), Regex.expand(rep, matched, 0, [])), last: sp.end }
         })
         List.concat(r.out, List.sublist(hay, { start: r.last, len: List.len(hay) - r.last }))
     }
@@ -421,18 +426,18 @@ Sharp := [].{
             Err(_) => out
             Ok('$') =>
                 match List.get(rep, i + 1) {
-                    Ok('$') => Sharp.expand(rep, matched, i + 2, List.append(out, '$'))
-                    Ok('0') => Sharp.expand(rep, matched, i + 2, List.concat(out, matched))
-                    _ => Sharp.expand(rep, matched, i + 1, List.append(out, '$'))
+                    Ok('$') => Regex.expand(rep, matched, i + 2, List.append(out, '$'))
+                    Ok('0') => Regex.expand(rep, matched, i + 2, List.concat(out, matched))
+                    _ => Regex.expand(rep, matched, i + 1, List.append(out, '$'))
                 }
-            Ok(b) => Sharp.expand(rep, matched, i + 1, List.append(out, b))
+            Ok(b) => Regex.expand(rep, matched, i + 1, List.append(out, b))
         }
 
     ## Split around matches: leading/trailing empty fields kept, one more field
     ## than matches.
-    split : Sharp.T, List(U8) -> List(List(U8))
+    split : Regex.Pattern, List(U8) -> List(List(U8))
     split = |re, hay| {
-        spans = Sharp.find_all(re, hay)
+        spans = Regex.find_all(re, hay)
         r = List.fold(spans, { fields: [], last: 0 }, |st, sp|
             { fields: List.append(st.fields, List.sublist(hay, { start: st.last, len: sp.start - st.last })), last: sp.end })
         List.append(r.fields, List.sublist(hay, { start: r.last, len: List.len(hay) - r.last }))
@@ -440,23 +445,23 @@ Sharp := [].{
 
     # --- Str conveniences (copy in; the byte API is the real one) ---------------
 
-    find_all_str : Sharp.T, Str -> List(Sharp.Span)
-    find_all_str = |re, s| Sharp.find_all(re, Str.to_utf8(s))
+    find_all_str : Regex.Pattern, Str -> List(Regex.Span)
+    find_all_str = |re, s| Regex.find_all(re, Str.to_utf8(s))
 
-    find_str : Sharp.T, Str -> Try(Sharp.Span, [NoMatch])
-    find_str = |re, s| Sharp.find(re, Str.to_utf8(s))
+    find_str : Regex.Pattern, Str -> Try(Regex.Span, [NoMatch])
+    find_str = |re, s| Regex.find(re, Str.to_utf8(s))
 
-    is_match_str : Sharp.T, Str -> Bool
-    is_match_str = |re, s| Sharp.is_match(re, Str.to_utf8(s))
+    is_match_str : Regex.Pattern, Str -> Bool
+    is_match_str = |re, s| Regex.is_match(re, Str.to_utf8(s))
 
-    count_str : Sharp.T, Str -> U64
-    count_str = |re, s| Sharp.count(re, Str.to_utf8(s))
+    count_str : Regex.Pattern, Str -> U64
+    count_str = |re, s| Regex.count(re, Str.to_utf8(s))
 
-    replace_all_str : Sharp.T, Str, Str -> Str
-    replace_all_str = |re, hay, rep| Str.from_utf8_lossy(Sharp.replace_all(re, Str.to_utf8(hay), Str.to_utf8(rep)))
+    replace_all_str : Regex.Pattern, Str, Str -> Str
+    replace_all_str = |re, hay, rep| Str.from_utf8_lossy(Regex.replace_all(re, Str.to_utf8(hay), Str.to_utf8(rep)))
 
-    split_str : Sharp.T, Str -> List(Str)
-    split_str = |re, hay| List.map(Sharp.split(re, Str.to_utf8(hay)), Str.from_utf8_lossy)
+    split_str : Regex.Pattern, Str -> List(Str)
+    split_str = |re, hay| List.map(Regex.split(re, Str.to_utf8(hay)), Str.from_utf8_lossy)
 
     # --- introspection (tests, debugging) ---------------------------------------
 
@@ -465,35 +470,35 @@ Sharp := [].{
     err_str = |e| Err.to_str(e)
 
     ## the pattern node in RE#'s notation
-    show : Sharp.T -> Str
+    show : Regex.Pattern -> Str
     show = |re| Show.show(re.a, re.trie, re.root)
 
     ## any node in RE#'s notation
-    show_node : Sharp.T, U32 -> Str
+    show_node : Regex.Pattern, U32 -> Str
     show_node = |re, id| Show.show(re.a, re.trie, id)
 
     ## the minterms in RE#'s notation
-    minterms : Sharp.T -> List(Str)
+    minterms : Regex.Pattern -> List(Str)
     minterms = |re| List.map(Trie.upto(re.trie.n_classes.to_u64()), |m| Show.tset(re.a, re.trie, TSet.bit(m.to_u32_wrap())))
 
-    n_nodes : Sharp.T -> U64
+    n_nodes : Regex.Pattern -> U64
     n_nodes = |re| Arena.n_nodes(re.a)
 
     ## the reverse pattern in RE#'s notation
-    show_rev : Sharp.T -> Str
+    show_rev : Regex.Pattern -> Str
     show_rev = |re| Show.show(re.a, re.trie, re.rev)
 
     ## the `_*·rev` search-start node in RE#'s notation
-    show_rev_ts : Sharp.T -> Str
+    show_rev_ts : Regex.Pattern -> Str
     show_rev_ts = |re| Show.show(re.a, re.trie, re.rev_ts)
 
     ## the pattern with its lookbehind prefix stripped
-    show_noprefix : Sharp.T -> Str
+    show_noprefix : Regex.Pattern -> Str
     show_noprefix = |re| Show.show(re.a, re.trie, re.noprefix)
 
     ## the derivative of a node by the class of codepoint `cp` at `loc`
     ## (0 begin, 1 center, 2 end), printed (tests: RE#'s `der1` helpers)
-    derive_show : Sharp.T, U32, U32, U32 -> Str
+    derive_show : Regex.Pattern, U32, U32, U32 -> Str
     derive_show = |re, node, loc, cp| {
         mt = TSet.bit(Trie.class_of(re.trie, cp))
         d = Deriv.derivative(re.a, loc, mt, node)
@@ -501,16 +506,16 @@ Sharp := [].{
     }
 
     ## the derivative of the raw pattern by the first codepoint of `s`
-    der1 : Sharp.T, Str -> Str
-    der1 = |re, s| Sharp.derive_show(re, re.root, Deriv.loc_begin, Sharp.first_cp(s))
+    der1 : Regex.Pattern, Str -> Str
+    der1 = |re, s| Regex.derive_show(re, re.root, Deriv.loc_begin, Regex.first_cp(s))
 
     ## the derivative of `_*·pattern` by the first codepoint of `s`
-    der1_ts : Sharp.T, Str -> Str
-    der1_ts = |re, s| Sharp.derive_show(re, re.ts, Deriv.loc_begin, Sharp.first_cp(s))
+    der1_ts : Regex.Pattern, Str -> Str
+    der1_ts = |re, s| Regex.derive_show(re, re.ts, Deriv.loc_begin, Regex.first_cp(s))
 
     ## the End-location derivative of the reverse pattern by the LAST codepoint of `s`
-    der1_rev : Sharp.T, Str -> Str
-    der1_rev = |re, s| Sharp.derive_show(re, re.rev, Deriv.loc_end, Sharp.last_cp(s))
+    der1_rev : Regex.Pattern, Str -> Str
+    der1_rev = |re, s| Regex.derive_show(re, re.rev, Deriv.loc_end, Regex.last_cp(s))
 
     first_cp : Str -> U32
     first_cp = |s| (Utf8.decode(Str.to_utf8(s), 0)).cp
@@ -522,49 +527,49 @@ Sharp := [].{
     }
 
     ## the derivative of the raw pattern at position `pos` (codepoint index) of `s`, Begin location as RE#'s `der1RPos`
-    der1_at : Sharp.T, Str, U64 -> Str
+    der1_at : Regex.Pattern, Str, U64 -> Str
     der1_at = |re, s, pos| {
-        cpl = Sharp.cps(Str.to_utf8(s), 0, [])
-        Sharp.derive_show(re, re.root, Deriv.loc_begin, List.get(cpl, pos) ?? 0)
+        cpl = Regex.cps(Str.to_utf8(s), 0, [])
+        Regex.derive_show(re, re.root, Deriv.loc_begin, List.get(cpl, pos) ?? 0)
     }
 
     cps : List(U8), U64, List(U32) -> List(U32)
     cps = |b, i, acc|
         if i >= List.len(b) { acc } else {
             d = Utf8.decode(b, i)
-            Sharp.cps(b, i + d.len, List.append(acc, d.cp))
+            Regex.cps(b, i + d.len, List.append(acc, d.cp))
         }
 
     ## the derivative chain of the prefix-free pattern through `s` (Center
     ## location), each node printed with its nullability and pending set
-    derive_chain : Sharp.T, Str -> List(Str)
+    derive_chain : Regex.Pattern, Str -> List(Str)
     derive_chain = |re, s| {
-        cpl = Sharp.cps(Str.to_utf8(s), 0, [])
-        st = List.fold(cpl, { a: re.a, id: re.noprefix, out: [Sharp.describe(re.a, re.trie, re.noprefix)] }, |acc, cp| {
+        cpl = Regex.cps(Str.to_utf8(s), 0, [])
+        st = List.fold(cpl, { a: re.a, id: re.noprefix, out: [Regex.describe(re.a, re.trie, re.noprefix)] }, |acc, cp| {
             mt = TSet.bit(Trie.class_of(re.trie, cp))
             d = Deriv.derivative(acc.a, Deriv.loc_center, mt, acc.id)
-            { a: d.a, id: d.id, out: List.append(acc.out, Sharp.describe(d.a, re.trie, d.id)) }
+            { a: d.a, id: d.id, out: List.append(acc.out, Regex.describe(d.a, re.trie, d.id)) }
         })
         st.out
     }
 
     ## the derivative chain of `node` reading the haystack LEFTWARD from byte
     ## `from` for `count` symbols (Center location), for tracing the reverse sweep
-    derive_chain_rev : Sharp.T, U32, List(U8), U64, U64 -> List(Str)
+    derive_chain_rev : Regex.Pattern, U32, List(U8), U64, U64 -> List(Str)
     derive_chain_rev = |re, node, hay, from, n_steps| {
         h = Ref.prepare(re.trie, hay)
         # symbol index of byte `from`
         si = List.fold_with_index(h.pos, 0, |acc, p, i| if p.to_u64() == from { i } else { acc })
-        st = List.fold(Arena.upto(n_steps), { a: re.a, id: node, i: si, out: [Sharp.describe(re.a, re.trie, node)] }, |acc, _|
+        st = List.fold(Arena.upto(n_steps), { a: re.a, id: node, i: si, out: [Regex.describe(re.a, re.trie, node)] }, |acc, _|
             if acc.i == 0 { acc } else {
                 cls = (List.get(h.cls, acc.i - 1) ?? 0).to_u32()
                 d = Deriv.derivative(acc.a, Deriv.loc_center, TSet.bit(cls), acc.id)
-                { a: d.a, id: d.id, i: acc.i - 1, out: List.append(acc.out, "@${(List.get(h.pos, acc.i - 1) ?? 0).to_u64().to_str()} ${Sharp.describe(d.a, re.trie, d.id)}") }
+                { a: d.a, id: d.id, i: acc.i - 1, out: List.append(acc.out, "@${(List.get(h.pos, acc.i - 1) ?? 0).to_u64().to_str()} ${Regex.describe(d.a, re.trie, d.id)}") }
             })
         st.out
     }
 
-    rev_node : Sharp.T -> U32
+    rev_node : Regex.Pattern -> U32
     rev_node = |re| re.rev
 
     describe : Arena.A, Trie.T, U32 -> Str
@@ -575,17 +580,17 @@ Sharp := [].{
     }
 
     ## nullability of the raw pattern at a location (0 begin, 1 center, 2 end)
-    nullable_at : Sharp.T, U32 -> Bool
+    nullable_at : Regex.Pattern, U32 -> Bool
     nullable_at = |re, loc| Deriv.nullable(re.a, loc, re.root)
 
     ## the raw pattern's flags byte (NodeFlags)
-    root_flags : Sharp.T -> U8
+    root_flags : Regex.Pattern -> U8
     root_flags = |re| Arena.flags(re.a, re.root)
 
-    rev_ts_flags : Sharp.T -> U8
+    rev_ts_flags : Regex.Pattern -> U8
     rev_ts_flags = |re| Arena.flags(re.a, re.rev_ts)
 
     ## RE#'s GetFixedLength of the reverse pattern
-    rev_fixed_len : Sharp.T -> Try(U32, [NotFixed])
+    rev_fixed_len : Regex.Pattern -> Try(U32, [NotFixed])
     rev_fixed_len = |re| Arena.fixed_len(re.a, re.rev)
 }

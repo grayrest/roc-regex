@@ -123,7 +123,7 @@ print(f'\tpf: platform "{PLATFORM}",')
 print(f'\tre: "{PKG}",')
 print("}")
 print("import pf.Stdout")
-print("import re.Sharp\n")
+print("import re.Regex\n")
 print("# %d patterns, seed %d, %d haystacks" % (N, SEED, len(HAYS)))
 print("pats : List(Str)")
 print("pats = [")
@@ -149,12 +149,12 @@ if RESHARP:
 if not RESHARP:
     print("wants : List(List(Str))")
     print("wants = []\n")
-print(r'''spans : List(Sharp.Span) -> Str
+print(r'''spans : List(Regex.Span) -> Str
 spans = |sp| sp |> List.map(|s| "${s.start.to_str()}-${s.end.to_str()}") |> Str.join_with(",")
 
 Outcome : { rejected : U64, incomplete : U64, cases : U64, fails : List(Str), known : List(Str) }
 
-one : List(Sharp.Span) -> Str
+one : List(Regex.Span) -> Str
 one = |sp| match List.first(sp) { Ok(s) => "${s.start.to_str()}-${s.end.to_str()}", Err(_) => "-" }
 
 # the anchored end finders against the same reference: `first_end` is the
@@ -170,20 +170,20 @@ want_end = |es, first|
 		Err(_) => "-"
 	}
 
-check : Sharp.T, Str, List(U8), Outcome -> Outcome
+check : Regex.Pattern, Str, List(U8), Outcome -> Outcome
 check = |re, pat, hay, o| {
-	all = Sharp.find_all(re, hay)
+	all = Regex.find_all(re, hay)
 	fast = spans(all)
-	ref = spans(Sharp.find_all_ref(re, hay))
-	thr = spans(Sharp.find_all_threaded(re, hay))
-	ev = spans(Sharp.find_all(Sharp.with_runtime_cap(re, 6), hay))
+	ref = spans(Regex.find_all_ref(re, hay))
+	thr = spans(Regex.find_all_threaded(re, hay))
+	ev = spans(Regex.find_all(Regex.with_runtime_cap(re, 6), hay))
 	# `find` and `is_match` stop the forward pass at the first match, so they are
 	# checked against taking the first of `find_all` rather than assumed equal
-	fst = match Sharp.find(re, hay) { Ok(s) => "${s.start.to_str()}-${s.end.to_str()}", Err(_) => "-" }
-	ism = Sharp.is_match(re, hay)
-	ends = Sharp.ends_at_start_ref(re, hay)
-	fe = end_str(Sharp.first_end(re, hay))
-	le = end_str(Sharp.longest_end(re, hay))
+	fst = match Regex.find(re, hay) { Ok(s) => "${s.start.to_str()}-${s.end.to_str()}", Err(_) => "-" }
+	ism = Regex.is_match(re, hay)
+	ends = Regex.ends_at_start_ref(re, hay)
+	fe = end_str(Regex.first_end(re, hay))
+	le = end_str(Regex.longest_end(re, hay))
 	wfe = want_end(ends, True)
 	wle = want_end(ends, False)
 	o2 = { ..o, cases: o.cases + 1 }
@@ -196,10 +196,10 @@ check = |re, pat, hay, o| {
 
 run : Str, Outcome -> Outcome
 run = |pat, o|
-	match Sharp.compile(pat) {
+	match Regex.compile(pat) {
 		Err(_) => { ..o, rejected: o.rejected + 1 }
 		Ok(re) => {
-			o1 = if Sharp.is_complete(re) { o } else { { ..o, incomplete: o.incomplete + 1 } }
+			o1 = if Regex.is_complete(re) { o } else { { ..o, incomplete: o.incomplete + 1 } }
 			List.fold(hays, o1, |acc, hay| check(re, pat, hay, acc))
 		}
 	}
@@ -208,23 +208,23 @@ run = |pat, o|
 # and we accept is not a failure (our fragment is wider), the reverse is
 run_resharp : Str, List(Str), Outcome -> Outcome
 run_resharp = |pat, ws, o|
-	match Sharp.compile(pat) {
+	match Regex.compile(pat) {
 		Err(_) => { ..o, rejected: o.rejected + 1 }
 		Ok(re) => {
-			o1 = if Sharp.is_complete(re) { o } else { { ..o, incomplete: o.incomplete + 1 } }
+			o1 = if Regex.is_complete(re) { o } else { { ..o, incomplete: o.incomplete + 1 } }
 			List.fold_with_index(hays, o1, |acc, hay, i| {
 				w = List.get(ws, i) ?? "-"
 				if w == "-" {
 					acc
 				} else {
-					got = spans(Sharp.find_all(re, hay))
+					got = spans(Regex.find_all(re, hay))
 					acc2 = { ..acc, cases: acc.cases + 1 }
 					if got == w {
 						acc2
 					} else {
 						# RE# disagrees: when the brute-force reference sides with us, RE# is wrong
 						# (a known-bug family, reported separately); otherwise a real divergence
-						ref = spans(Sharp.find_all_ref(re, hay))
+						ref = spans(Regex.find_all_ref(re, hay))
 						line = "/${pat}/ on \"${Str.from_utf8_lossy(hay)}\": sharp=[${got}] resharp=[${w}] ref=[${ref}]"
 						if got == ref { { ..acc2, known: List.append(acc2.known, line) } } else { { ..acc2, fails: List.append(acc2.fails, line) } }
 					}

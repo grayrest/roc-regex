@@ -2,7 +2,7 @@
 # Artifact-size probe: how many bytes does baking a folded regex — and in
 # particular its DFA tables — add to the executable?
 #
-# For each pattern we build a minimal app that folds `Regex.compile("<lit>")`
+# For each pattern we build a minimal app that folds `Dfa.compile("<lit>")`
 # at build time (the AOT premise: the literal is a compile-time constant, so the
 # whole compiled artifact — NFA prog, class trie, and, for a look-free in-budget
 # pattern, the forward+reverse DFA tables — is materialized into the binary).
@@ -39,7 +39,7 @@ EOF
 )
 
 emit_app() { # $1 = pattern literal (already Roc-escaped)
-	# `rx` is a TOP-LEVEL constant: Roc folds `Regex.compile` at build time only
+	# `rx` is a TOP-LEVEL constant: Roc folds `Dfa.compile` at build time only
 	# for module-level defs, not for lets inside an effectful body. Folding it
 	# here bakes the artifact (and DFA tables) into the binary AND lets the
 	# compiler dead-strip the parser/determinizer, so the binary is both smaller
@@ -52,10 +52,10 @@ app [main!] {
 import pf.Stdout
 import pf.Path
 import pf.OsStr
-import re.Regex
+import re.Dfa
 
-rx : Regex.T
-rx = Regex.unwrap(Regex.compile("$1"))
+rx : Dfa.T
+rx = Dfa.unwrap(Dfa.compile("$1"))
 
 last_arg : List(OsStr.OsStr) -> Try(OsStr.OsStr, [Empty])
 last_arg = |args| {
@@ -67,7 +67,7 @@ last_arg = |args| {
 
 main! = |args| {
 	hay = match last_arg(args) { Ok(a) => Path.read_bytes!(Path.from_os_str(a))? Err(_) => [] }
-	n = List.len(Regex.find_all(rx, hay))
+	n = List.len(Dfa.find_all(rx, hay))
 	Stdout.line!(n.to_str())
 }
 EOF

@@ -1,4 +1,4 @@
-## HTTP/1.1 request framing on `Sharp` (H2, H3, H8 of
+## HTTP/1.1 request framing on `Regex` (H2, H3, H8 of
 ## `plans/2026-09-06-http-parse.md`).
 ##
 ## The caller drives each step. Every piece is a byte range of the request
@@ -20,7 +20,7 @@
 ## What that trades away is the regex in the header lookup itself: with the
 ## line boundaries known, matching a header NAME is a case-insensitive byte
 ## compare, which is what it always was.
-import sharp.Sharp
+import re.Regex
 
 Http := [].{
     ## A byte range of the request buffer.
@@ -56,7 +56,7 @@ Http := [].{
         # every `\r\n` in the buffer, from one SIMD literal scan. This locates
         # the request line's end, each header line's end, and the blank line
         # that ends the block, so framing needs no separate terminator search.
-        ends = Sharp.find_all(Http.crlf_m, buf)
+        ends = Regex.find_all(Http.crlf_m, buf)
         match List.first(ends) {
             Err(_) => Err(Incomplete)
             Ok(rl) =>
@@ -103,7 +103,7 @@ Http := [].{
 
     ## Walk the line ends from `i`, turning each into a `Field`, until the blank
     ## line. `at` is where the current line starts.
-    fields_from : List(U8), List(Sharp.Span), U64, U64, List(Http.Field) -> Try({ fields : List(Http.Field), body : U64 }, Http.Err)
+    fields_from : List(U8), List(Regex.Span), U64, U64, List(Http.Field) -> Try({ fields : List(Http.Field), body : U64 }, Http.Err)
     fields_from = |buf, ends, i, at, acc|
         match List.get(ends, i) {
             # the block is not terminated yet
@@ -221,27 +221,27 @@ Http := [].{
 
     ## One anchored step over a suffix of the buffer: how far does `m` reach
     ## from `at`? The slice is a view, so a step costs no copy.
-    take : Sharp.T, List(U8), U64 -> Try(U64, [NoMatch])
+    take : Regex.Pattern, List(U8), U64 -> Try(U64, [NoMatch])
     take = |m, buf, at|
-        match Sharp.longest_end(m, List.sublist(buf, { start: at, len: List.len(buf) - at })) {
+        match Regex.longest_end(m, List.sublist(buf, { start: at, len: List.len(buf) - at })) {
             Err(_) => Err(NoMatch)
             Ok(0) => Err(NoMatch)
             Ok(e) => Ok(at + e)
         }
 
     ## The matchers, one automaton each rather than one per call. Each is a
-    ## literal pattern at a top level, so `Sharp.compile` folds it into the
+    ## literal pattern at a top level, so `Regex.compile` folds it into the
     ## artifact at build time.
-    method_m : Sharp.T
-    method_m = Sharp.unwrap(Sharp.compile("[A-Z]+"))
+    method_m : Regex.Pattern
+    method_m = Regex.build("[A-Z]+")
 
     # the request target: anything up to the space before the version
-    target_m : Sharp.T
-    target_m = Sharp.unwrap(Sharp.compile(" [!-~]+"))
+    target_m : Regex.Pattern
+    target_m = Regex.build(" [!-~]+")
 
-    version_m : Sharp.T
-    version_m = Sharp.unwrap(Sharp.compile(" HTTP/[0-9]\\.[0-9]"))
+    version_m : Regex.Pattern
+    version_m = Regex.build(" HTTP/[0-9]\\.[0-9]")
 
-    crlf_m : Sharp.T
-    crlf_m = Sharp.unwrap(Sharp.compile("\r\n"))
+    crlf_m : Regex.Pattern
+    crlf_m = Regex.build("\r\n")
 }

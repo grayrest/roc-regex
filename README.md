@@ -1,35 +1,33 @@
 # roc-regex
 
-A regular expression engine for Roc, compiled while your program builds.
+A regular expression library for Roc. Matches patterns against a list of bytes.
 
-A pattern written as a string literal is compiled during `roc build`: the
-finished automaton and its lookup tables are stored in the binary, and nothing
-is parsed or compiled when the program runs. A pattern built at run time goes
-through the same function and compiles then. There is no macro, no code
-generator and no build step; the compiler's evaluation of pure functions does
-the work.
-
-The engine is the `Sharp` module in [`package/`](package/). It is a port of
-[RE#](https://github.com/ieviev/resharp), a derivative-based matcher, which
-gives it a different feel from Perl-style engines:
+There are two novelties: the engine is a pure function so Roc's constant folding can
+compile the pattern at build time (including syntax checking) while other engines do
+the compilation at runtime. The other unsual feature is that this engine uses
+[RE#](https://github.com/ieviev/resharp) engine's matching algorithm which offers a
+slighly different feautre set:
 
 - **Leftmost-longest matches.** `a|ab` on `ab` matches `ab`. Perl, Rust and
   JavaScript would match `a`.
-- **Set operators.** `&` is intersection, `~(…)` is complement, `_` matches
-  any character. `_*cat_*&_*dog_*` is a string containing both words, in
-  either order; `~(_*\d\d_*)` is a string with no two consecutive digits.
-- **Lookarounds** `(?=…)`, `(?!…)`, `(?<=…)`, `(?<!…)` and `\b`, in a
-  restricted form that keeps matching linear.
+- **Additional Wildcard** `.` is any utf-8 codepoint except newline while `_` is ANY byte.
+- **Set operators.** `&` is intersection, `~(…)` is complement`. So *cat.*&.*dog.*`
+  is a string containing both words on a single line, in either order;
+  `~(_*\d\d_*)` is a string with no two consecutive digits.
+- **Lookarounds** `(?=…)`, `(?!…)`, `(?<=…)`, `(?<!…)` and `\b`, in a restricted
+  form that keeps matching linear.
 - **No captures, no lazy quantifiers, no backreferences.** `(…)` only groups.
-  A match is a pair of byte offsets.
-- **Throughput near Rust's `regex` crate** on a 256 KB prose benchmark, and
-  zero compile cost at run time. See [Benchmarks](#benchmarks) and
-  [PERFORMANCE.md](PERFORMANCE.md).
+  Capture use cases have support through other mechanisms. The other two are
+  incompatible with the algorithm.
 
-Correctness rests on three oracles: RE#'s own 331-case corpus, a brute-force
-reference interpreter fuzzed at 18000 cases with zero divergences, and a
-differential against RE# running under .NET. Where RE# was found to be wrong,
-the engine gives the textbook answer and the divergence is listed.
+The main reason is speed. This originally ported Rust's `regex` crate, which
+is still available in `./package-dfa` but the RE# approach turned out to be
+better on every metric (speed, startup, output size) outside of som adversarial
+edge cases.
+
+This library is a LLM driven port of the `regex` crate and RE#. Credit for the
+clever parts go entirely to them. This is a purely deriviative implementation
+with no novel research.
 
 ## Example
 
@@ -37,34 +35,34 @@ the engine gives the textbook answer and the divergence is listed.
 
 ```roc
 app [main!] {
-	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.21.0/4rAQg8kUYZ3Vksr4qMQHpaFYNiHSn9GgS7gVxghd1XYV.tar.zst",
-	re: "../package/main.roc",
+	pf: # basic-cli ...
+	re: "./package/main.roc",
 }
 import pf.Stdout
-import re.Sharp
+import re.Regex
 
 # A literal pattern is compiled while the program builds, and the finished
 # automaton is stored in the binary. A pattern that does not parse fails the
 # build with a message and a caret under the offending character.
-email : Sharp.T
-email = Sharp.unwrap(Sharp.compile("\\w+@\\w+\\.\\w+"))
+email : Regex.Pattern
+email = Regex.build("\\w+@\\w+\\.\\w+")
 
 # `&` is intersection: a line that mentions both names, in either order.
-both : Sharp.T
-both = Sharp.unwrap(Sharp.compile(".*Holmes.*&.*Watson.*"))
+both : Regex.Pattern
+both = Regex.build(".*Holmes.*&.*Watson.*")
 
 main! = |_args| {
 	text = "Watson wrote to holmes@baker.st; Holmes replied from 221b@baker.st."
 	bytes = Str.to_utf8(text)
 
 	# Every non-overlapping match, as half-open byte offsets into `bytes`.
-	addresses = List.map(Sharp.find_all(email, bytes), |sp| Str.from_utf8_lossy(List.sublist(bytes, { start: sp.start, len: sp.end - sp.start })))
+	addresses = List.map(Regex.find_all(email, bytes), |sp| Str.from_utf8_lossy(List.sublist(bytes, { start: sp.start, len: sp.end - sp.start })))
 	Stdout.line!(Str.join_with(addresses, ", "))?
 
 	# `$0` in the replacement is the matched text.
-	Stdout.line!(Sharp.replace_all_str(email, text, "<$0>"))?
+	Stdout.line!(Regex.replace_all_str(email, text, "<$0>"))?
 
-	Stdout.line!(if Sharp.is_match_str(both, text) { "mentions both" } else { "does not mention both" })?
+	Stdout.line!(if Regex.is_match_str(both, text) { "mentions both" } else { "does not mention both" })?
 	Ok({})
 }
 ```
@@ -75,30 +73,17 @@ Watson wrote to <holmes@baker.st>; Holmes replied from <221b@baker.st>.
 mentions both
 ```
 
-Two things to know about the build-time compile:
+Build-time compilation will not happen in an effectful context. In the above
+example the `Regex.build` are top level assignments. If the calls were in
+`main!` the pattern matching table is built in memory at runtime. There's no
+difference in behavior between the two once the call returns.
 
-- It happens for a top-level definition whose argument is a literal. The same
-  call inside `main!` runs at run time, with the same result and the same
-  speed once compiled.
-- `Sharp.unwrap` crashes with the rendered error when compilation fails. At
-  build time that crash is a build failure, which is the point: a typo in a
-  pattern is caught before the program exists.
-
-```
-sharp: unclosed group
-  | a(b
-  |  ^
-```
+`Regex.build` crashes on a syntax error in the pattern. At compile time this
+surfaces as a build error.
 
 ## How matching works
 
-A pattern names a set of strings. `[0-9]{2,4}` is every string of two to four
-digits; `.*Holmes.*&.*Watson.*` is every line that contains both names.
-Searching means finding substrings of the haystack that belong to the set, and
-this engine reports the leftmost one, extended as far as it will go, then
-continues after it.
-
-Most engines do this by simulating a nondeterministic automaton (Rust's
+Most engines match patterns by simulating a nondeterministic automaton (Rust's
 `regex`, RE2, Go) or by backtracking (Perl, PCRE, JavaScript). This one uses
 Brzozowski derivatives, following RE# (Varatalu et al.,
 [POPL 2025](https://dl.acm.org/doi/abs/10.1145/3704837)).
@@ -118,7 +103,7 @@ match after that character.
 | `A&B` | `c` | (derivative of `A`) `&` (derivative of `B`) |
 | `~(A)` | `c` | `~(`derivative of `A)` |
 
-A pattern is *nullable* when it matches the empty string. If the pattern you
+A pattern is *nullable* when it matches the empty string. If the derivative you
 are holding after consuming some characters is nullable, those characters are
 a match. The last two rows are why intersection and complement are cheap here
 and absent from most engines: they distribute through the derivative, so a
@@ -154,7 +139,7 @@ repository 99% of a Unicode pattern's states were that bookkeeping.
 
 `find_all` is RE#'s `llmatch`:
 
-1. **The reverse sweep.** Reverse the pattern, prefix it with `_*`, and run
+1. **The reverse sweep.** Reverse the pattern, prefix it with `.*`, and run
    that automaton from the end of the haystack toward the start. Wherever the
    state is nullable, a match of the original pattern can begin at that
    position. Record it.
@@ -168,29 +153,45 @@ Leftmost-longest falls out: the sweep knows every possible start, so the
 forward pass only extends from real ones and never has to guess where a match
 begins. The price is two passes over the text on patterns that match densely.
 On `\w+\s+\w+` over prose the sweep records 210198 possible starts for 21091
-matches, and that two-pass structure is where the remaining gap to Rust sits.
+matches, and that two-pass structure is what the widest row in the benchmark
+below is made of.
+
+It is not always two passes over an automaton, though. When the whole pattern
+is one class repeated, a match can begin exactly where that class's minimum
+number of symbols does, so step 1 collapses into a single SIMD scan for runs of
+the class and some arithmetic on their extents — `[0-9]{2,4}` and `[A-Za-z]+`
+are the two rows furthest AHEAD of Rust for that reason.
 
 ### Skipping
 
-At compile time, after the rewrites, the engine derives accelerators from the
-node graph (so they see through `&` and `~`) and stores them beside the tables:
+Regex engines, particularly Rust's, are very highly tuned so matching perf
+also involves special casing common use cases alongside the the main engine.
+At pattern compile time, after the rewrites, the engine derives accelerators
+from the node graph (so they see through `&` and `~`) and stores them beside
+the main scan tables:
 
 - A pattern that is exactly a literal never runs the automaton: `find_all` is
   a SIMD substring search.
 - A union of up to eight literals runs Teddy, a SIMD multi-literal scan,
   followed by a verify.
 - When every match begins with a fixed run of symbols, the sweep searches
-  backwards for the rarest byte of that run (with up to two more bytes of the
-  run as filters), verifies the rest, and lands in the state after it.
-  `(\w+)@(\w+)` jumps from `@` to `@`.
+  backwards for the rarest byte of that run with up to two more bytes of the
+  run as filters, verifies the rest, and lands in the state after it.
+  In the pattern `(\w+)@(\w+)` the scanner jumps from `@` to `@` and verifies
+  the two word patterns at each point.
 - A state that only a rare set of bytes can leave skips to the nearest such
   byte with a SIMD byte-set search. `.*` skips to the next newline.
 - When every match has one length, or a fixed prefix plus a bounded tail, the
   forward pass is arithmetic instead of a DFA walk.
+- When the whole pattern is one class repeated, the reverse sweep is not an
+  automaton at all. A match can begin exactly where the class's minimum number
+  of symbols does, so the pass is one SIMD scan for runs of the class plus
+  arithmetic on their extents: no automaton steps, and nothing that makes the
+  scan stop and restart. `[0-9]{2,4}` and `[A-Za-z]+` take this.
 
 ### Anchors, boundaries and lookarounds
 
-`^`, `$`, `\A` and `\z` are nodes whose nullability depends on where in the
+`^`, `$`, `\A` and `\Z` are nodes whose nullability depends on where in the
 input the automaton is (start, middle, end). `\b` is rewritten into lookarounds
 over the neighbouring symbol. A lookahead is carried inside a state: it counts
 symbols since the position it is checking and resolves once its body is
@@ -200,12 +201,12 @@ lets the scan extend the table at run time.
 
 ### Build time and run time
 
-`Sharp.compile` parses, builds the node graph, computes the minterms, and
+`Regex.compile` parses, builds the node graph, computes the minterms, and
 explores every reachable state up to the cap. When Roc evaluates that call
 during the build, the transition tables, class trie and accelerator tables
 become constants in the binary, and the parser and derivative code are
 dead-code-eliminated from a binary whose every pattern folded completely. A
-complete fold adds no measurable build time.
+complete fold adds milliseconds to the build time.
 
 An incomplete fold (a lookahead of unbounded length) ships its node arena too.
 A scan that reaches an unexplored transition computes the derivative there
@@ -223,27 +224,27 @@ compiled once, outside the timing loop, on both sides. Match counts are
 checked against Rust. The figure kept is the per-pattern minimum over five
 runs. Apple M1, Roc `release-fast-5f9a6e18`, 2026-09-07.
 
-| pattern | Sharp ns | Rust meta ns | Sharp / Rust | what it exercises |
+| pattern | Roc ns | Rust ns | Roc / Rust | what it exercises |
 |---|---|---|---|---|
-| `Holmes` | 27250 | 26572 | 1.03x | literal search, dense hits |
-| `Moriarty` | 10150 | 9801 | 1.04x | literal search, rare hits |
-| `Sherlock\|Holmes\|Watson\|…` (8 names) | 466450 | 422045 | 1.11x | Teddy multi-literal scan |
-| `[A-Za-z]+` | 1925750 | 2195412 | 0.88x | bare automaton, dense matches |
-| `[0-9]{2,4}` | 126000 | 108010 | 1.17x | byte-set skipping |
-| `\bthe\b` | 203150 | 203697 | 1.00x | prefix search plus word boundaries |
-| `\w+\s+\w+` | 1968000 | 1541489 | 1.28x | bare automaton, no accelerator |
-| `(\w+)@(\w+)` | 66250 | 67813 | 0.98x | prefix search on a rare byte |
-| `\p{L}+` | 2009250 | 2047656 | 0.98x | Unicode class, non-ASCII decoding |
-| `.*Holmes` | 304450 | 641115 | 0.47x | prefix search plus newline skipping |
+| `Holmes` | 29150 | 27482 | 1.06x | literal search, dense hits |
+| `Moriarty` | 10350 | 9877 | 1.05x | literal search, rare hits |
+| `Sherlock\|Holmes\|Watson\|…` (8 names) | 485200 | 425295 | 1.14x | Teddy multi-literal scan |
+| `[A-Za-z]+` | 1652300 | 2215098 | 0.75x | one class repeated: no reverse automaton |
+| `[0-9]{2,4}` | 65350 | 109102 | 0.60x | the same, over a sparse class |
+| `\bthe\b` | 201800 | 205131 | 0.98x | prefix search plus word boundaries |
+| `\w+\s+\w+` | 2069450 | 1555875 | 1.33x | bare automaton, no accelerator |
+| `(\w+)@(\w+)` | 68250 | 68616 | 0.99x | prefix search on a rare byte |
+| `\p{L}+` | 2067000 | 2068241 | 1.00x | Unicode class, non-ASCII decoding |
+| `.*Holmes` | 310750 | 653763 | 0.48x | prefix search plus newline skipping |
 
-Read this as "the same neighbourhood as Rust", not "faster than Rust". Five of
-ten rows are at or below Rust's meta engine, two more are within 5%, and the
-widest is 1.28x. The
-engine is a DFA with SIMD prefilters, as Rust's is, and where the same
-accelerator fires on both sides the rows land within a few percent. Where
-this engine is behind, it is running its two passes over text that Rust
-covers in one; where it is ahead, its reverse sweep is skipping between rare
-bytes that Rust's forward scan cannot use.
+This engine is generally in the same ballpark as Rust's. Six of ten rows are at
+or below Rust's engine, two more are within 6%, and the widest is 1.33x. Both
+engines are DFA with SIMD prefilters, and where the same accelerator fires on
+both sides the rows land within a few percent. Where this engine is behind, it
+is running its two passes over text that Rust covers in one. Where it is ahead,
+either the reverse sweep is skipping between rare bytes that Rust's forward
+scan cannot use, or the pattern is one class repeated and there is no reverse
+automaton to run at all.
 
 Two costs the table does not show. Rust's `Regex::new` takes 17 to 690 µs per
 pattern here at every process start, and RE# 0.4 to 8.9 ms; a folded Roc
@@ -255,11 +256,12 @@ per-pattern analysis, and what limits further gains.
 
 ### Reading a pattern
 
-Most characters match themselves: `Holmes` matches exactly those six
-characters. Everything else is built from single-character matchers and
+Most characters match themselves as literals: `Holmes` matches exactly those six
+characters. More complex patterns are built from single-character matchers and
 operators. From tightest to loosest binding: a quantifier applies to the atom
 before it; adjacent atoms match in sequence; `&` intersects; `|` alternates.
-So `ab|cd` is `(ab)|(cd)` and `a|b&c` is `a|(b&c)`. Parentheses group.
+So `ab|cd` is `(ab)|(cd)` and `a|b&c` is `a|(b&c)`. Parentheses group and do not
+capture.
 
 ### One character
 
@@ -271,7 +273,7 @@ So `ab|cd` is `(ab)|(cd)` and `a|b&c` is `a|(b&c)`. Parentheses group.
 | `\n` `\t` `\r` `\f` `\v` `\e` `\a` `\0` | newline, tab, carriage return, form feed, vertical tab, escape, bell, NUL |
 | `\x41` | the codepoint given by two hex digits |
 | `\u0041`, `\u{1F600}` | the codepoint given by four hex digits, or by up to six in braces |
-| `\.` `\*` `\(` `\\` `\&` `\_` … | the punctuation character itself |
+| `\.` `\*` `\(` `\\` `\&` `\_` … | backslash escape for control characters |
 
 Escaping a letter that has no meaning (`\q`) is an error rather than a silent
 literal.
@@ -308,7 +310,8 @@ available to `\p{…}`: general categories `L` (`Letter`), `Lu`, `Ll`, `N`
 
 Greedy and lazy have no meaning under leftmost-longest matching: the match is
 the longest one whatever the quantifier, so `a*?` is accepted and means `a*`.
-Quantifiers stack: `a**` is `(a*)*`. `{,5}` is an error.
+Quantifiers stack: `a**` is `(a*)*`. Repetition must follow a lieteral or class so
+ `{,5}` is an error.
 
 ### Combining
 
@@ -343,14 +346,18 @@ line", which matches any string with a newline in it.
 | `^` | at the start of a line: at the start of input, or right after a `\n` |
 | `$` | at the end of a line: at the end of input, or right before a `\n` |
 | `\A` | at the start of the input |
-| `\z` | at the end of the input |
+| `\Z` | at the end of the input |
 | `\b` | at a word boundary: between a `\w` character and a `\W` one, or an edge |
 
 `^` and `$` are always line anchors. There is no multiline flag because there
-is no single-line mode. To match the whole input, write `\A…\z`.
+is no single-line mode. To match the whole input, write `\A…\Z`.
+
+`\z` is also accepted for the input end, because RE#'s and Rust's test corpora
+are written in it and the differentials feed their pattern strings to both
+engines unchanged. `\A` and `\Z` is the pair this engine spells.
 
 `\B` (not a word boundary) is rejected, as in RE#. `\b` must have a character
-matcher next to it (`\b` alone is an error).
+matcher next to it so `\b` alone is an error.
 
 ### Lookarounds
 
@@ -388,14 +395,14 @@ start are errors, so a pattern cannot silently mean something else. `.`
 already excludes newline and `^`/`$` are already per line, so `s` and `m`
 have nothing to switch.
 
-### What a match is
+### Matches
 
 - **Leftmost, then longest.** Of all substrings in the pattern's set, the one
   that starts earliest wins, and among those the longest. `a|ab` on `ab` is
   `[0,2)`. Perl and Rust prefer the first alternative and would answer
   `[0,1)`.
 - **Non-overlapping.** After a match ending at `e`, the next match starts at
-  or after `e`.
+  (for a zero width pattern at the start) or after `e`.
 - **Empty matches are reported.** A pattern that can match the empty string
   matches at every position where nothing longer does, including at the end
   of the previous match: `.*(?=aaa)` on `baaa` gives `[0,1)` and `[1,1)`.
@@ -419,7 +426,7 @@ have nothing to switch.
 
 ## API reference
 
-Everything is in the `Sharp` module. Haystacks are `List(U8)` and every
+Everything is in the `Regex` module. Haystacks are `List(U8)` and every
 search function has a `_str` twin that takes a `Str`. The byte API is the real
 one; the `Str` twins call `Str.to_utf8` and convert results back with
 `Str.from_utf8_lossy`.
@@ -427,48 +434,57 @@ one; the `Str` twins call `Str.to_utf8` and convert results back with
 ### Types
 
 ```roc
-Sharp.T          # a compiled pattern; a record whose fields are documented-unstable
-Sharp.Span : { start : U64, end : U64 }   # half-open byte offsets
+Regex.Pattern          # a compiled pattern; a record whose fields are documented-unstable
+Regex.Span : { start : U64, end : U64 }   # half-open byte offsets
 Err.Error : { pattern : Str, at : [Whole, At(Err.Span)], kind : Err.Kind }
 ```
 
-`Err.Kind` is a tag union you can match on: `GroupUnclosed`, `GroupUnopened`,
-`ClassUnclosed`, `ClassRangeInvalid`, `RepetitionMissing`,
-`RepetitionCountUnclosed`, `RepetitionCountInvalid`, `EscapeUnrecognized`,
-`EscapeUnexpectedEof`, `ComplementNeedsGroup`, `FlagUnsupported`,
-`Unsupported(Str)` for RE#'s rejections (their messages are RE#'s own),
-`PatternTooLong`, `NestLimitExceeded` and `TooManyClasses`, the last three
-carrying `{ limit, given }`.
+`Err.Kind` is a tag union:
+  * `GroupUnclosed` / `GroupUnopened`
+  * `ClassUnclosed`
+  * `ClassRangeInvalid`
+  * `RepetitionMissing`
+  * `RepetitionCountUnclosed`/ `RepetitionCountInvalid`
+  * `EscapeUnrecognized`/ `EscapeUnexpectedEof`
+  * `ComplementNeedsGroup`
+  * `FlagUnsupported`
+  * `Unsupported(Str)` matches RE#'s rejections,
+  * `PatternTooLong`, `NestLimitExceeded` and `TooManyClasses` carry `{ limit, given }`.
 
 ### Compiling
 
 ```roc
-Sharp.compile : Str -> Try(Sharp.T, Err.Error)
-Sharp.unwrap : Try(Sharp.T, Err.Error) -> Sharp.T
-Sharp.unwrap_labeled : Str, Try(Sharp.T, Err.Error) -> Sharp.T
-Sharp.err_str : Err.Error -> Str          # one line, for logs
-Err.render : Err.Error -> Str             # the message, the pattern, a caret
+# The literal-pattern idiom: compile, and crash with the rendered message
+Regex.build : Str -> Regex.Pattern
+
+# Actually does the compilation
+Regex.compile : Str -> Try(Regex.Pattern, Err.Error)
+
+# Error Reporting
+Regex.report_errs : Try(Regex.Pattern, Err.Error) -> Regex.Pattern
+Regex.labeled_errs : Str, Try(Regex.Pattern, Err.Error) -> Regex.Pattern
+Regex.err_str : Err.Error -> Str          # one line, for logs
 Err.message : Err.Kind -> Str             # the bare sentence
+Err.render : Err.Error -> Str             # matches Roc's errs: the message, the pattern, a caret
 ```
 
 `unwrap` crashes with `Err.render`'s output; `unwrap_labeled` prefixes a label
 so a build with many patterns says which one failed. Use them for literal
-patterns, where the crash is a build failure. For a run-time pattern, match on
-the `Try`.
+patterns, where the crash is a build failure.
 
 ### Searching
 
 ```roc
-Sharp.is_match    : Sharp.T, List(U8) -> Bool
-Sharp.find        : Sharp.T, List(U8) -> Try(Sharp.Span, [NoMatch])
-Sharp.find_all    : Sharp.T, List(U8) -> List(Sharp.Span)
-Sharp.count       : Sharp.T, List(U8) -> U64
-Sharp.replace_all : Sharp.T, List(U8), List(U8) -> List(U8)
-Sharp.split       : Sharp.T, List(U8) -> List(List(U8))
+Regex.is_match    : Regex.Pattern, List(U8) -> Bool
+Regex.find        : Regex.Pattern, List(U8) -> Try(Regex.Span, [NoMatch])
+Regex.find_all    : Regex.Pattern, List(U8) -> List(Regex.Span)
+Regex.count       : Regex.Pattern, List(U8) -> U64
+Regex.replace_all : Regex.Pattern, List(U8), List(U8) -> List(U8)
+Regex.split       : Regex.Pattern, List(U8) -> List(List(U8))
 
-Sharp.is_match_str, find_str, find_all_str, count_str : … Str …
-Sharp.replace_all_str : Sharp.T, Str, Str -> Str
-Sharp.split_str : Sharp.T, Str -> List(Str)
+Regex.is_match_str, find_str, find_all_str, count_str : … Str …
+Regex.replace_all_str : Regex.Pattern, Str, Str -> Str
+Regex.split_str : Regex.Pattern, Str -> List(Str)
 ```
 
 `find_all` returns every non-overlapping leftmost-longest match in order.
@@ -489,15 +505,15 @@ What each costs, because the algorithm makes them unequal:
 ### Anchored matching
 
 ```roc
-Sharp.first_end   : Sharp.T, List(U8) -> Try(U64, [NoMatch])
-Sharp.longest_end : Sharp.T, List(U8) -> Try(U64, [NoMatch])
+Regex.first_end   : Regex.Pattern, List(U8) -> Try(U64, [NoMatch])
+Regex.longest_end : Regex.Pattern, List(U8) -> Try(U64, [NoMatch])
 ```
 
 Both match the pattern anchored at offset 0 of the haystack and return where
 the shortest, or the longest, such match ends, with no reverse sweep at all.
 They are the building block for parsers that step through a buffer piece by
 piece: call them on a slice, and the slice is the whole input as far as `\A`,
-`\z`, `\b` and lookbehinds are concerned. A pattern that matches the empty
+`\Z`, `\b` and lookbehinds are concerned. A pattern that matches the empty
 string answers `Ok(0)`, so a caller stepping a sequence must check that it made
 progress; an answer equal to the slice length means the match ran to the edge
 and might extend given more input. [`package-http/`](package-http/) frames
@@ -506,10 +522,10 @@ HTTP/1.1 requests this way.
 ### Incomplete folds
 
 ```roc
-Sharp.is_complete      : Sharp.T -> Bool
-Sharp.n_states         : Sharp.T -> U64
-Sharp.find_all_grow    : Sharp.T, List(U8) -> (Sharp.T, List(Sharp.Span))
-Sharp.with_runtime_cap : Sharp.T, U64 -> Sharp.T
+Regex.is_complete      : Regex.Pattern -> Bool
+Regex.n_states         : Regex.Pattern -> U64
+Regex.find_all_grow    : Regex.Pattern, List(U8) -> (Regex.Pattern, List(Regex.Span))
+Regex.with_runtime_cap : Regex.Pattern, U64 -> Regex.Pattern
 ```
 
 `is_complete` says whether compilation explored every reachable state. When
@@ -522,36 +538,30 @@ sets the eviction threshold (default 100000 states).
 ### Introspection
 
 ```roc
-Sharp.show      : Sharp.T -> Str          # the pattern after rewrites, in RE#'s notation
-Sharp.minterms  : Sharp.T -> List(Str)    # the alphabet classes the pattern distinguishes
-Sharp.accel_str : Sharp.T -> Str          # which accelerators compiled in
-Sharp.n_nodes   : Sharp.T -> U64
+Regex.show      : Regex.Pattern -> Str          # the pattern after rewrites
+Regex.minterms  : Regex.Pattern -> List(Str)    # the alphabet classes the pattern distinguishes
+Regex.accel_str : Regex.Pattern -> Str          # which accelerators compiled in
+Regex.n_nodes   : Regex.Pattern -> U64
 ```
 
 The rest of the module's exports (`find_all_ref`, `find_all_plain`,
 `find_all_noskip`, `find_all_threaded`, `match_starts`, `der1`,
 `derive_chain`, …) are oracles and tracing hooks for the test tools. They are
-documented in [`package/Sharp.roc`](package/Sharp.roc) and are not part of
-the interface a program should depend on.
+documented in [`package/Regex.roc`](package/Regex.roc) and are not part of
+the interface a program should depend on. If you do need one, file an issue
+so it can be formally part of the public interface.
 
 ## The rest of the repository
 
 | path | what |
 |---|---|
-| [`package/`](package/) | the `Sharp` engine. [`package/README.md`](package/README.md) lists its modules and the commands that check it |
-| [`package-dfa/`](package-dfa/) | `Regex`, the engine this repository started with: a port of Rust's `regex` crate with leftmost-first semantics and captures. Frozen; it is the Rust-semantics oracle and a second data point for Roc codegen |
-| [`package-http/`](package-http/) | HTTP/1.1 framing and matchit-syntax routing built on `Sharp`'s public API |
+| [`package/`](package/) | the `Regex` engine.|
+| [`package-dfa/`](package-dfa/) | `Dfa`, a port of Rust's `regex` crate and the repo's first engine attempt. A bit slower (within 2x), works fine, and has captures if you want that. |
+| [`package-http/`](package-http/) | Experiment in regex HTTP parsing. Used to compare match overhead; not enough text for our fast matchers to pay for the engine startup versus a tuned,specialized match |
 | [`examples/`](examples/) | this README's example, the benchmark drivers, smoke tests |
 | [`tools/`](tools/) | the benchmark, the RE# and Rust differentials, the fuzzer, the artifact-size probes |
-| [`plans/`](plans/), [`notes/`](notes/) | the design records and the measurement log. [`plans/2026-09-05-package-sharp.md`](plans/2026-09-05-package-sharp.md) is the engine's design; [`notes/2026-09-05-package-sharp-design-log.md`](notes/2026-09-05-package-sharp-design-log.md) is every decision and number since |
+| [`plans/`](plans/), [`notes/`](notes/) | Project decision logs and LLM build campaign |
 | [`upstream/`](upstream/) | reproducers for the Roc compiler bugs found along the way |
-| [PERFORMANCE.md](PERFORMANCE.md) | the benchmark in depth, and what limits the engine |
+| [PERFORMANCE.md](PERFORMANCE.md) | benchmark details, what limits engine performance |
 
-Checking the engine, from the repository root:
-
-```bash
-python3 tools/sharp-corpus/gen.py > /tmp/c.roc && roc build /tmp/c.roc && /tmp/c a b
-```
-
-runs RE#'s 331-case corpus through four engines and cross-checks them;
 `package/README.md` has the fuzz, differential, size and benchmark commands.

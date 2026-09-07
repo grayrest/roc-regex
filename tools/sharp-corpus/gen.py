@@ -75,43 +75,43 @@ print(f'\tpf: platform "{PLATFORM}",')
 print(f'\tre: "{PKG}",')
 print("}")
 print("import pf.Stdout")
-print("import re.Sharp\n")
+print("import re.Regex\n")
 print("Case : { kind : Str, file : Str, pat : Str, hay : Str, want : Str }\n")
 print("cases : List(Case)")
 print("cases = [")
 for kind, name, pat, inp, want in cases:
     print(f'\t{{ kind: "{kind}", file: "{name}", pat: "{roc_str(pat)}", hay: "{roc_str(inp)}", want: "{roc_str(want)}" }},')
 print("]\n")
-print(r'''spans_str : Sharp.T, Str -> Str
+print(r'''spans_str : Regex.Pattern, Str -> Str
 spans_str = |re, hay|
-	Sharp.find_all(re, Str.to_utf8(hay))
+	Regex.find_all(re, Str.to_utf8(hay))
 	|> List.map(|s| "${s.start.to_str()}-${s.end.to_str()}")
 	|> Str.join_with(",")
 
 # every scan with a tiny runtime cap, so eviction fires on any pattern that
 # mints states at scan time (S4)
-evict_str : Sharp.T, Str -> Str
+evict_str : Regex.Pattern, Str -> Str
 evict_str = |re, hay|
-	Sharp.find_all(Sharp.with_runtime_cap(re, 24), Str.to_utf8(hay))
+	Regex.find_all(Regex.with_runtime_cap(re, 24), Str.to_utf8(hay))
 	|> List.map(|s| "${s.start.to_str()}-${s.end.to_str()}")
 	|> Str.join_with(",")
 
-thr_str : Sharp.T, Str -> Str
+thr_str : Regex.Pattern, Str -> Str
 thr_str = |re, hay|
-	Sharp.find_all_threaded(re, Str.to_utf8(hay))
+	Regex.find_all_threaded(re, Str.to_utf8(hay))
 	|> List.map(|s| "${s.start.to_str()}-${s.end.to_str()}")
 	|> Str.join_with(",")
 
-ref_str : Sharp.T, Str -> Str
+ref_str : Regex.Pattern, Str -> Str
 ref_str = |re, hay|
-	Sharp.find_all_ref(re, Str.to_utf8(hay))
+	Regex.find_all_ref(re, Str.to_utf8(hay))
 	|> List.map(|s| "${s.start.to_str()}-${s.end.to_str()}")
 	|> Str.join_with(",")
 
 # match-start positions, sorted descending (RE# records them right to left)
-starts_str : Sharp.T, Str -> Str
+starts_str : Regex.Pattern, Str -> Str
 starts_str = |re, hay|
-	Sharp.match_starts(re, Str.to_utf8(hay))
+	Regex.match_starts(re, Str.to_utf8(hay))
 	|> List.sort_with(|x, y| U64.order_relative_to(y, x))
 	|> List.map(|p| p.to_str())
 	|> Str.join_with(",")
@@ -126,9 +126,9 @@ sort_desc_csv = |s|
 		|> Str.join_with(",")
 	}
 
-ends_ok : Sharp.T, Str, Str -> Bool
+ends_ok : Regex.Pattern, Str, Str -> Bool
 ends_ok = |re, hay, want| {
-	ends = Sharp.find_all(re, Str.to_utf8(hay)) |> List.map(|s| s.end.to_str())
+	ends = Regex.find_all(re, Str.to_utf8(hay)) |> List.map(|s| s.end.to_str())
 	List.all(Str.split_on(want, ","), |w| List.contains(ends, w))
 }
 
@@ -136,9 +136,9 @@ ends_ok = |re, hay, want| {
 run : Case, Str -> { ok : Bool, got : Str, skipped : Bool }
 run = |c0, filler| {
 	c = { ..c0, hay: Str.concat(c0.hay, filler), pat: Str.concat(c0.pat, filler) }
-	match Sharp.compile(c.pat) {
+	match Regex.compile(c.pat) {
 		Err(e) =>
-			if c.kind == "unsupported" { { ok: True, got: "", skipped: False } } else { { ok: False, got: "COMPILE_ERR: ${Sharp.err_str(e)}", skipped: False } }
+			if c.kind == "unsupported" { { ok: True, got: "", skipped: False } } else { { ok: False, got: "COMPILE_ERR: ${Regex.err_str(e)}", skipped: False } }
 		Ok(re) =>
 			if c.kind == "matches" {
 				got = spans_str(re, c.hay)
@@ -149,7 +149,7 @@ run = |c0, filler| {
 			} else if c.kind == "ends" {
 				{ ok: ends_ok(re, c.hay, c.want) and spans_str(re, c.hay) == ref_str(re, c.hay), got: "dfa=[${spans_str(re, c.hay)}] ref=[${ref_str(re, c.hay)}]", skipped: False }
 			} else if c.kind == "unsupported" {
-				{ ok: False, got: "compiled: ${Sharp.show(re)}", skipped: False }
+				{ ok: False, got: "compiled: ${Regex.show(re)}", skipped: False }
 			} else if c.kind == "starts" {
 				got = starts_str(re, c.hay)
 				{ ok: got == sort_desc_csv(c.want), got, skipped: False }
@@ -182,7 +182,7 @@ main! = |args| {
 	lines = List.map(fails, |x| "FAIL ${x.c.file} [${x.c.kind}] /${x.c.pat}/ on \"${x.c.hay}\"\n     want=[${x.c.want}]\n     got =[${x.r.got}]")
 	total = List.len(results)
 	Stdout.line!(Str.join_with(lines, "\n"))?
-	incomplete = List.count_if(cases, |c| match Sharp.compile(c.pat) { Ok(re) => !Sharp.is_complete(re), Err(_) => False })
+	incomplete = List.count_if(cases, |c| match Regex.compile(c.pat) { Ok(re) => !Regex.is_complete(re), Err(_) => False })
 	Stdout.line!("\n${(total - List.len(fails)).to_str()}/${total.to_str()} pass (${skipped.to_str()} skipped; ${incomplete.to_str()} patterns over the fold budget)")
 }
 ''')

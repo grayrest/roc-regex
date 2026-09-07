@@ -5,9 +5,9 @@ app [main!] {
 import pf.Stdout
 import pf.Path
 import pf.OsStr
-import re.Sharp
+import re.Regex
 
-# Skip soundness: `Sharp.find_all` against `Sharp.find_all_noskip` — the same
+# Skip soundness: `Regex.find_all` against `Regex.find_all_noskip` — the same
 # automaton with every per-state skip turned off — over a long haystack and
 # three mutations of it. Any disagreement is a skip that jumped over a match.
 #
@@ -43,7 +43,7 @@ pats = [
 span_mul : U64
 span_mul = 31
 
-checksum : List(Sharp.Span) -> U64
+checksum : List(Regex.Span) -> U64
 checksum = |ss| List.fold(ss, 0, |acc, s| acc + s.start * span_mul + s.end)
 
 # Every nth byte of a mutation is overwritten. Coprime with 16 so the damaged
@@ -63,11 +63,11 @@ run = |ps, hay, tag, i, bad|
 		bad
 	} else {
 		p = List.get(ps, i) ?? ""
-		match Sharp.compile(p) {
+		match Regex.compile(p) {
 			Err(_) => run(ps, hay, tag, i + 1, List.append(bad, "${tag} /${p}/ did not compile"))
 			Ok(rx) => {
-				a = Sharp.find_all(rx, hay)
-				b = Sharp.find_all_noskip(rx, hay)
+				a = Regex.find_all(rx, hay)
+				b = Regex.find_all_noskip(rx, hay)
 				bad2 =
 					if List.len(a) == List.len(b) and checksum(a) == checksum(b) {
 						bad

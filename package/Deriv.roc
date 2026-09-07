@@ -233,7 +233,7 @@ Deriv := [].{
     }
 
     ## The node as it stands at the INPUT START, for a match anchored at offset
-    ## 0 (`Sharp.first_end` / `longest_end`).
+    ## 0 (`Regex.first_end` / `longest_end`).
     ##
     ## The mirror of `without_lookback_prefix`, and needed for the same reason
     ## read the other way. A search's forward pass may drop the lookbehind

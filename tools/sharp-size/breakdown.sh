@@ -58,16 +58,16 @@ app [main!] {
 import pf.Stdout
 import pf.Path
 import pf.OsStr
-import re.Sharp
+import re.Regex
 import re.Arena
 
-rx : Sharp.T
-rx = Sharp.unwrap(Sharp.compile("$1"))
+rx : Regex.Pattern
+rx = Regex.build("$1")
 
 main! = |args| {
 	# scan a runtime haystack so the folded tables are live and actually stored
 	hay = match List.last(args) { Ok(p) => Path.read_bytes!(Path.from_os_str(p))? Err(_) => [] }
-	cs = List.fold(Sharp.find_all(rx, hay), 0, |acc, sp| acc + sp.start + sp.end)
+	cs = List.fold(Regex.find_all(rx, hay), 0, |acc, sp| acc + sp.start + sp.end)
 	e = rx.e
 	t = rx.trie
 	a = rx.a
@@ -83,7 +83,7 @@ main! = |args| {
 	nodes = u32(List.len(a.cells)) + u32(List.len(a.offs)) + List.len(a.flags) + u64(List.len(a.sub)) + u32(List.len(a.minl)) + u32(List.len(a.maxl)) + u32(List.len(a.pend))
 	index = u32(List.len(a.islots)) + u32(List.len(a.ient_key)) + u32(List.len(a.ient_len)) + u32(List.len(a.ient_id)) + u32(List.len(a.ikeys))
 	refs = u32(List.len(a.rs_data)) + u32(List.len(a.rs_off)) + u32(List.len(a.rs_len))
-	Stdout.line!("tables=\${tables.to_str()} states=\${states.to_str()} skips=\${skips.to_str()} trie=\${trie.to_str()} nodes=\${nodes.to_str()} index=\${index.to_str()} refs=\${refs.to_str()} n_states=\${Sharp.n_states(rx).to_str()} n_nodes=\${Sharp.n_nodes(rx).to_str()} nmt=\${e.nmt.to_str()} complete=\${if Sharp.is_complete(rx) { "1" } else { "0" }} cs=\${cs.to_str()}")
+	Stdout.line!("tables=\${tables.to_str()} states=\${states.to_str()} skips=\${skips.to_str()} trie=\${trie.to_str()} nodes=\${nodes.to_str()} index=\${index.to_str()} refs=\${refs.to_str()} n_states=\${Regex.n_states(rx).to_str()} n_nodes=\${Regex.n_nodes(rx).to_str()} nmt=\${e.nmt.to_str()} complete=\${if Regex.is_complete(rx) { "1" } else { "0" }} cs=\${cs.to_str()}")
 }
 APP
 }

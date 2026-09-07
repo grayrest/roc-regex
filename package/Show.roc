@@ -39,7 +39,7 @@ Show := [].{
             inner = Show.strip_star(Show.show(a, t, Arena.head(a, id)))
             pend = if Arena.look_pend(a, id) == Arena.rs_empty { "" } else { "{...}" }
             r = "(?=${inner})${pend}"
-            if r == "(?=(\\n|\\z))" or r == "(?=(\\z|\\n))" { "$" } else { r }
+            if r == "(?=(\\n|\\Z))" or r == "(?=(\\Z|\\n))" { "$" } else { r }
         } else if k == Arena.k_lookbehind {
             inner = Show.strip_star(Show.show(a, t, Arena.head(a, id)))
             pend = if Arena.look_pend(a, id) == Arena.rs_empty { "" } else { "{...}" }
@@ -48,7 +48,7 @@ Show := [].{
         } else if k == Arena.k_concat {
             Str.concat(Show.show(a, t, Arena.head(a, id)), Show.show(a, t, Arena.tail(a, id)))
         } else if k == Arena.k_end {
-            "\\z"
+            "\\Z"
         } else {
             "\\A"
         }

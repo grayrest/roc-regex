@@ -135,7 +135,7 @@ print(f'\tpf: platform "{PLATFORM}",')
 print(f'\tre: "{PKG}",')
 print("}")
 print("import pf.Stdout")
-print("import re.Sharp\n")
+print("import re.Regex\n")
 print("Case : { pat : Str, hay : Str, ok : Bool, want : Str, known : Bool, fe : Str, le : Str }\n")
 print("cases : List(Case)")
 print("cases = [")
@@ -152,9 +152,9 @@ for r in results:
 for pat, hay, want in KNOWN_RESHARP_BUGS:
     print(f'\t{{ pat: "{roc_str(pat)}", hay: "{roc_str(hay)}", ok: {"False" if want == "REJECT" else "True"}, want: "{roc_str(want)}", known: True, fe: "?", le: "?" }},')
 print("]\n")
-print(r'''spans_str : Sharp.T, Str -> Str
+print(r'''spans_str : Regex.Pattern, Str -> Str
 spans_str = |re, hay|
-	Sharp.find_all(re, Str.to_utf8(hay))
+	Regex.find_all(re, Str.to_utf8(hay))
 	|> List.map(|s| "${s.start.to_str()}-${s.end.to_str()}")
 	|> Str.join_with(",")
 
@@ -166,16 +166,16 @@ run = |c0, filler| {
 	c = { ..c0, hay: Str.concat(c0.hay, filler), pat: Str.concat(c0.pat, filler) }
 	if c.known {
 		# a confirmed RE# bug: `want` is the textbook answer ("REJECT" = we refuse)
-		match Sharp.compile(c.pat) {
-			Err(e) => { kind: if c.want == "REJECT" { "KnownBug" } else { "Differ" }, got: Sharp.err_str(e) }
+		match Regex.compile(c.pat) {
+			Err(e) => { kind: if c.want == "REJECT" { "KnownBug" } else { "Differ" }, got: Regex.err_str(e) }
 			Ok(re) => {
 				got = spans_str(re, c.hay)
 				{ kind: if c.want != "REJECT" and got == c.want { "KnownBug" } else { "Differ" }, got }
 			}
 		}
 	} else
-	match Sharp.compile(c.pat) {
-		Err(e) => { kind: if c.ok { "WeReject" } else { "RejectBoth" }, got: Sharp.err_str(e) }
+	match Regex.compile(c.pat) {
+		Err(e) => { kind: if c.ok { "WeReject" } else { "RejectBoth" }, got: Regex.err_str(e) }
 		Ok(re) =>
 			if !c.ok {
 				{ kind: "WeAccept", got: spans_str(re, c.hay) }
@@ -197,21 +197,21 @@ run = |c0, filler| {
 end_str : Try(U64, [NoMatch]) -> Str
 end_str = |r| match r { Ok(n) => n.to_str(), Err(_) => "-" }
 
-ref_end : Sharp.T, List(U8), Bool -> Str
+ref_end : Regex.Pattern, List(U8), Bool -> Str
 ref_end = |re, hay, first| {
-	es = Sharp.ends_at_start_ref(re, hay)
+	es = Regex.ends_at_start_ref(re, hay)
 	match (if first { List.first(es) } else { List.last(es) }) { Ok(n) => n.to_str(), Err(_) => "-" }
 }
 
 # "Agree" | "PrefixDiff" | "Differ"
-check_ends : Sharp.T, Case, Str -> Str
+check_ends : Regex.Pattern, Case, Str -> Str
 check_ends = |re, c, hay|
 	if c.known or !c.ok {
 		"Agree"
 	} else {
 		h = Str.to_utf8(hay)
-		fe = end_str(Sharp.first_end(re, h))
-		le = end_str(Sharp.longest_end(re, h))
+		fe = end_str(Regex.first_end(re, h))
+		le = end_str(Regex.longest_end(re, h))
 		if fe == c.fe and le == c.le {
 			"Agree"
 		} else if fe == ref_end(re, h, True) and le == ref_end(re, h, False) {
@@ -226,7 +226,7 @@ main! = |args| {
 	results = List.map(cases, |c| { c, r: run(c, filler) })
 	ends = List.map(cases, |c0| {
 		c = { ..c0, hay: Str.concat(c0.hay, filler), pat: Str.concat(c0.pat, filler) }
-		match Sharp.compile(c.pat) {
+		match Regex.compile(c.pat) {
 			Err(_) => { c, kind: "Agree" }
 			Ok(re) => { c, kind: check_ends(re, c, c.hay) }
 		}

@@ -251,7 +251,7 @@ Accel := [].{
     ## literal that matches at a position and leftmost-longest wants the longest.
     ##
     ## Not part of `Accel.T`: threading it through `Dfa.Accels` put another arm
-    ## in `find_all_fast_opts` and cost 3-25% on every pattern, so `Sharp` holds
+    ## in `find_all_fast_opts` and cost 3-25% on every pattern, so `Regex` holds
     ## it and dispatches before the scan.
     literal_set : Arena.A, Trie.T, U32 -> Try(List(List(U8)), [NotLiteralSet])
     literal_set = |a, t, root|

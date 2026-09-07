@@ -6,10 +6,10 @@ import pf.Stdout
 import pf.Path
 import pf.OsStr
 import pf.Utc
-import re.Regex
+import re.Dfa
 
 # KEEP PATTERNS IN SYNC with tools/bench/src/bench.rs (same ids, same regexes).
-# Each `src` is a string literal so `Regex.compile` is constant-folded into the
+# Each `src` is a string literal so `Dfa.compile` is constant-folded into the
 # binary at build time (the AOT premise). The regex is bound once, before the
 # timing loop, so per-iteration numbers measure match throughput only.
 Pat : { id : Str, src : Str }
@@ -37,16 +37,16 @@ iters = 20
 
 # Sum span endpoints so the match loop has an observable result and cannot be
 # eliminated. Totals stay well under U64 max for a single-haystack run.
-checksum : List(Regex.Span) -> U64
+checksum : List(Dfa.Span) -> U64
 checksum = |spans|
 	List.fold(spans, 0, |acc, sp| acc + sp.start + sp.end)
 
-time_loop : Regex.T, List(U8), U64, U64 -> U64
+time_loop : Dfa.T, List(U8), U64, U64 -> U64
 time_loop = |rx, hay, n, acc|
 	if n == 0 {
 		acc
 	} else {
-		c = checksum(Regex.find_all(rx, hay))
+		c = checksum(Dfa.find_all(rx, hay))
 		time_loop(rx, hay, n - 1, acc + c)
 	}
 
@@ -56,13 +56,13 @@ run_all! = |pats, hay, i|
 		Ok({})
 	} else {
 		p = List.get(pats, i) ?? { id: "?", src: "" }
-		rx = Regex.unwrap(Regex.compile(p.src))
+		rx = Dfa.unwrap(Dfa.compile(p.src))
 		t0 = Utc.now!()
 		cs = time_loop(rx, hay, iters, 0)
 		t1 = Utc.now!()
 		delta = if t1 > t0 { t1 - t0 } else { 0 }
 		per = delta / iters.to_u128()
-		count = List.len(Regex.find_all(rx, hay))
+		count = List.len(Dfa.find_all(rx, hay))
 		# id,compile_ns(0=folded),match_ns_per_iter,match_count,checksum
 		Stdout.line!("${p.id},0,${per.to_str()},${count.to_str()},${cs.to_str()}")?
 		run_all!(pats, hay, i + 1)

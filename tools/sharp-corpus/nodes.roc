@@ -3,7 +3,7 @@ app [main!] {
 	re: "../../package/main.roc",
 }
 import pf.Stdout
-import re.Sharp
+import re.Regex
 
 # RE#'s node-layer tests (_02_NodeTests, _03_SubsumptionTests,
 # _04_DerivativeTests), transcribed. `want` lists the printed forms RE# accepts;
@@ -116,20 +116,20 @@ squash_classes = |s| {
 run : Case, Str -> { ok : Bool, got : Str }
 run = |c0, filler| {
 	pat = Str.concat(c0.pat, filler)
-	match Sharp.compile(pat) {
-		Err(e) => { ok: False, got: "COMPILE_ERR ${Sharp.err_str(e)}" }
+	match Regex.compile(pat) {
+		Err(e) => { ok: False, got: "COMPILE_ERR ${Regex.err_str(e)}" }
 		Ok(re) => {
 			got =
-				if c0.kind == "conv" { Sharp.show(re) }
-				else if c0.kind == "der" { Sharp.der1(re, c0.input) }
-				else if c0.kind == "derts" { Sharp.der1_ts(re, c0.input) }
-				else if c0.kind == "derrev" { Sharp.der1_rev(re, c0.input) }
-				else if c0.kind == "derat" { Sharp.der1_at(re, c0.input, c0.pos) }
-				else if c0.kind == "noprefix" { Sharp.show_noprefix(re) }
-				else if c0.kind == "revfixed" { match Sharp.rev_fixed_len(re) { Ok(n) => n.to_str(), Err(_) => "none" } }
-				else if c0.kind == "minterms" { Str.join_with(Sharp.minterms(re), ";") }
-				else if c0.kind == "ident" { if Sharp.der1(re, c0.input) == Sharp.show(re) { "true" } else { "false: ${Sharp.der1(re, c0.input)}" } }
-				else if c0.kind == "identrev" { if Sharp.der1_rev(re, c0.input) == Sharp.show_rev(re) { "true" } else { "false: ${Sharp.der1_rev(re, c0.input)} vs ${Sharp.show_rev(re)}" } }
+				if c0.kind == "conv" { Regex.show(re) }
+				else if c0.kind == "der" { Regex.der1(re, c0.input) }
+				else if c0.kind == "derts" { Regex.der1_ts(re, c0.input) }
+				else if c0.kind == "derrev" { Regex.der1_rev(re, c0.input) }
+				else if c0.kind == "derat" { Regex.der1_at(re, c0.input, c0.pos) }
+				else if c0.kind == "noprefix" { Regex.show_noprefix(re) }
+				else if c0.kind == "revfixed" { match Regex.rev_fixed_len(re) { Ok(n) => n.to_str(), Err(_) => "none" } }
+				else if c0.kind == "minterms" { Str.join_with(Regex.minterms(re), ";") }
+				else if c0.kind == "ident" { if Regex.der1(re, c0.input) == Regex.show(re) { "true" } else { "false: ${Regex.der1(re, c0.input)}" } }
+				else if c0.kind == "identrev" { if Regex.der1_rev(re, c0.input) == Regex.show_rev(re) { "true" } else { "false: ${Regex.der1_rev(re, c0.input)} vs ${Regex.show_rev(re)}" } }
 				else { "?" }
 			{ ok: List.any(c0.want, |w| matches_want(got, w)), got }
 		}

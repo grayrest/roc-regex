@@ -41,3 +41,5 @@ tools/route-diff/rust/Cargo.lock
 
 # filed compiler reproducers, kept locally
 /upstream/
+/http
+/httpx

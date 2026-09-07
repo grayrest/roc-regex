@@ -25,9 +25,9 @@ echo "generating ${BYTES}-byte haystack..."
 ./tools/bench/target/release/gen "$HAY" "$BYTES" >/dev/null
 HAYLEN=$(wc -c < "$HAY")
 
-echo "building roc bench (Regex)..."
+echo "building roc bench (Dfa)..."
 roc build examples/bench.roc --no-cache >/dev/null 2>&1
-echo "building roc bench (Sharp)..."
+echo "building roc bench (Regex)..."
 roc build examples/bench_sharp.roc --no-cache >/dev/null 2>&1
 
 TMP="$(mktemp -d)"
@@ -38,10 +38,10 @@ roc_min() { awk -F, '$1!="id" { if (!($1 in m)) { ord[++n]=$1 } ; if (!($1 in m)
 # min of columns 3 (meta) and 4 (pikevm) per id, preserving compile time and count
 rust_min() { awk -F, '$1!="id" { if (!($1 in a)) { ord[++n]=$1 } ; if (!($1 in a) || $3+0 < a[$1]) a[$1]=$3+0; if (!($1 in b) || $4+0 < b[$1]) b[$1]=$4+0; p[$1]=$2; c[$1]=$5 } END { for (i=1;i<=n;i++) { k=ord[i]; print k "," p[k] "," a[k] "," b[k] "," c[k] } }'; }
 
-echo "running roc Regex (${REPS} x ${ROC_ITERS} iters)..."
+echo "running roc Dfa (${REPS} x ${ROC_ITERS} iters)..."
 ./bench "$HAY" >/dev/null
 for _ in $(seq 1 $REPS); do ./bench "$HAY"; done | roc_min > "$TMP/roc.csv"
-echo "running roc Sharp (${REPS} x ${ROC_ITERS} iters)..."
+echo "running roc Regex (${REPS} x ${ROC_ITERS} iters)..."
 ./bench_sharp "$HAY" >/dev/null
 for _ in $(seq 1 $REPS); do ./bench_sharp "$HAY"; done | roc_min > "$TMP/sharp.csv"
 echo "running rust (${REPS} x ${RUST_ITERS} iters)..."
@@ -50,7 +50,7 @@ for _ in $(seq 1 $REPS); do ./tools/bench/target/release/bench "$HAY" "$RUST_ITE
 
 echo
 echo "haystack: ${HAYLEN} bytes   |   ns = nanoseconds per find_all over the whole haystack"
-echo "roc = Roc package-dfa (Regex: DFA + PikeVM); sharp = Roc package (Sharp: RE# derivatives, leftmost-longest);"
+echo "roc = Roc package-dfa (Dfa: the frozen Rust-regex port); sharp = Roc package (Regex: RE# derivatives, leftmost-longest);"
 echo "rustMeta = Rust meta engine (lazy DFA + prefilters); rustPV = Rust PikeVM."
 echo "cnt checks match-count parity of roc and sharp against Rust (a DIFF invalidates the row)."
 awk -F, '

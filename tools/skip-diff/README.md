@@ -1,7 +1,7 @@
 # Skip differential
 
 Every per-state skip in `Dfa` is an assertion that the automaton would have
-looped over the stretch it jumps. `Sharp.find_all_noskip` runs the same
+looped over the stretch it jumps. `Regex.find_all_noskip` runs the same
 automaton with all of them off, so it decides the assertion directly: the two
 must return identical spans on every input.
 

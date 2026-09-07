@@ -53,7 +53,7 @@ Dfa := [].{
         fold_marks : Arena.Marks,
         runtime_cap : U64,
         # Complete folds only: fused ASCII byte -> next state, `state * 128 + byte`.
-        # A complete fold is capped at `Sharp.fold_state_cap` states, so a state id
+        # A complete fold is capped at `Regex.fold_state_cap` states, so a state id
         # fits a U16 here. `table` and `end_table` cannot narrow the same way: the
         # extensible path mints states at scan time up to `runtime_cap`.
         atable : List(U16),

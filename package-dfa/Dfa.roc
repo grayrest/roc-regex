@@ -1,4 +1,4 @@
-## The public surface. `Regex` is a transparent record with documented-unstable
+## The public surface. `Dfa` is a transparent record with documented-unstable
 ## fields — Roc has no field privacy and the nominal type that would give it
 ## segfaults the compiler (Owed upstream 2). Do not depend on the field layout.
 ##
@@ -13,13 +13,13 @@ import Rev
 import Teddy
 import Err
 
-Regex := [].{
+Dfa := [].{
     ## The compiled pattern. Fields are unstable (see above). M1's engine is
     ## always the PikeVM; the `Dfa` arm and its tables are M3.
     ## The `engine` field records M3's outcome (D10): `Three` carries the D5
     ## forward+reverse DFAs for a look-free pattern within budget, else `Pike`.
     ## Documented-unstable.
-    T : { comp : Comp.Compiled, engine : Regex.Engine, plan : Regex.Plan }
+    T : { comp : Comp.Compiled, engine : Dfa.Engine, plan : Dfa.Plan }
 
     ## M3's outcome (D10): `Three` carries the D5 forward+reverse DFAs for a
     ## look-free pattern within budget, else the PikeVM.
@@ -48,25 +48,25 @@ Regex := [].{
     ## A match, as half-open BYTE offsets into the haystack (D3, D15).
     Span : { start : U64, end : U64 }
 
-    compile : Str -> Try(Regex.T, Err.Error)
+    compile : Str -> Try(Dfa.T, Err.Error)
     compile = |src|
         match Comp.compile(src) {
             Err(e) => Err(e)
             Ok(c) => {
                 nc = if c.classes.n_classes == 0 { 1 } else { c.classes.n_classes }
-                max_states = Regex.dfa_table_budget // (nc.to_u64() * Regex.dfa_entry_bytes)
+                max_states = Dfa.dfa_table_budget // (nc.to_u64() * Dfa.dfa_entry_bytes)
                 engine =
                     match Rev.build(c, max_states) {
                         Ok(d) => Three(d)
                         Err(_) => Pike
                     }
-                Ok({ comp: c, engine, plan: Regex.plan_of(c, engine) })
+                Ok({ comp: c, engine, plan: Dfa.plan_of(c, engine) })
             }
         }
 
     ## The documented literal-pattern idiom: fold, and crash-with-message on a
     ## bad literal so the build fails (D7).
-    unwrap : Try(Regex.T, Err.Error) -> Regex.T
+    unwrap : Try(Dfa.T, Err.Error) -> Dfa.T
     unwrap = |r|
         match r {
             Ok(re) => re
@@ -75,7 +75,7 @@ Regex := [].{
 
     ## As `unwrap`, but the message names the pattern via a caller label — worth
     ## more than the caret when several regexes report at the same file position.
-    unwrap_labeled : Str, Try(Regex.T, Err.Error) -> Regex.T
+    unwrap_labeled : Str, Try(Dfa.T, Err.Error) -> Dfa.T
     unwrap_labeled = |label, r|
         match r {
             Ok(re) => re
@@ -85,11 +85,11 @@ Regex := [].{
     ## Leftmost-first search over a byte haystack: the first match, or NoMatch.
     ## Runs the same plan as `find_all` and stops at the first verified
     ## candidate, so every prefilter reaches this entry point too.
-    find : Regex.T, List(U8) -> Try(Regex.Span, [NoMatch])
+    find : Dfa.T, List(U8) -> Try(Dfa.Span, [NoMatch])
     find = |re, hay|
         match re.plan.verify {
-            VerEngine => Regex.find_engine(re, hay)
-            _ => Regex.find_chunked(re, hay, Regex.first_chunk)
+            VerEngine => Dfa.find_engine(re, hay)
+            _ => Dfa.find_chunked(re, hay, Dfa.first_chunk)
         }
 
     # The prefix length `find` scans before verifying what it has, and the factor
@@ -114,28 +114,28 @@ Regex := [].{
     # Leftmost-first survives because a round reports candidates in increasing
     # order and covers every position below its limit, so the first candidate
     # that verifies is the leftmost match.
-    find_chunked : Regex.T, List(U8), U64 -> Try(Regex.Span, [NoMatch])
+    find_chunked : Dfa.T, List(U8), U64 -> Try(Dfa.Span, [NoMatch])
     find_chunked = |re, hay, limit| {
         len = List.len(hay)
         lim = if limit > len { len } else { limit }
-        match Regex.scan_candidates_upto(re.plan, hay, lim, len) {
+        match Dfa.scan_candidates_upto(re.plan, hay, lim, len) {
             # too dense for the prefilter to pay for itself: the DFA is cheaper
-            Err(_) => Regex.find_engine(re, hay)
+            Err(_) => Dfa.find_engine(re, hay)
             Ok(cands) =>
-                match List.first(Regex.verify_candidates(re, hay, cands, True)) {
+                match List.first(Dfa.verify_candidates(re, hay, cands, True)) {
                     Ok(span) => Ok(span)
                     Err(_) =>
                         if lim >= len {
                             Err(NoMatch)
                         } else {
-                            Regex.find_chunked(re, hay, limit * Regex.chunk_growth)
+                            Dfa.find_chunked(re, hay, limit * Dfa.chunk_growth)
                         }
                 }
         }
     }
 
     # no prefilter: the engine's own unanchored search
-    find_engine : Regex.T, List(U8) -> Try(Regex.Span, [NoMatch])
+    find_engine : Dfa.T, List(U8) -> Try(Dfa.Span, [NoMatch])
     find_engine = |re, hay|
         match re.engine {
             Three(d) => Rev.find(d, re.comp.classes, hay)
@@ -144,14 +144,14 @@ Regex := [].{
 
     ## All capture spans: index 0 is the whole match, i is group i. An
     ## unset/non-participating group is `Err(NoGroup)`.
-    captures : Regex.T, List(U8) -> Try(List(Try(Regex.Span, [NoGroup])), [NoMatch])
+    captures : Dfa.T, List(U8) -> Try(List(Try(Dfa.Span, [NoGroup])), [NoMatch])
     captures = |re, hay|
         match Pike.captures(re.comp, hay) {
             Err(_) => Err(NoMatch)
-            Ok(slots) => Ok(Regex.pair_slots(slots, 0, []))
+            Ok(slots) => Ok(Dfa.pair_slots(slots, 0, []))
         }
 
-    pair_slots : List(U64), U64, List(Try(Regex.Span, [NoGroup])) -> List(Try(Regex.Span, [NoGroup]))
+    pair_slots : List(U64), U64, List(Try(Dfa.Span, [NoGroup])) -> List(Try(Dfa.Span, [NoGroup]))
     pair_slots = |slots, i, acc|
         if i + 1 >= List.len(slots) {
             acc
@@ -159,16 +159,16 @@ Regex := [].{
             s = List.get(slots, i) ?? 0xFFFF_FFFF_FFFF_FFFF
             e = List.get(slots, i + 1) ?? 0xFFFF_FFFF_FFFF_FFFF
             span = if s == 0xFFFF_FFFF_FFFF_FFFF or e == 0xFFFF_FFFF_FFFF_FFFF { Err(NoGroup) } else { Ok({ start: s, end: e }) }
-            Regex.pair_slots(slots, i + 2, List.append(acc, span))
+            Dfa.pair_slots(slots, i + 2, List.append(acc, span))
         }
 
     ## PikeVM find, bypassing the engine choice — for differential validation of
     ## the three-pass against the reference simulator.
-    find_pike : Regex.T, List(U8) -> Try(Regex.Span, [NoMatch])
+    find_pike : Dfa.T, List(U8) -> Try(Dfa.Span, [NoMatch])
     find_pike = |re, hay| Pike.wfind(re.comp, hay)
 
     ## Whether the pattern matches anywhere in the haystack.
-    is_match : Regex.T, List(U8) -> Bool
+    is_match : Dfa.T, List(U8) -> Bool
     is_match = |re, hay|
         match re.engine {
             # A forward-only DFA pass answers this without finding the start —
@@ -177,19 +177,19 @@ Regex := [].{
             # `Rev.find_from`), and a prefiltered pattern is better served by its
             # plan, so both of those go through `find`.
             Three(d) =>
-                if d.fwd.eoi_only or !(Regex.is_plain(re.plan)) {
-                    match Regex.find(re, hay) { Ok(_) => True Err(_) => False }
+                if d.fwd.eoi_only or !(Dfa.is_plain(re.plan)) {
+                    match Dfa.find(re, hay) { Ok(_) => True Err(_) => False }
                 } else {
                     Rev.is_match(d.fwd, re.comp.classes, hay)
                 }
             Pike =>
-                match Regex.find(re, hay) {
+                match Dfa.find(re, hay) {
                     Ok(_) => True
                     Err(_) => False
                 }
         }
 
-    is_plain : Regex.Plan -> Bool
+    is_plain : Dfa.Plan -> Bool
     is_plain = |plan| match plan.verify { VerEngine => True, _ => False }
 
 
@@ -205,11 +205,11 @@ Regex := [].{
     ## the whole matcher, which it does not — the stack then grows one frame per
     ## match and overflows (SIGBUS) after a few thousand matches. The loop keeps
     ## stack use O(1) regardless of match count.
-    all_caps : Regex.T, List(U8) -> List(List(U64))
+    all_caps : Dfa.T, List(U8) -> List(List(U64))
     all_caps = |re, hay| {
         len = List.len(hay)
         var at = 0
-        var last_end = Regex.sentinel
+        var last_end = Dfa.sentinel
         var acc = []
         var running = True
         while running {
@@ -224,11 +224,11 @@ Regex := [].{
                         s = List.get(slots, 0) ?? 0
                         e = List.get(slots, 1) ?? 0
                         if s == e and e == last_end {
-                            at = Regex.next_bound(hay, e)
+                            at = Dfa.next_bound(hay, e)
                         } else {
                             acc = List.append(acc, slots)
                             last_end = e
-                            at = if s == e { Regex.next_bound(hay, e) } else { e }
+                            at = if s == e { Dfa.next_bound(hay, e) } else { e }
                         }
                     }
                 }
@@ -273,25 +273,25 @@ Regex := [].{
     inner_prefilter_k = 4
 
     # the plan for a pattern with no usable prefilter
-    plan_engine : Regex.Plan
+    plan_engine : Dfa.Plan
     plan_engine = { scan: ScanNone, verify: VerEngine, k: 1 }
 
     # Choose the search plan. Runs once, at compile time, so for a literal
     # pattern the whole thing — Teddy tables included — folds into the artifact.
     # The order is by selectivity: a required prefix beats a leading-literal set,
     # which beats a first-byte class, which beats a required interior literal.
-    plan_of : Comp.Compiled, Regex.Engine -> Regex.Plan
+    plan_of : Comp.Compiled, Dfa.Engine -> Dfa.Plan
     plan_of = |c, engine| {
         av = match engine { Three(d) => d.averify, Pike => NoVerify }
         # the verify kind sets the density gate: see `Plan`
         dv = match av { Verify(d) => VerDfa(d), NoVerify => VerPike }
-        dk = match av { Verify(_) => Regex.inner_prefilter_k, NoVerify => Regex.prefilter_k }
+        dk = match av { Verify(_) => Dfa.inner_prefilter_k, NoVerify => Dfa.prefilter_k }
         if !List.is_empty(c.prefix) {
             fb = List.get(c.prefix, 0) ?? 0
             if c.exact {
                 # the match IS the prefix: memcmp verify, fixed-length span, no
                 # DFA and no per-byte trie lookup
-                { scan: ScanByte(fb), verify: VerMemcmp(c.prefix), k: Regex.inner_prefilter_k }
+                { scan: ScanByte(fb), verify: VerMemcmp(c.prefix), k: Dfa.inner_prefilter_k }
             } else {
                 # A multi-byte prefix scans a Teddy fingerprint (m<=3), so
                 # candidates ~= actual literal occurrences rather than every
@@ -313,10 +313,10 @@ Regex := [].{
             # alternation of leading literals (`Sherlock|Holmes|…`): Teddy over
             # the literal SET
             match Teddy.build(c.tlits) {
-                Err(_) => Regex.plan_engine
+                Err(_) => Dfa.plan_engine
                 Ok(t) =>
                     if c.exact_alt {
-                        { scan: ScanTeddy(t), verify: VerMemcmpAlt(t), k: Regex.inner_prefilter_k }
+                        { scan: ScanTeddy(t), verify: VerMemcmpAlt(t), k: Dfa.inner_prefilter_k }
                     } else {
                         { scan: ScanTeddy(t), verify: dv, k: dk }
                     }
@@ -329,14 +329,14 @@ Regex := [].{
                 # positions holding one of those bytes.
                 Pike =>
                     if List.len(c.fbytes) == 1 {
-                        { scan: ScanByte(List.get(c.fbytes, 0) ?? 0), verify: VerPike, k: Regex.prefilter_k }
+                        { scan: ScanByte(List.get(c.fbytes, 0) ?? 0), verify: VerPike, k: Dfa.prefilter_k }
                     } else if !List.is_empty(c.fbytes) {
                         match Teddy.build(List.map(c.fbytes, |b| [b])) {
-                            Ok(t) => { scan: ScanTeddy(t), verify: VerPike, k: Regex.prefilter_k }
-                            Err(_) => Regex.plan_engine
+                            Ok(t) => { scan: ScanTeddy(t), verify: VerPike, k: Dfa.prefilter_k }
+                            Err(_) => Dfa.plan_engine
                         }
                     } else {
-                        Regex.plan_engine
+                        Dfa.plan_engine
                     }
                 Three(d) =>
                     match c.frange {
@@ -346,26 +346,26 @@ Regex := [].{
                         # candidate bytes.
                         Range(lo, hi) =>
                             match av {
-                                Verify(x) => { scan: ScanRange(lo, hi), verify: VerDfa(x), k: Regex.inner_prefilter_k }
-                                NoVerify => Regex.plan_engine
+                                Verify(x) => { scan: ScanRange(lo, hi), verify: VerDfa(x), k: Dfa.inner_prefilter_k }
+                                NoVerify => Dfa.plan_engine
                             }
                         # No leading literal or class — but maybe a required
                         # INTERIOR literal (`\w+@\w+`): memchr it, then a local
                         # reverse/forward search per hit.
                         NoRange =>
                             match d.inner {
-                                Inner(inr) => { scan: ScanByte(List.get(inr.lit, 0) ?? 0), verify: VerInner(inr), k: Regex.inner_prefilter_k }
-                                NoInner => Regex.plan_engine
+                                Inner(inr) => { scan: ScanByte(List.get(inr.lit, 0) ?? 0), verify: VerInner(inr), k: Dfa.inner_prefilter_k }
+                                NoInner => Dfa.plan_engine
                             }
                     }
             }
         }
     }
 
-    find_all : Regex.T, List(U8) -> List(Regex.Span)
+    find_all : Dfa.T, List(U8) -> List(Dfa.Span)
     find_all = |re, hay|
         match re.plan.verify {
-            VerEngine => Regex.find_all_engine(re, hay)
+            VerEngine => Dfa.find_all_engine(re, hay)
             # A pure literal alternation is the one plan whose verify can run
             # INSIDE the scan: the matches are exactly the branch literals, so
             # the fused scan never materializes a candidate list. `find` still
@@ -373,19 +373,19 @@ Regex := [].{
             VerMemcmpAlt(t) =>
                 match Teddy.match_lits(t, hay, List.len(hay) // re.plan.k) {
                     Ok(spans) => spans
-                    Err(_) => Regex.find_all_engine(re, hay)
+                    Err(_) => Dfa.find_all_engine(re, hay)
                 }
             _ =>
-                match Regex.scan_candidates(re.plan, hay) {
-                    Ok(cands) => Regex.verify_candidates(re, hay, cands, False)
+                match Dfa.scan_candidates(re.plan, hay) {
+                    Ok(cands) => Dfa.verify_candidates(re, hay, cands, False)
                     # too many candidates for the prefilter to pay for itself
-                    Err(_) => Regex.find_all_engine(re, hay)
+                    Err(_) => Dfa.find_all_engine(re, hay)
                 }
         }
 
     # The candidate scan. Every arm is capped at `len / k`: past that density the
     # prefilter loses to a straight DFA pass, and `Err(TooMany)` says so.
-    scan_candidates : Regex.Plan, List(U8) -> Try(List(U64), [TooMany])
+    scan_candidates : Dfa.Plan, List(U8) -> Try(List(U64), [TooMany])
     scan_candidates = |plan, hay| {
         cap = List.len(hay) // plan.k
         match plan.scan {
@@ -399,7 +399,7 @@ Regex := [].{
     # As `scan_candidates` over `hay[0..limit]`. The density gate still uses the
     # WHOLE haystack length, so a growing-prefix search never bails to the engine
     # any sooner than `find_all` would.
-    scan_candidates_upto : Regex.Plan, List(U8), U64, U64 -> Try(List(U64), [TooMany])
+    scan_candidates_upto : Dfa.Plan, List(U8), U64, U64 -> Try(List(U64), [TooMany])
     scan_candidates_upto = |plan, hay, limit, len| {
         cap = len // plan.k
         match plan.scan {
@@ -426,20 +426,20 @@ Regex := [].{
     # Every plan that reaches here has a required literal, class or interior
     # literal, so the pattern cannot match empty and needs no empty-match
     # advance; that lives in `find_all_engine`, for the patterns that can.
-    verify_candidates : Regex.T, List(U8), List(U64), Bool -> List(Regex.Span)
+    verify_candidates : Dfa.T, List(U8), List(U64), Bool -> List(Dfa.Span)
     verify_candidates = |re, hay, cands, first_only|
         match re.plan.verify {
-            VerMemcmp(lit) => Regex.verify_memcmp(lit, hay, cands, first_only)
-            VerMemcmpAlt(t) => Regex.verify_memcmp_alt(t, hay, cands, first_only)
-            VerDfa(av) => Regex.verify_dfa(av, re.comp.classes, hay, cands, first_only)
-            VerPike => Regex.verify_pike(re.comp, hay, cands, first_only)
-            VerInner(inr) => Regex.verify_inner_all(inr, re.comp.classes, hay, cands, first_only)
+            VerMemcmp(lit) => Dfa.verify_memcmp(lit, hay, cands, first_only)
+            VerMemcmpAlt(t) => Dfa.verify_memcmp_alt(t, hay, cands, first_only)
+            VerDfa(av) => Dfa.verify_dfa(av, re.comp.classes, hay, cands, first_only)
+            VerPike => Dfa.verify_pike(re.comp, hay, cands, first_only)
+            VerInner(inr) => Dfa.verify_inner_all(inr, re.comp.classes, hay, cands, first_only)
             VerEngine => []
         }
 
     # the match IS the literal: one memcmp, fixed-length span, no DFA and no
     # per-byte trie lookup
-    verify_memcmp : List(U8), List(U8), List(U64), Bool -> List(Regex.Span)
+    verify_memcmp : List(U8), List(U8), List(U64), Bool -> List(Dfa.Span)
     verify_memcmp = |lit, hay, cands, first_only| {
         ncand = List.len(cands)
         len = List.len(hay)
@@ -471,7 +471,7 @@ Regex := [].{
     }
 
     # pure literal alternation: which branch matches here, in pattern order
-    verify_memcmp_alt : Teddy.T, List(U8), List(U64), Bool -> List(Regex.Span)
+    verify_memcmp_alt : Teddy.T, List(U8), List(U64), Bool -> List(Dfa.Span)
     verify_memcmp_alt = |t, hay, cands, first_only| {
         ncand = List.len(cands)
         len = List.len(hay)
@@ -506,7 +506,7 @@ Regex := [].{
 
     # anchored DFA from the candidate: it matches iff the pattern matches THERE,
     # a tight table loop with no per-candidate allocation
-    verify_dfa : Rev.D, Trie.T, List(U8), List(U64), Bool -> List(Regex.Span)
+    verify_dfa : Rev.D, Trie.T, List(U8), List(U64), Bool -> List(Dfa.Span)
     verify_dfa = |av, classes, hay, cands, first_only| {
         ncand = List.len(cands)
         var i = 0
@@ -539,7 +539,7 @@ Regex := [].{
     }
 
     # anchor patterns / PikeVM engine, where no anchored verify DFA was built
-    verify_pike : Comp.Compiled, List(U8), List(U64), Bool -> List(Regex.Span)
+    verify_pike : Comp.Compiled, List(U8), List(U64), Bool -> List(Dfa.Span)
     verify_pike = |c, hay, cands, first_only| {
         ncand = List.len(cands)
         var i = 0
@@ -572,7 +572,7 @@ Regex := [].{
     }
 
     # required interior literal: a local reverse scan for the start, then forward
-    verify_inner_all : Rev.InnerD, Trie.T, List(U8), List(U64), Bool -> List(Regex.Span)
+    verify_inner_all : Rev.InnerD, Trie.T, List(U8), List(U64), Bool -> List(Dfa.Span)
     verify_inner_all = |inr, classes, hay, cands, first_only| {
         ncand = List.len(cands)
         len = List.len(hay)
@@ -588,7 +588,7 @@ Regex := [].{
                 if at < last_end {
                     i = i + 1
                 } else {
-                    match Regex.verify_inner(inr, classes, hay, at, last_end, len) {
+                    match Dfa.verify_inner(inr, classes, hay, at, last_end, len) {
                         Err(_) => {
                             i = i + 1
                         }
@@ -612,7 +612,7 @@ Regex := [].{
     # full-pattern DFA from `s` (greedy-correct for a LEFT that can run past the
     # literal); `FromLit(rfwd)` runs the anchored lit·RIGHT DFA from `p` (hard
     # separator — the end is RIGHT-determined, so LEFT isn't re-scanned).
-    verify_inner : Rev.InnerD, Trie.T, List(U8), U64, U64, U64 -> Try(Regex.Span, [NoMatch])
+    verify_inner : Rev.InnerD, Trie.T, List(U8), U64, U64, U64 -> Try(Dfa.Span, [NoMatch])
     verify_inner = |inr, classes, hay, p, floor, len| {
         pe = p + List.len(inr.lit)
         if pe > len {
@@ -635,11 +635,11 @@ Regex := [].{
         }
     }
 
-    find_all_engine : Regex.T, List(U8) -> List(Regex.Span)
+    find_all_engine : Dfa.T, List(U8) -> List(Dfa.Span)
     find_all_engine = |re, hay| {
         len = List.len(hay)
         var at = 0
-        var last_end = Regex.sentinel
+        var last_end = Dfa.sentinel
         var acc = []
         var running = True
         while running {
@@ -661,11 +661,11 @@ Regex := [].{
                         s = span.start
                         e = span.end
                         if s == e and e == last_end {
-                            at = Regex.next_bound(hay, e)
+                            at = Dfa.next_bound(hay, e)
                         } else {
                             acc = List.append(acc, span)
                             last_end = e
-                            at = if s == e { Regex.next_bound(hay, e) } else { e }
+                            at = if s == e { Dfa.next_bound(hay, e) } else { e }
                         }
                     }
                 }
@@ -676,21 +676,21 @@ Regex := [].{
 
     ## Replace every match. `rep` carries `$N` group refs (longest-digit-run) and
     ## `$$` -> `$`; an unknown ref expands to empty (D15). Byte API.
-    replace_all : Regex.T, List(U8), List(U8) -> List(U8)
+    replace_all : Dfa.T, List(U8), List(U8) -> List(U8)
     replace_all = |re, hay, rep| {
-        caps = Regex.all_caps(re, hay)
+        caps = Dfa.all_caps(re, hay)
         r = List.fold(caps, { out: [], last: 0 }, |st, sl| {
             s = List.get(sl, 0) ?? 0
             e = List.get(sl, 1) ?? 0
             before = List.sublist(hay, { start: st.last, len: s - st.last })
-            expanded = Regex.expand(rep, hay, sl)
+            expanded = Dfa.expand(rep, hay, sl)
             { out: List.concat(List.concat(st.out, before), expanded), last: e }
         })
         List.concat(r.out, List.sublist(hay, { start: r.last, len: List.len(hay) - r.last }))
     }
 
     expand : List(U8), List(U8), List(U64) -> List(U8)
-    expand = |rep, hay, slots| Regex.expand_loop(rep, hay, slots, 0, [])
+    expand = |rep, hay, slots| Dfa.expand_loop(rep, hay, slots, 0, [])
 
     expand_loop : List(U8), List(U8), List(U64), U64, List(U8) -> List(U8)
     expand_loop = |rep, hay, slots, i, out|
@@ -699,37 +699,37 @@ Regex := [].{
             Ok(0x24) => {
                 nx = List.get(rep, i + 1) ?? 0
                 if nx == 0x24 {
-                    Regex.expand_loop(rep, hay, slots, i + 2, List.append(out, 0x24))
+                    Dfa.expand_loop(rep, hay, slots, i + 2, List.append(out, 0x24))
                 } else if nx >= 48 and nx <= 57 {
-                    d = Regex.read_num(rep, i + 1, 0)
-                    grp = Regex.group_bytes(hay, slots, d.n)
-                    Regex.expand_loop(rep, hay, slots, d.i, List.concat(out, grp))
+                    d = Dfa.read_num(rep, i + 1, 0)
+                    grp = Dfa.group_bytes(hay, slots, d.n)
+                    Dfa.expand_loop(rep, hay, slots, d.i, List.concat(out, grp))
                 } else {
-                    Regex.expand_loop(rep, hay, slots, i + 1, List.append(out, 0x24))
+                    Dfa.expand_loop(rep, hay, slots, i + 1, List.append(out, 0x24))
                 }
             }
-            Ok(b) => Regex.expand_loop(rep, hay, slots, i + 1, List.append(out, b))
+            Ok(b) => Dfa.expand_loop(rep, hay, slots, i + 1, List.append(out, b))
         }
 
     read_num : List(U8), U64, U64 -> { n : U64, i : U64 }
     read_num = |rep, i, acc|
         match List.get(rep, i) {
-            Ok(b) if b >= 48 and b <= 57 => Regex.read_num(rep, i + 1, acc * 10 + (b - 48).to_u64())
+            Ok(b) if b >= 48 and b <= 57 => Dfa.read_num(rep, i + 1, acc * 10 + (b - 48).to_u64())
             _ => { n: acc, i }
         }
 
     group_bytes : List(U8), List(U64), U64 -> List(U8)
     group_bytes = |hay, slots, g| {
-        s = List.get(slots, g * 2) ?? Regex.sentinel
-        e = List.get(slots, g * 2 + 1) ?? Regex.sentinel
-        if s == Regex.sentinel or e == Regex.sentinel { [] } else { List.sublist(hay, { start: s, len: e - s }) }
+        s = List.get(slots, g * 2) ?? Dfa.sentinel
+        e = List.get(slots, g * 2 + 1) ?? Dfa.sentinel
+        if s == Dfa.sentinel or e == Dfa.sentinel { [] } else { List.sublist(hay, { start: s, len: e - s }) }
     }
 
     ## Split around matches, with leading/trailing empty fields and one more
     ## field than matches (D15).
-    split : Regex.T, List(U8) -> List(List(U8))
+    split : Dfa.T, List(U8) -> List(List(U8))
     split = |re, hay| {
-        caps = Regex.all_caps(re, hay)
+        caps = Dfa.all_caps(re, hay)
         r = List.fold(caps, { fields: [], last: 0 }, |st, sl| {
             s = List.get(sl, 0) ?? 0
             e = List.get(sl, 1) ?? 0
@@ -739,19 +739,19 @@ Regex := [].{
         List.append(r.fields, List.sublist(hay, { start: r.last, len: List.len(hay) - r.last }))
     }
 
-    replace_all_str : Regex.T, Str, Str -> Str
+    replace_all_str : Dfa.T, Str, Str -> Str
     replace_all_str = |re, hay, rep|
-        Str.from_utf8(Regex.replace_all(re, Str.to_utf8(hay), Str.to_utf8(rep))) ?? ""
+        Str.from_utf8(Dfa.replace_all(re, Str.to_utf8(hay), Str.to_utf8(rep))) ?? ""
 
-    split_str : Regex.T, Str -> List(Str)
+    split_str : Dfa.T, Str -> List(Str)
     split_str = |re, hay|
-        List.map(Regex.split(re, Str.to_utf8(hay)), |f| Str.from_utf8(f) ?? "")
+        List.map(Dfa.split(re, Str.to_utf8(hay)), |f| Str.from_utf8(f) ?? "")
 
     ## Convenience: search a `Str`. Copies to `List(U8)` (D3 — the byte API is
     ## the real one; this pays a copy in).
-    find_str : Regex.T, Str -> Try(Regex.Span, [NoMatch])
-    find_str = |re, s| Regex.find(re, Str.to_utf8(s))
+    find_str : Dfa.T, Str -> Try(Dfa.Span, [NoMatch])
+    find_str = |re, s| Dfa.find(re, Str.to_utf8(s))
 
-    is_match_str : Regex.T, Str -> Bool
-    is_match_str = |re, s| Regex.is_match(re, Str.to_utf8(s))
+    is_match_str : Dfa.T, Str -> Bool
+    is_match_str = |re, s| Dfa.is_match(re, Str.to_utf8(s))
 }

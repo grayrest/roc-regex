@@ -79,7 +79,7 @@ construct at every process start; a folded Roc pattern pays nothing.
 ## The patterns
 
 What each row exercises and which path the engine takes on it. The path
-column is `Sharp.accel_str` on the compiled pattern; states and minterms are
+column is `Regex.accel_str` on the compiled pattern; states and minterms are
 the automaton's size after RE#'s rewrites.
 
 | id | pattern | states | minterms | path |
@@ -246,7 +246,7 @@ spill delta.
 
 Measured instances, each on a 256 KB scan:
 
-- adding a two-arm `match` to `Sharp.find_all` cost 20% on a pattern taking
+- adding a two-arm `match` to `Regex.find_all` cost 20% on a pattern taking
   neither arm: the procedure shrank 524 bytes, 48 fewer loads, 29 more stores;
 - adding one `Bool` parameter to a small function inlined into a per-byte
   loop, with behaviour pinned identical, cost 13-22%;
@@ -368,7 +368,7 @@ Each has a reproducer under `upstream/`. None was designed around.
   same pattern is fine.
 - `2026-09-06-dfa-crossmodule-sigbus`: `Dfa.find_first_fast` and
   `Dfa.ends_fast` SIGBUS when called directly from an app, and run fine when
-  reached through `Sharp.find`. This is why the profiling above had to be
+  reached through `Regex.find`. This is why the profiling above had to be
   indirect.
 - `2026-09-06-two-modules-folded-constant`: an app importing two modules that
   each hold a folded constant panics the compiler.

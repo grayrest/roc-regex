@@ -421,6 +421,13 @@ Ast := [
             Ok('b') => Ok({ ast: Look(Ast.look_wordb), i: i + 1 })
             Ok('B') => Ok({ ast: Look(Ast.look_nwordb), i: i + 1 })
             Ok('A') => Ok({ ast: Look(Ast.look_big_a), i: i + 1 })
+            Ok('Z') => Ok({ ast: Look(Ast.look_z), i: i + 1 })
+            # `\z` is RE#'s and Rust's spelling of the same anchor, and the
+            # differential corpora are written in it. Accepted, not documented:
+            # the pair this engine spells is `\A` and `\Z`. Translating it in
+            # the generators instead would mean rewriting pattern strings that
+            # can also contain a literal `\\z`, in the harnesses that are the
+            # safety net for everything else.
             Ok('z') => Ok({ ast: Look(Ast.look_z), i: i + 1 })
             Ok('p') => Ast.parse_prop(src, toks, i + 1, False)
             Ok('P') => Ast.parse_prop(src, toks, i + 1, True)

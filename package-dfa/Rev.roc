@@ -52,7 +52,7 @@ Rev := [].{
     ## anchored verify DFA for prefilter candidates when one could be built, and
     ## the reverse-inner prefilter when the pattern has a required interior
     ## literal. Named once — it used to be spelled out at every signature that
-    ## carried it, in this module and in `Regex`.
+    ## carried it, in this module and in `Dfa`.
     Engine : { fwd : Rev.D, rev : Rev.D, averify : [NoVerify, Verify(Rev.D)], inner : [NoInner, Inner(Rev.InnerD)] }
 
     ## Build both DFAs at compile time (folds when the pattern is constant), or

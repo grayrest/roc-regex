@@ -1,7 +1,7 @@
 # Accelerator differential
 
 Every accelerator is a claim that the stretch it jumps over holds no match.
-`Sharp.find_all_plain` runs the same automaton with `Accel.none` — no literal
+`Regex.find_all_plain` runs the same automaton with `Accel.none` — no literal
 override, no prefix or potential-start scan, no length lookup, no skips — so it
 decides all of those claims at once, and the two must return identical spans on
 every input.
