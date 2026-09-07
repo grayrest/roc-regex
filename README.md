@@ -39,13 +39,21 @@ Unicode class data (~180 KB for `\w`, needed by both the DFA and the PikeVM) —
 the D3 shared-vs-per-pattern-trie question, not the engine. This sets stop
 rule 1's threshold and D10's default budget.
 
-## A second engine: `package-sharp`
+## Two engines, and which one is the default
 
-[`package-sharp/`](package-sharp/README.md) is a port of RE#'s design —
-derivatives, leftmost-longest, `&`/`~`/`_`, lookarounds — sharing `Uni`,
-`Trie`, `Teddy` and `Lit` with `Regex`. Plan:
-[`plans/2026-09-05-package-sharp.md`](plans/2026-09-05-package-sharp.md);
-decisions and measurements:
+| directory | module | what |
+|---|---|---|
+| [`package/`](package/README.md) | `Sharp` | **the default engine.** A port of RE#'s design — Brzozowski derivatives, leftmost-longest, `&`/`~`/`_`, lookarounds. No captures. |
+| `package-dfa/` | `Regex` | the original Rust-`regex` port — leftmost-first, captures, PikeVM. Frozen: it is the Rust-semantics oracle and a Roc codegen benchmark. |
+| `package-http/` | `Http`, `Router` | HTTP framing and matchit-syntax routing on `Sharp`. |
+
+New work lands in `package/`. `Regex` keeps the sections below because the
+plans and measurement notes that produced it are the record of how the
+codepoint alphabet and the fold-based build were established, and both engines
+still share `Uni`, `Trie`, `Teddy` and `Lit`.
+
+`Sharp`'s plan is [`plans/2026-09-05-package-sharp.md`](plans/2026-09-05-package-sharp.md);
+its decisions and measurements are in
 [`notes/2026-09-05-package-sharp-design-log.md`](notes/2026-09-05-package-sharp-design-log.md).
 `tools/bench/run.sh` prints both engines next to Rust.
 

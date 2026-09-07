@@ -3,7 +3,7 @@
 
 Defines an ASCII-only corpus in RE# syntax, asks the ResharpDiff harness for
 RE#'s answers, converts UTF-16 offsets to byte offsets, and prints a Roc runner
-that compares package-sharp's `find_all` with them, and its `first_end` /
+that compares `package`'s `find_all` with them, and its `first_end` /
 `longest_end` with RE#'s `FirstEnd` / `LongestEnd`. Unicode is excluded on
 purpose: .NET's tables and ours legitimately differ.
 
@@ -13,7 +13,7 @@ purpose: .NET's tables and ours legitimately differ.
 import json, os, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PKG = os.path.abspath(os.path.join(HERE, "..", "..", "package-sharp", "main.roc"))
+PKG = os.path.abspath(os.path.join(HERE, "..", "..", "package", "main.roc"))
 PLATFORM = "https://github.com/roc-lang/basic-cli/releases/download/0.21.0/4rAQg8kUYZ3Vksr4qMQHpaFYNiHSn9GgS7gVxghd1XYV.tar.zst"
 HARNESS = os.path.join(HERE, "ResharpDiff", "bin", "Release", "net10.0", "ResharpDiff.dll")
 

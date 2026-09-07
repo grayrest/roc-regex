@@ -1,35 +1,91 @@
-## S1 + S2 — the codepoint equivalence-class partition and the two-level class
-## trie that maps a codepoint to its class in O(1).
+## The codepoint → minterm map (S9, log "Conventions").
 ##
-## The partition (S1) is the finest set of atoms such that every pattern class is
-## a union of whole atoms: collect every range endpoint, sort, dedup. The trie
-## (S2) is three flat arrays (D12 rule 3: no nested structure in the artifact) —
-## a 128-entry ASCII fast path, a `cp >> 8` level-1 index, and 256-wide leaf
-## blocks deduped adjacent-only (D12 rule 4). Class 0 is "no atom / dead".
+## S1's cut-point partition (every range endpoint of every pattern set) gives
+## atoms; atoms are then grouped by their membership signature over the pattern's
+## sets into MINTERMS — RE#'s alphabet compression — so `\w+` costs 2 classes,
+## not ~1400. S2 stores minterm ids as bytes: a 128-entry ASCII fast path, and above
+## that the cut points searched directly, with an optional `cp >> 8` index. The last
+## minterm is D8's `Invalid` symbol, which no pattern set contains.
+##
+## Every folded artifact is a flat list of scalars (D12 rule 3).
 Trie := [].{
-    ## Built classes: the trie arrays plus, per Char set, a bitset over atoms.
-    ## `n_classes` counts atoms; `set_bits` words per set = ceil(n_classes/32).
     T : {
-        ascii : List(U32),
-        l1 : List(U32),
-        leaves : List(U32),
+        # minterm per ASCII codepoint; a minterm id is < 64 so it fits a byte
+        ascii : List(U8),
+        # leaf index per 256-codepoint block
+        l1 : List(U16),
+        # 256 minterms per leaf. Leaf `m` is the constant block of minterm `m`,
+        # which every uniform block shares, so only blocks that actually contain
+        # a boundary get storage of their own.
+        leaves : List(U8),
+        # minterm count, INCLUDING the trailing Invalid class
         n_classes : U32,
-        accepts : List(U32),
-        set_words : U64,
+        # the Invalid class id (= n_classes - 1)
+        invalid : U32,
+        # one U64 tset per input set: bit m set iff minterm m ⊆ set
+        set_tsets : List(U64),
+        # the atom boundaries and each atom's minterm, used to build the two
+        # tables above and to print a set's ranges. Atom a covers
+        # [cuts[a], cuts[a+1]).
+        cuts : List(U32),
+        mt_of_atom : List(U8),
     }
 
-    ## Build the partition and trie from a program's flat `sets` table (each set
-    ## is `[neg, count, lo, hi, ...]`), and the accept-bitset for each set.
-    build : List(U32) -> Trie.T
+    ## Build from a flat `sets` table (each set `[neg, count, lo, hi, ...]`).
+    ## Fails when the pattern needs more than 63 non-Invalid minterms.
+    build : List(U32) -> Try(Trie.T, [TooManyClasses(U64)])
     build = |sets| {
         cuts = Trie.cut_points(sets)
-        n = List.len(cuts) - 1
-        n_classes = n.to_u32_wrap()
-        set_words = (n + 31) // 32
-        accepts = Trie.build_accepts(sets, cuts, set_words)
-        arrays = Trie.build_arrays(cuts)
-        { ascii: arrays.ascii, l1: arrays.l1, leaves: arrays.leaves, n_classes, accepts, set_words }
+        n_atoms = List.len(cuts) - 1
+        n_sets = Trie.count_sets(sets, 0, 0)
+        # signature per atom: membership across the sets, as a List(U8)
+        g = Trie.upto(n_atoms)
+            |> List.fold({ sigs: [], mt_of_atom: [] }, |st, a| {
+                rep = List.get(cuts, a) ?? 0
+                sig = Trie.signature(sets, n_sets, rep)
+                match List.find_first_index(st.sigs, |s| s == sig) {
+                    Ok(m) => { ..st, mt_of_atom: List.append(st.mt_of_atom, m.to_u8_wrap()) }
+                    Err(_) => { sigs: List.append(st.sigs, sig), mt_of_atom: List.append(st.mt_of_atom, (List.len(st.sigs)).to_u8_wrap()) }
+                }
+            })
+        n_mt = List.len(g.sigs)
+        if n_mt > 63 {
+            Err(TooManyClasses(n_mt))
+        } else {
+            set_tsets = Trie.upto(n_sets)
+                |> List.map(|si| List.fold_with_index(g.sigs, 0.U64, |acc, sig, m|
+                    if (List.get(sig, si) ?? 0) == 1 { acc.bitwise_or(1.U64.shl_wrap(m.to_u8_wrap())) } else { acc }))
+            arrays = Trie.build_arrays(cuts, g.mt_of_atom, (n_mt + 1).to_u64())
+            n_classes = (n_mt + 1).to_u32_wrap()
+            Ok({ ascii: arrays.ascii, l1: arrays.l1, leaves: arrays.leaves, n_classes, invalid: n_classes - 1, set_tsets, cuts, mt_of_atom: g.mt_of_atom })
+        }
     }
+
+    count_sets : List(U32), U64, U64 -> U64
+    count_sets = |sets, i, n|
+        match List.get(sets, i) {
+            Err(_) => n
+            Ok(_) => {
+                count = (List.get(sets, i + 1) ?? 0).to_u64()
+                Trie.count_sets(sets, i + 2 + count * 2, n + 1)
+            }
+        }
+
+    # membership of codepoint `rep` in each set, in set order
+    signature : List(U32), U64, U32 -> List(U8)
+    signature = |sets, n_sets, rep| Trie.sig_loop(sets, 0, n_sets, rep, [])
+
+    sig_loop : List(U32), U64, U64, U32, List(U8) -> List(U8)
+    sig_loop = |sets, i, remaining, rep, acc|
+        if remaining == 0 {
+            acc
+        } else {
+            neg = (List.get(sets, i) ?? 0) == 1
+            count = (List.get(sets, i + 1) ?? 0).to_u64()
+            inr = Trie.scan(sets, i + 2, count, rep)
+            take = if neg { !inr } else { inr }
+            Trie.sig_loop(sets, i + 2 + count * 2, remaining - 1, rep, List.append(acc, if take { 1 } else { 0 }))
+        }
 
     ## Sorted, deduped cut points bounding the atoms. Atom a covers
     ## [cuts[a], cuts[a+1]).
@@ -83,42 +139,6 @@ Trie := [].{
             }
         }
 
-    # per-set accept bitset over atoms
-    build_accepts : List(U32), List(U32), U64 -> List(U32)
-    build_accepts = |sets, cuts, set_words| Trie.accepts_loop(sets, cuts, set_words, 0, [])
-
-    accepts_loop : List(U32), List(U32), U64, U64, List(U32) -> List(U32)
-    accepts_loop = |sets, cuts, set_words, i, acc|
-        match List.get(sets, i) {
-            Err(_) => acc
-            Ok(_neg) => {
-                count = (List.get(sets, i + 1) ?? 0).to_u64()
-                bits = Trie.set_bitset(sets, i, cuts, set_words)
-                Trie.accepts_loop(sets, cuts, set_words, i + 2 + count * 2, List.concat(acc, bits))
-            }
-        }
-
-    # one set's bitset: atom a is accepted iff (cuts[a] in ranges) XOR neg
-    set_bitset : List(U32), U64, List(U32), U64 -> List(U32)
-    set_bitset = |sets, i, cuts, set_words| {
-        neg = (List.get(sets, i) ?? 0) == 1
-        n_atoms = List.len(cuts) - 1
-        words0 = List.repeat(0.U32, set_words)
-        Trie.upto(n_atoms)
-        |> List.fold(words0, |w, a| {
-            rep = List.get(cuts, a) ?? 0
-            inr = Trie.in_ranges(sets, i, rep)
-            take = if neg { !inr } else { inr }
-            if take { Trie.set_bit(w, a.to_u32_wrap()) } else { w }
-        })
-    }
-
-    in_ranges : List(U32), U64, U32 -> Bool
-    in_ranges = |sets, i, cp| {
-        count = (List.get(sets, i + 1) ?? 0).to_u64()
-        Trie.scan(sets, i + 2, count, cp)
-    }
-
     scan : List(U32), U64, U64, U32 -> Bool
     scan = |sets, at, count, cp|
         if count == 0 {
@@ -129,53 +149,41 @@ Trie := [].{
             if cp >= lo and cp <= hi { True } else { Trie.scan(sets, at + 2, count - 1, cp) }
         }
 
-    set_bit : List(U32), U32 -> List(U32)
-    set_bit = |w, a| {
-        wi = (a // 32).to_u64()
-        bit = 1.U32.shl_wrap((a % 32).to_u8_wrap())
-        cur = List.get(w, wi) ?? 0
-        List.set(w, wi, cur.bitwise_or(bit)) ?? w
-    }
+    # --- trie arrays (S2), storing minterm ids ---------------------------------
 
-    ## does set `si` (its bitset) accept atom `a`?
-    accepts_atom : Trie.T, U32, U32 -> Bool
-    accepts_atom = |t, si, a| {
-        base = si.to_u64() * t.set_words
-        wi = base + (a // 32).to_u64()
-        bit = 1.U32.shl_wrap((a % 32).to_u8_wrap())
-        (List.get(t.accepts, wi) ?? 0).bitwise_and(bit) != 0
-    }
+    Arrays : { ascii : List(U8), l1 : List(U16), leaves : List(U8) }
 
-    # --- trie arrays (S2) -----------------------------------------------------
-    #
-    # ascii[128] direct; l1[cp>>8] -> leaf-block index; leaves[block*256 + low].
-    # Leaf blocks are deduped adjacent-only: a block equal to its predecessor
-    # reuses it (D12 rule 4).
-
-    Arrays : { ascii : List(U32), l1 : List(U32), leaves : List(U32) }
-
-    build_arrays : List(U32) -> Trie.Arrays
-    build_arrays = |cuts| {
-        ascii = Trie.upto(128) |> List.map(|cp| Trie.atom_of(cuts, cp.to_u32_wrap()))
-        n_blocks = 0x110000 // 256
-        st = Trie.upto(n_blocks)
-            |> List.fold({ l1: [], leaves: [], prev: [], count: 0 }, |s, h| {
-                block = Trie.leaf_block(cuts, h)
-                if s.count > 0 and block == s.prev {
-                    { ..s, l1: List.append(s.l1, s.count - 1) }
+    ## Leaves 0..n_classes-1 are the constant blocks, one per minterm. A block
+    ## that is entirely one minterm points at its constant leaf instead of
+    ## getting a copy, which is what makes the table small: for `\w` only 131
+    ## of 4352 blocks contain a boundary. Adjacent identical mixed blocks are
+    ## shared too, as before.
+    build_arrays : List(U32), List(U8), U64 -> Trie.Arrays
+    build_arrays = |cuts, mt_of_atom, n_classes| {
+        mt = |cp| List.get(mt_of_atom, (Trie.atom_of(cuts, cp)).to_u64()) ?? 0
+        ascii = Trie.upto(128) |> List.map(|cp| mt(cp.to_u32_wrap()))
+        canon = Trie.upto(n_classes) |> List.fold([], |acc, m| List.concat(acc, List.repeat(m.to_u8_wrap(), 256)))
+        st =
+            Trie.upto(0x11_0000 // 256)
+            |> List.fold({ l1: [], leaves: canon, n_leaves: n_classes, prev: [] }, |acc, h| {
+                block = Trie.leaf_block(cuts, mt_of_atom, h)
+                first = List.get(block, 0) ?? 0
+                if List.all(block, |m| m == first) {
+                    { ..acc, l1: List.append(acc.l1, first.to_u16()) }
+                } else if block == acc.prev {
+                    { ..acc, l1: List.append(acc.l1, (acc.n_leaves - 1).to_u16_wrap()) }
                 } else {
-                    { l1: List.append(s.l1, s.count), leaves: List.concat(s.leaves, block), prev: block, count: s.count + 1 }
+                    { l1: List.append(acc.l1, acc.n_leaves.to_u16_wrap()), leaves: List.concat(acc.leaves, block), n_leaves: acc.n_leaves + 1, prev: block }
                 }
             })
         { ascii, l1: st.l1, leaves: st.leaves }
     }
 
-    leaf_block : List(U32), U64 -> List(U32)
-    leaf_block = |cuts, h| {
+    leaf_block : List(U32), List(U8), U64 -> List(U8)
+    leaf_block = |cuts, mt_of_atom, h| {
         base = (h * 256).to_u32_wrap()
-        Trie.upto(256) |> List.map(|low| Trie.atom_of(cuts, base + low.to_u32_wrap()))
+        Trie.upto(256) |> List.map(|low| List.get(mt_of_atom, (Trie.atom_of(cuts, base + low.to_u32_wrap())).to_u64()) ?? 0)
     }
-
 
     ## [0, 1, ..., n-1] as U64.
     upto : U64 -> List(U64)
@@ -184,13 +192,38 @@ Trie := [].{
     upto_loop : U64, U64, List(U64) -> List(U64)
     upto_loop = |n, i, acc| if i >= n { acc } else { Trie.upto_loop(n, i + 1, List.append(acc, i)) }
 
-    ## class of a codepoint at runtime: ascii fast path, else two-level trie.
+    ## minterm of a codepoint at runtime: ascii fast path, else two-level trie.
+    ## The minterm of a codepoint: two indexed reads, no branch beyond the
+    ## ASCII split, no loop and no call. That shape is load-bearing. This runs
+    ## per symbol on the scan's hot path, and adding either a loop or a call
+    ## stops the function being inlined: measured on 262 KB of mixed-script
+    ## text, a variant that searched the cut points cost 2.3x per lookup and
+    ## one that merely added a branch still cost 1.37x, both despite holding
+    ## less data.
     class_of : Trie.T, U32 -> U32
     class_of = |t, cp|
         if cp < 128 {
-            List.get(t.ascii, cp.to_u64()) ?? 0
+            (List.get(t.ascii, cp.to_u64()) ?? 0).to_u32()
         } else {
-            block = List.get(t.l1, cp.shr_zf_wrap(8).to_u64()) ?? 0
-            List.get(t.leaves, block.to_u64() * 256 + cp.bitwise_and(0xFF).to_u64()) ?? 0
+            block = (List.get(t.l1, cp.shr_zf_wrap(8).to_u64()) ?? 0).to_u64()
+            (List.get(t.leaves, block * 256 + cp.bitwise_and(0xFF).to_u64()) ?? 0).to_u32()
         }
+
+    ## the codepoint ranges of minterm `m` (for printing), merged.
+    ranges_of : Trie.T, U32 -> List({ lo : U32, hi : U32 })
+    ranges_of = |t, m| {
+        n_atoms = List.len(t.mt_of_atom)
+        Trie.upto(n_atoms)
+        |> List.fold([], |acc, a|
+            if (List.get(t.mt_of_atom, a) ?? 0).to_u32() == m {
+                lo = List.get(t.cuts, a) ?? 0
+                hi = (List.get(t.cuts, a + 1) ?? 0x11_0000) - 1
+                match List.last(acc) {
+                    Ok(r) if r.hi + 1 == lo => List.append(List.drop_last(acc, 1), { lo: r.lo, hi })
+                    _ => List.append(acc, { lo, hi })
+                }
+            } else {
+                acc
+            })
+    }
 }

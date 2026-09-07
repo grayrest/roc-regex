@@ -1,7 +1,9 @@
-# package-sharp — RE#'s design in Roc
+# package — RE#'s design in Roc
 
-A second regex engine in this repository, next to `package/` (`Regex`, the
-Rust `regex` port). `Sharp` is a port of [RE#](https://github.com/ieviev/resharp)
+The default regex engine of this repository. The Rust-`regex` port it grew up
+beside lives in `package-dfa/` (`Regex`) and is kept as an oracle.
+
+`Sharp` is a port of [RE#](https://github.com/ieviev/resharp)
 (`~/Repositories/resharp-dotnet`): Brzozowski derivatives over a symbolic
 alphabet, a lazily-built DFA whose states are regex nodes, **leftmost-longest**
 matching found by a reverse sweep for match starts and a forward pass for

@@ -1,1 +1,1 @@
-package [A, B] { sharp: "../../package-sharp/main.roc" }
+package [A, B] { sharp: "../../package/main.roc" }

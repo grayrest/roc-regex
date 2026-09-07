@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The Roc port against the engine it ports: package-sharp vs the original RE#
+# The Roc port against the engine it ports: `package` vs the original RE#
 # (F#/.NET) on identical patterns and an identical haystack.
 #
 #   DOTNET_ROOT=~/.dotnet PATH=~/.dotnet:$PATH RESHARP=~/Repositories/resharp-dotnet \
@@ -11,7 +11,7 @@
 # would measure .NET's startup rather than the algorithm.
 #
 # Match COUNTS are compared for parity. Offsets are not: RE# reports UTF-16
-# indices and package-sharp reports byte offsets, and this haystack is not pure
+# indices and `package` reports byte offsets, and this haystack is not pure
 # ASCII, so the two disagree by construction on positions after a multibyte
 # codepoint.
 set -euo pipefail

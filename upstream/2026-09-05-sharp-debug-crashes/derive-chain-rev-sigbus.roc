@@ -1,6 +1,6 @@
 app [main!] {
 	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.21.0/4rAQg8kUYZ3Vksr4qMQHpaFYNiHSn9GgS7gVxghd1XYV.tar.zst",
-	re: "/Users/grayrest/dev/roc/regex/.claude/worktrees/resharp-regex-design-review-60cff0/package-sharp/main.roc",
+	re: "/Users/grayrest/dev/roc/regex/.claude/worktrees/resharp-regex-design-review-60cff0/package/main.roc",
 }
 import pf.Stdout
 import re.Sharp

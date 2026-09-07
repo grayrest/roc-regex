@@ -50,7 +50,7 @@ for _ in $(seq 1 $REPS); do ./tools/bench/target/release/bench "$HAY" "$RUST_ITE
 
 echo
 echo "haystack: ${HAYLEN} bytes   |   ns = nanoseconds per find_all over the whole haystack"
-echo "roc = Roc Regex (DFA + PikeVM); sharp = Roc package-sharp (RE# derivatives, leftmost-longest);"
+echo "roc = Roc package-dfa (Regex: DFA + PikeVM); sharp = Roc package (Sharp: RE# derivatives, leftmost-longest);"
 echo "rustMeta = Rust meta engine (lazy DFA + prefilters); rustPV = Rust PikeVM."
 echo "cnt checks match-count parity of roc and sharp against Rust (a DIFF invalidates the row)."
 awk -F, '

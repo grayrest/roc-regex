@@ -1,17 +1,25 @@
-## D7 — the error type and its renderer, extended with RE#'s rejections.
+## D7 — the error type and its renderer.
 ##
-## `Error` is one record carrying the pattern, an optional span, and a `kind`.
-## Every field is documented-unstable (no field privacy in Roc). `kind` is public
-## and matchable; `render` is the only supported way to produce a message.
+## `Error` is one record carrying the pattern, an optional span, and a `kind`,
+## rather than a pattern-carrying variant per kind (D7). Every field is
+## documented-unstable: Roc has no field privacy and the nominal type that would
+## give it segfaults the compiler (Owed upstream 2), so the layout is public
+## whether or not that is intended.
+##
+## `kind` is public and matchable; `render` is the only supported way to produce
+## a message (S6). The renderer emits a window, never the whole pattern, inside a
+## 66-display-column budget, because the compile-time crash formatter reflows on
+## display width (D7, corrected 2026-09-02).
 Err := [].{
-    Pos : { offset : U64, col : U64 }
+    ## A byte offset into the pattern. The display column for the caret is
+    ## derived at render time (`col_of`) rather than stored: a stored column was
+    ## always set to the byte offset, which is wrong for any non-ASCII pattern,
+    ## and nothing read it. Parse errors point at one offset, so there is no span
+    ## either — the previous one always had `end == start`.
 
-    Span : { start : Err.Pos, end : Err.Pos }
-
-    ## What went wrong. The parse kinds track `regex-syntax`'s names; the
-    ## `Unsupported` kinds carry RE#'s own messages (its
-    ## `UnsupportedPatternException` texts) so the corpus' `tests07_unsupported`
-    ## and the dotnet diff can be compared message for message.
+    ## What went wrong. Names track `regex-syntax` so the differential harness
+    ## maps 1:1 (D7). M1 uses the parse subset; the full ~47-kind enumeration
+    ## and D13's budget kinds arrive with the milestones that raise them.
     Kind : [
         # parse
         GroupUnclosed,
@@ -23,26 +31,23 @@ Err := [].{
         RepetitionCountInvalid,
         EscapeUnrecognized,
         EscapeUnexpectedEof,
-        ComplementNeedsGroup,
-        # RE# feature set
-        LazyQuantifierUnsupported,
         FlagUnsupported,
-        Unsupported(Str),
-        # budgets (D13) and the U64 solver's width (S9)
+        # budgets (D13)
         PatternTooLong({ limit : U64, given : U64 }),
         NestLimitExceeded({ limit : U64, given : U64 }),
-        TooManyClasses({ limit : U64, given : U64 }),
+        NfaSizeLimitExceeded({ limit : U64, given : U64 }),
     ]
 
+    ## The error itself.
     Error : {
         pattern : Str,
-        at : [Whole, At(Err.Span)],
+        at : [Whole, At(U64)],
         kind : Err.Kind,
     }
 
     err : Str, U64, Err.Kind -> Err.Error
     err = |pattern, offset, kind|
-        { pattern, at: At({ start: { offset, col: offset }, end: { offset, col: offset } }), kind }
+        { pattern, at: At(offset), kind }
 
     whole : Str, Err.Kind -> Err.Error
     whole = |pattern, kind| { pattern, at: Whole, kind }
@@ -60,37 +65,37 @@ Err := [].{
             RepetitionCountInvalid => "invalid repetition count"
             EscapeUnrecognized => "unrecognized escape"
             EscapeUnexpectedEof => "incomplete escape at end of pattern"
-            ComplementNeedsGroup => "complement must be written ~( ... )"
-            LazyQuantifierUnsupported => "RE# does not support lazy quantifiers (*?, +?, ??, {n,m}?)"
             FlagUnsupported => "unsupported inline flag (only `i` is implemented)"
-            Unsupported(msg) => msg
             PatternTooLong(b) => "pattern too long: limit ${b.limit.to_str()}, given ${b.given.to_str()}"
             NestLimitExceeded(b) => "nesting too deep: limit ${b.limit.to_str()}, given ${b.given.to_str()}"
-            TooManyClasses(b) => "pattern distinguishes too many character classes: limit ${b.limit.to_str()}, given ${b.given.to_str()}"
+            NfaSizeLimitExceeded(b) => "pattern compiles too large: limit ${b.limit.to_str()} bytes, given ${b.given.to_str()}"
         }
 
     ## One line, no caret — for logs.
     to_str : Err.Error -> Str
     to_str = |e|
         match e.at {
-            Whole => "sharp: ${Err.message(e.kind)}"
-            At(s) => "sharp: ${Err.message(e.kind)} at byte ${s.start.offset.to_str()}"
+            Whole => "regex: ${Err.message(e.kind)}"
+            At(offset) => "regex: ${Err.message(e.kind)} at byte ${offset.to_str()}"
         }
-
-    ## The diagnostic: message, then the pattern with a caret.
+    ## S6 — the diagnostic. Message, then the pattern with a caret. M1 renders the
+    ## whole pattern (patterns are short); the 66-display-column windowing (D7) is
+    ## an M1.5 refinement. `render` is the only supported way to produce a message.
     render : Err.Error -> Str
     render = |e| {
-        head = "sharp: ${Err.message(e.kind)}"
+        head = "regex: ${Err.message(e.kind)}"
         match e.at {
             Whole => "${head}\n  | ${e.pattern}"
-            At(s) => {
-                col = Err.col_of(e.pattern, s.start.offset)
+            At(offset) => {
+                col = Err.col_of(e.pattern, offset)
                 pad = Str.repeat(" ", col)
                 "${head}\n  | ${e.pattern}\n  | ${pad}^"
             }
         }
     }
 
+    ## Display column of a byte offset: count codepoints before it (M1 ASCII
+    ## approximation; East-Asian width is M1.5).
     col_of : Str, U64 -> U64
     col_of = |pattern, offset|
         Err.count_cps(Str.to_utf8(pattern), 0, offset, 0)
@@ -107,4 +112,5 @@ Err := [].{
     cp_len : U8 -> U64
     cp_len = |b0|
         if b0 < 0x80 { 1 } else if b0.bitwise_and(0xE0) == 0xC0 { 2 } else if b0.bitwise_and(0xF0) == 0xE0 { 3 } else { 4 }
+
 }

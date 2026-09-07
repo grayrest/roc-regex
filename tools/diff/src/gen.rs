@@ -27,7 +27,7 @@ fn main() {
     ];
     println!("app [main!] {{");
     println!("\tpf: platform \"https://github.com/roc-lang/basic-cli/releases/download/0.21.0/4rAQg8kUYZ3Vksr4qMQHpaFYNiHSn9GgS7gVxghd1XYV.tar.zst\",");
-    println!("\tre: \"/Users/grayrest/dev/roc/regex/package/main.roc\",");
+    println!("\tre: \"/Users/grayrest/dev/roc/regex/package-dfa/main.roc\",");
     println!("}}");
     println!("import pf.Stdout");
     println!("import re.Regex\n");

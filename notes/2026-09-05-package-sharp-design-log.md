@@ -2286,3 +2286,32 @@ So `[0-9]{2,4}`'s 1.72x is not vector width (corrected above), not the `Bset`
 kernel, and not the cost of a step in general. It is the number of steps, and
 specifically the non-ASCII ones the skip refuses to pass.
 
+
+## `Sharp` becomes the default engine (2026-09-06, owner)
+
+Directory swap, owner's call: `./package` -> `./package-dfa` (`Regex`, the
+Rust-`regex` port) and `./package-sharp` -> `./package` (`Sharp`). The engine
+a caller gets by depending on this repository's `package/` is now the
+derivative engine.
+
+This is the layout catching up with S1's override in
+`plans/2026-09-06-http-parse.md`: new features already landed in `Sharp` only,
+`Regex` was already frozen as the Rust-semantics oracle and a Roc codegen
+benchmark, and `package-http` already depended on `Sharp` alone. The rename
+makes the default match what the work has been.
+
+Mechanical, and checked as such: every moved file is byte-identical to its
+predecessor in `HEAD` (`git show HEAD:<old> | cmp`), and only path strings
+changed in the consumers -- `examples/{smoke,bench}.roc` and
+`tools/{size/probe.sh,diff/src/gen.rs}` to `package-dfa/`,
+`examples/bench_sharp.roc`, `package-http/main.roc`, the four `tools/sharp-*`
+runners and the `upstream/` reproducers to `package/`. Gates after the move:
+`examples/smoke.roc` 21/21, `examples/http.roc` 60/60,
+`tools/sharp-corpus/nodes.roc` 57/57, `tools/route-diff` 174/174 against
+matchit, and all five examples build with zero errors.
+
+Names NOT changed, deliberately: the modules are still `Regex` and `Sharp`,
+and the `tools/sharp-*` directories keep their names. Renaming the module
+would rewrite every call site in the corpus, fuzz and differential tools for
+no behavioural gain, and `Sharp` is what the design log, the plans and the
+RE# comparison all say.

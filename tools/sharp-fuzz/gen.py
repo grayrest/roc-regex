@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fuzz campaign for package-sharp (plan: "a fuzz campaign of stated size
+"""Fuzz campaign for `package` (plan: "a fuzz campaign of stated size
 against the brute-force reference with zero divergences").
 
 Generates random RE#-syntax patterns over a small alphabet and fixed
@@ -17,7 +17,7 @@ lookarounds, `\\B`) are counted, not failed.
 import os, random, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PKG = os.path.abspath(os.path.join(HERE, "..", "..", "package-sharp", "main.roc"))
+PKG = os.path.abspath(os.path.join(HERE, "..", "..", "package", "main.roc"))
 PLATFORM = "https://github.com/roc-lang/basic-cli/releases/download/0.21.0/4rAQg8kUYZ3Vksr4qMQHpaFYNiHSn9GgS7gVxghd1XYV.tar.zst"
 
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 1500
