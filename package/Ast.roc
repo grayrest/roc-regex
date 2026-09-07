@@ -378,7 +378,7 @@ Ast := [
             } else {
                 # (?flags: ... ) or (?: ... )
                 f = Ast.read_flags(toks, i + 2, { ci: False, bad: False })
-                { kind: Plain, ci: f.ci, inner: f.i + 1, bad: f.bad }
+                { kind: Plain, ci: f.ci, inner: f.i + 1, bad: f.bad or !f.scoped }
             }
         } else {
             { kind: Plain, ci: False, inner: i + 1, bad: False }
@@ -395,13 +395,20 @@ Ast := [
     # An unimplemented flag is an ERROR, not a skip: skipping gave `(?s:.)` and
     # `(?U:a+)` the wrong meaning silently. `i` is the only one implemented, and
     # `.` already excludes `\n` unconditionally in RE#, so there is no `(?s)`.
-    read_flags : List(Ast.Tok), U64, { ci : Bool, bad : Bool } -> { ci : Bool, i : U64, bad : Bool }
+    #
+    # `scoped` says the group ended at `:`, i.e. it is `(?flags:…)` and brackets
+    # something. A group that ends at `)` is a flag SETTING for the rest of the
+    # pattern, which only `starts_ci` handles and only at offset 0; anywhere
+    # else it is unsupported. Saying so here matters because the caller reads
+    # past the `)` for the body otherwise, and `a(?i)bc` used to be parsed as a
+    # group holding `bc` and reported as an unclosed group.
+    read_flags : List(Ast.Tok), U64, { ci : Bool, bad : Bool } -> { ci : Bool, i : U64, bad : Bool, scoped : Bool }
     read_flags = |toks, i, acc|
         match Ast.cp_at(toks, i) {
             Ok('i') => Ast.read_flags(toks, i + 1, { ci: True, bad: acc.bad })
-            Ok(':') => { ci: acc.ci, i, bad: acc.bad }
-            Ok(')') => { ci: acc.ci, i, bad: acc.bad }
-            Err(_) => { ci: acc.ci, i, bad: acc.bad }
+            Ok(':') => { ci: acc.ci, i, bad: acc.bad, scoped: True }
+            Ok(')') => { ci: acc.ci, i, bad: acc.bad, scoped: False }
+            Err(_) => { ci: acc.ci, i, bad: acc.bad, scoped: False }
             _ => Ast.read_flags(toks, i + 1, { ci: acc.ci, bad: True })
         }
 

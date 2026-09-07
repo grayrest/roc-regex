@@ -311,7 +311,7 @@ available to `\p{…}`: general categories `L` (`Letter`), `Lu`, `Ll`, `N`
 
 Greedy and lazy have no meaning under leftmost-longest matching: the match is
 the longest one whatever the quantifier, so `a*?` is accepted and means `a*`.
-Quantifiers stack: `a**` is `(a*)*`. Repetition must follow a lieteral or class so
+Quantifiers stack: `a**` is `(a*)*`. Repetition must follow a literal or class so
  `{,5}` is an error.
 
 ### Combining
@@ -324,7 +324,7 @@ Quantifiers stack: `a**` is `(a*)*`. Repetition must follow a lieteral or class 
 | `~(a)` | any string that is not an `a`; the parentheses are required |
 | `(a)`, `(?:a)`, `(?<name>a)` | grouping, all equivalent; nothing is captured |
 
-`&` and `~` are where this engine earns its keep. Some idioms, from RE#'s
+`&` and `~` are the most novel features of RE#'s engine. Some idioms, from RE#'s
 documentation:
 
 | pattern | matches |
