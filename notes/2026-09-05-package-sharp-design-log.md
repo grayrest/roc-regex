@@ -2646,7 +2646,18 @@ Six of ten rows are at or below Rust, and the widest is 1.26x.
 
 Gates: corpus 331/331, fuzz plain 18000 cases 0 divergences, fuzz seed 42 16
 (pre-existing), node layer 57/57, skip differential 112/112, http 60/60, router
-174/174. Plus an accelerator differential written for this change -- `find_all`
-against `find_all_plain`, the same automaton with every accelerator off -- over
-31 literal-run patterns and four 256 KB haystacks, 124/124. It has teeth:
-breaking the second partner's distance by one reads 84/124.
+174/174. Plus an accelerator differential written for this change and landed as
+`tools/accel-diff`: `find_all` against `find_all_plain`, the same automaton
+with `Accel.none`, so the literal override, both prefix scans, the length
+lookup and the skips are all off at once. 31 patterns over twelve haystacks,
+372/372.
+
+**Its short haystacks are not decoration.** At first it ran only the four
+256 KB haystacks, 124/124, and caught two of three deliberate breaks: the
+second partner's distance off by one (88/124) and the pair's direction
+inverted. The third -- making a partner load that would cross an edge a
+REQUIREMENT instead of skipping it, which is the one place the filter/requirement
+distinction is load-bearing -- read a clean 124/124, because that fallback is
+reachable only in the first and last 16-byte window and none of those haystacks
+puts a match there. Eight short haystacks with a match in both windows close
+it: 365/372 on that break, 310 and 301 on the other two.

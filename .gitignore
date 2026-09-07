@@ -36,3 +36,4 @@ tools/route-diff/rust/Cargo.lock
 /http_bench
 /http_bench_tmp
 /skip_diff
+/accel_diff
