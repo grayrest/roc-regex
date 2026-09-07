@@ -2832,3 +2832,71 @@ Three breaks, each caught:
 | the run's lower bound off by one | 959/1020 |
 | the gate stops requiring an ASCII-only class | 996/1020 |
 | runs no longer merge across a window boundary | 1001/1020 |
+
+## `\w+\s+\w+`: start compression is not unsound, it is WRONG (2026-09-07)
+
+The widest row at 1.31x, and the one lever the log kept holding open for it
+turns out not to exist. Recording the counterexample, because two earlier
+entries describe start-run compression as "15% of the row, unsound in general,
+needs a gate the engine does not compute" -- which reads as "gate it and ship
+it", and it is not gateable.
+
+### The idea, and why it looked gateable
+
+The sweep records 210198 starts for 21091 matches. Only the leftmost of each
+run of CONSECUTIVE starts can survive `ends_fast`, which drops every start
+inside the previous match -- so collapsing runs should be free. Measured, it
+is worth about 330000 ns of a 2020000 ns row: the end pass goes 1055000 ->
+845000, and the sweep's 210198 appends would fall to 45917.
+
+The soundness worry on record was that a start whose forward scan finds no end
+does not advance `next_valid`, so dropping its neighbour loses a match. That
+looked gateable: no lookarounds, no anchors, and a minimum match length of two
+symbols, all of which the arena already answers.
+
+### The counterexample
+
+`[a-z][a-z]` on `"aaaa"`. Starts 0, 1, 2. `ends_fast` takes [0,2), sets
+`next_valid` to 2, drops start 1, takes start 2 -> [2,4). **Two matches.**
+Compressed, starts 0, 1, 2 collapse to 0 alone, [0,2) is found, and start 2 is
+gone. **One match.**
+
+The premise was wrong. Dropping `p+1` is safe; the run also contains `p+2`,
+`p+4` and so on, which are exactly the starts of the FOLLOWING non-overlapping
+matches. Nothing about lookarounds or minimum length touches that.
+
+A sweep over 38 patterns x 18 haystacks: 76 of 684 cases differ, and **40 of
+them pass the proposed gate** -- `[a-z][a-z]`, `aa`, `aaa`, `a{2}`, `a{2,3}`,
+every pattern whose matches tile. `\w+\s+\w+` happens not to be one of them,
+which is the only reason the earlier one-pattern check read "same=y" and the
+idea survived two entries.
+
+**Start compression is dead. Do not revisit it.**
+
+### The other lever, also measured
+
+Collapsing the sweep's nullability chain to its one live arm (this pattern's
+states are only `nk_notnull` and `nk_current`, which `ef_starts_desc` already
+establishes at fold time) reads **1.016x** on the target row -- no gain. The
+two branches removed are perfectly predicted; the 259000 ns the nullability
+read costs is the LOAD, and folding that into `atable` is the transition
+tagging ruled out long ago.
+
+So the row stands at 1.31x with its two passes ~2.0 ms against Rust's 1.54 ms
+for the whole search, and 491000 ns of reverse stepping plus ~820000 of forward
+scanning is the floor of doing it in two passes. What would move it is
+`Rrun` generalized from one class run to a SEQUENCE of them -- `\w+`, `\s+`,
+`\w+` is exactly that shape -- but `\w` holds non-ASCII codepoints, so the
+`Bset` kernel that makes `Rrun` fast does not apply, and a hybrid that decodes
+the non-ASCII stretches reintroduces the per-restart cost `Rrun` exists to
+avoid. Not started on the strength of one row.
+
+### An unexplained compiler observation
+
+The one-line trim above -- deleting two arms of an `if` chain in
+`collect_plain` -- took `roc build` **58 minutes** against the 45-50 seconds
+every other build in this session took, and produced a correct binary. Seen
+once, not reduced, not filed: re-testing costs an hour and it was measurement
+scaffolding that is now reverted. The variant is kept at
+`/tmp/Dfa_trimmed_slowbuild.roc` for the session. Noted so that a future
+inexplicable build time has a precedent.
