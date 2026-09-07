@@ -98,7 +98,7 @@ Sharp := [].{
                                 ais = Deriv.at_input_start(np.a, root.id)
                                 e0 = Dfa.init(ais.a, rts.id, np.id, ais.id, Sharp.max_states(trie.n_classes))
                                 ac = Accel.analyze(e0, trie, root.id, rv.id, rts.id, np.id)
-                                e = Dfa.freeze(Dfa.explore(ac.e), trie.ascii)
+                                e = Dfa.freeze(Dfa.explore(ac.e), trie)
                                 lits =
                                     match ac.accel.override {
                                         NoOverride =>
@@ -267,7 +267,7 @@ Sharp := [].{
 
     ## how many states of a complete fold carry a skip set (S13 diagnostics)
     n_skip_states : Sharp.T -> U64
-    n_skip_states = |re| List.count_if(re.e.skip_ok, |x| x == 1)
+    n_skip_states = |re| List.count_if(re.e.skip_ok, |x| x != 0)
 
     ## Did the fold explore every reachable state?
     is_complete : Sharp.T -> Bool

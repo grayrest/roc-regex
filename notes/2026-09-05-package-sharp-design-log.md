@@ -2315,3 +2315,117 @@ and the `tools/sharp-*` directories keep their names. Renaming the module
 would rewrite every call site in the corpus, fuzz and differential tools for
 no behavioural gain, and `Sharp` is what the design log, the plans and the
 RE# comparison all say.
+
+## `[0-9]{2,4}`: the skip learns to pass over non-ASCII (2026-09-07)
+
+The row had been the widest gap against Rust since the first three-way table
+and the only one where `Regex` beat `Sharp`. Two entries above diagnosed it as
+step COUNT -- 4950 non-ASCII symbols the digit skip refuses to pass -- and
+left a range kernel as tried-and-reverted. This entry confirms the diagnosis
+by experiment and fixes it, at 1.75x -> 1.20x with no other row moving.
+
+### The diagnosis, settled
+
+Replace every non-ASCII byte of the bench haystack with `x`. Same 262144
+bytes, same 4554 digits in the same places, same 1455 matches:
+
+| haystack | sharp | rustMeta | |
+|---|---|---|---|
+| as generated | 188950 | 108834 | 1.74x |
+| non-ASCII -> `x` | 99850 | 109024 | **0.92x** |
+
+Rust does not move (108834 -> 109024). `Sharp` halves and passes it. The whole
+gap is the 9900 non-ASCII bytes, about 18 ns per symbol. Nothing about the
+per-byte codegen is wrong on this row: given an all-ASCII haystack the loop is
+already faster than Rust's.
+
+Attributing that 18 ns, with the sweep's skip loop emulated over the real
+haystack and the state pinned (min-of-200 in process):
+
+| the non-ASCII arm does | ns |
+|---|---|
+| stop, then one cheap byte step | 97000 |
+| stop, then `decode_rev` | 171000 |
+| + `Trie.class_of` | 166000 |
+| + the minterm transition (what it does today) | 151000 |
+| walk the whole run back, no decode | 81000 |
+| never stop for non-ASCII at all | 41000 |
+
+So 110000 ns of the row is reachable, and a scan that never stops would take
+all of it. (The b/c/d ordering is inverted by a few percent -- three loop
+shapes, not three costs; the useful reading is 151000 against 81000 and 41000.)
+
+### When passing is sound
+
+`skip_ok[s]` becomes 0 / 1 / 2, where 2 says the skip may pass over non-ASCII
+symbols. It needs two things beyond a 1:
+
+- **No minterm holding a non-ASCII codepoint leaves the state.** The trie's
+  atoms give this directly: atom `a` covers `[cuts[a], cuts[a+1])`, so it
+  reaches past ASCII exactly when `cuts[a+1] > 0x80`. `Dfa.nonascii_classes`
+  unions those atoms' minterms with `Invalid`, and a state passes when its
+  leaving set misses all of them -- every such symbol then loops.
+- **The state is not nullable.** A nullable skip state records every skipped
+  POSITION as a match start, which is only right while each position is a
+  symbol; passing over a multibyte run would record its interior bytes.
+
+`[0-9]{2,4}`'s sweep has one skipping state (the reverse start, `st_nk` =
+`nk_notnull`), and it qualifies.
+
+### Four wirings, and why the cheapest one shipped
+
+Reading the flag is free; ACTING on it is where three of four attempts paid
+for the row out of every other row's pocket. A/B alternating both binaries in
+one session, min-of-8:
+
+| wiring | `bounded_num` | the heavy-sweep rows |
+|---|---|---|
+| encoding only (`== 1` -> `!= 0`, no behaviour change) | 0.995x | 0.99-1.01x |
+| `Bset.rfind_ascii`, a second SIMD kernel in the arm | 0.565x | class_plus 1.03, two_words 1.03, uni_letters 1.03 |
+| one kernel, a stop/pass mask threaded through `rfind` | **0.517x** | 1.035-1.058x |
+| the same, mask built inside the skip branch | 0.526x | 1.02-1.05x, moving between rows |
+| **walk the run back with a byte loop** | **0.666x** | **0.98-1.01x** |
+
+The first row is the control: renumbering the flag, with the scans behaving
+exactly as before, costs nothing. Everything after it is the arm.
+
+The two fastest wirings are the two that touch shared code -- a second SIMD
+loop inlined into `collect_plain`, or one loop with an extra parameter -- and
+both tax `class_plus`, `two_words` and `uni_letters` 3-5%, patterns that never
+take the branch. This is the hot-loop note's register-pressure effect again,
+and at these sizes 3% of three ~2.1 ms rows is more time than the whole
+80-90 us won on `bounded_num`. Hoisting the mask out of the per-byte test
+recovered about half of it and moved the rest onto other rows.
+
+What shipped is the slowest of the three and the only one that is free: inside
+the `b < 0x80` branch `collect_plain` ALREADY has, a `while` that walks the
+non-ASCII run back a byte at a time. No new kernel, no new parameter, `Bset`
+untouched, and the per-byte test above it byte-identical. It leaves the
+109000-vs-126000 difference on the table on purpose.
+
+### What it moved
+
+| | before | after |
+|---|---|---|
+| `bounded_num` vs Rust meta | 1.75x | **1.20x** |
+| `bounded_num` vs `Regex` (`package-dfa`) | 1.39x, `Regex` ahead | 1.41x vs 1.20x, `Sharp` ahead |
+| every other row | | 0.98-1.01x |
+
+`[0-9]{2,4}` is no longer the widest row -- `two_words` at 1.41x is -- and no
+longer the row where `Regex` wins.
+
+Gates: corpus 331/331, fuzz plain 1500 patterns / 18000 cases 0 divergences,
+fuzz seed 42 full 16 divergences (the pre-existing `$`-before-nullable family,
+unchanged), node layer 57/57, `examples/http.roc` 60/60, router differential
+174/174. Plus a differential written for this change: `find_all` against
+`find_all_noskip` -- same automaton, skips off -- for 18 patterns over four
+256 KB haystacks (mixed, lone continuation bytes at every 997th position,
+`0xFF` at every 997th position, all-ASCII), 72/72 identical.
+
+### Not done
+
+`collect_prefix` and the two forward loops have the same shape and did not get
+the pass path. No pattern measured here would use it: a prefix accelerator
+implies a literal run, and `\bthe\b`'s skip set contains the word class, which
+is not ASCII-only. Adding it is three more perturbations of hot loops with no
+row to show for them.

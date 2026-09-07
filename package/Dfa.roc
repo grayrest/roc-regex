@@ -57,9 +57,11 @@ Dfa := [].{
         # extensible path mints states at scan time up to `runtime_cap`.
         atable : List(U16),
         # complete folds only (RE#'s per-state startsets / `CanSkipFlag`): for
-        # state `s`, `skip_ok[s] == 1` says the bytes that change the state form
-        # a rare enough set that a scan in `s` can skip to the nearest one;
-        # `skip_lo` holds its `Bset` table at `s * 16`
+        # state `s`, a non-zero `skip_ok[s]` says the bytes that change the
+        # state form a rare enough set that a scan in `s` can skip to the
+        # nearest one; `skip_lo` holds its `Bset` table at `s * 16`. A 2 says
+        # the skip may also pass over non-ASCII symbols untouched -- see
+        # `skip_sets` for the two conditions that earns.
         skip_ok : List(U8),
         skip_lo : List(U8),
         # does any state skip? (the per-step skip check costs ~0.6 ns; off when useless)
@@ -125,10 +127,10 @@ Dfa := [].{
     default_runtime_cap = 100_000
 
     ## Record the fold's extent; everything created later can be evicted. For a
-    ## complete fold, also fuse the ASCII byte -> state table the fast scans use
-    ## (`ascii` is the trie's byte -> class table).
-    freeze : Dfa.E, List(U8) -> Dfa.E
-    freeze = |e, ascii| {
+    ## complete fold, also fuse the ASCII byte -> state table the fast scans use.
+    freeze : Dfa.E, Trie.T -> Dfa.E
+    freeze = |e, t| {
+        ascii = t.ascii
         n = List.len(e.st_node)
         atable =
             if e.complete {
@@ -141,16 +143,31 @@ Dfa := [].{
             } else {
                 []
             }
-        sk = if e.complete { Dfa.skip_sets(e, ascii, n) } else { { ok: [], lo: [] } }
-        { ..e, fold_states: n, fold_marks: Arena.marks(e.a), atable, skip_ok: sk.ok, skip_lo: sk.lo, any_skip: List.any(sk.ok, |x| x == 1) }
+        sk = if e.complete { Dfa.skip_sets(e, ascii, Dfa.nonascii_classes(t), n) } else { { ok: [], lo: [] } }
+        { ..e, fold_states: n, fold_marks: Arena.marks(e.a), atable, skip_ok: sk.ok, skip_lo: sk.lo, any_skip: List.any(sk.ok, |x| x != 0) }
     }
+
+    # The minterms holding at least one non-ASCII codepoint, plus `Invalid`.
+    # Atom `a` covers `[cuts[a], cuts[a+1])`, so it reaches past ASCII exactly
+    # when its upper cut does.
+    nonascii_classes : Trie.T -> U64
+    nonascii_classes = |t|
+        List.fold_with_index(t.mt_of_atom, TSet.bit(t.invalid), |acc, m, a|
+            if (List.get(t.cuts, a + 1) ?? Trie.cp_max) > 0x80 { TSet.union(acc, TSet.bit(m.to_u32())) } else { acc })
 
     # RE#'s `_createStartset` for every state of a complete fold: the minterms
     # whose transition leaves the state (for the initial state, also not to
     # dead) as an ASCII byte set; skippable when neither empty nor full and not
-    # too common. Non-ASCII bytes stop a skip regardless (`Bset`).
-    skip_sets : Dfa.E, List(U8), U64 -> { ok : List(U8), lo : List(U8) }
-    skip_sets = |e, ascii, n| {
+    # too common.
+    #
+    # `skip_ok[s]` is 0 (no skip), 1 (skip, stopping at every non-ASCII byte as
+    # `Bset` does) or 2 (skip, and non-ASCII may be passed over untouched). A 2
+    # needs two more things than a 1: no minterm holding a non-ASCII codepoint
+    # leaves the state, so every such symbol loops; and the state is not
+    # nullable, so the skipped stretch holds no match start that the sweep would
+    # have to record at a symbol boundary it never computed.
+    skip_sets : Dfa.E, List(U8), U64, U64 -> { ok : List(U8), lo : List(U8) }
+    skip_sets = |e, ascii, na, n| {
         nmt = e.nmt.to_u64()
         List.fold(Arena.upto(n), { ok: [], lo: [] }, |acc, s| {
             initial = s == e.s_rev_ts.to_u64()
@@ -160,7 +177,8 @@ Dfa := [].{
             })
             bytes = List.keep_if(Arena.upto(128), |b| TSet.contains(ss, (List.get(ascii, b) ?? 0).to_u32())) |> List.map(|b| b.to_u8_wrap())
             usable = s > Dfa.dead.to_u64() and ss != 0 and ss != TSet.full(e.nmt) and !Bset.too_common(bytes)
-            { ok: List.append(acc.ok, if usable { 1 } else { 0 }), lo: List.concat(acc.lo, Bset.table(bytes)) }
+            passes = TSet.inter(ss, na) == 0 and (List.get(e.st_nk, s) ?? Dfa.nk_notnull) == Dfa.nk_notnull
+            { ok: List.append(acc.ok, if !usable { 0 } else if passes { 2 } else { 1 }), lo: List.concat(acc.lo, Bset.table(bytes)) }
         })
     }
 
@@ -802,7 +820,7 @@ Dfa := [].{
                         # nearest member; the last such position is the best end, so jump
                         # there (never past the last byte: the regular step then reaches
                         # the end-of-input handling)
-                        if (List.get(skip_ok, s.to_u64()) ?? 0) == 1 and !Bset.member(skip_lo, s.to_u64(), b0) {
+                        if (List.get(skip_ok, s.to_u64()) ?? 0) != 0 and !Bset.member(skip_lo, s.to_u64(), b0) {
                             pos =
                                 match Bset.find(hay, skip_lo, s.to_u64(), pos + 1) {
                                     Ok(p) => p
@@ -1329,7 +1347,8 @@ Dfa := [].{
         var acc = acc0
         while pos > 0 {
             b = List.get(hay, pos - 1) ?? 0
-            if (List.get(skip_ok, s.to_u64()) ?? 0) == 1 and !Bset.member(skip_lo, s.to_u64(), b) {
+            ok = List.get(skip_ok, s.to_u64()) ?? 0
+            if ok != 0 and !Bset.member(skip_lo, s.to_u64(), b) {
                 # RE#'s `skip_active_rev`: the state loops on every byte back to
                 # the nearest member, so each skipped position (all ASCII, one
                 # byte per symbol) is a match start when the state is nullable
@@ -1362,6 +1381,20 @@ Dfa := [].{
                 if b < 0x80 {
                     s = (List.get(at, s.to_u64() * 128 + b.to_u64()) ?? Dfa.dead16).to_u32()
                     pos = pos - 1
+                } else if ok == 2 {
+                    # `skip_sets` established that every non-ASCII symbol loops
+                    # here, so the whole run walks back in one go: no decode, no
+                    # class lookup, no transition. This rides the `b < 0x80`
+                    # branch the loop already has, and touches neither the
+                    # per-byte test above nor `Bset` -- the three wirings that
+                    # did (a second SIMD kernel, or a mask threaded through
+                    # `rfind`) each cost 2-5% on every heavy-sweep row to buy
+                    # this one more, and are recorded in the design log.
+                    var p = pos
+                    while p > 0 and (List.get(hay, p - 1) ?? 0) >= 0x80 {
+                        p = p - 1
+                    }
+                    pos = p
                 } else {
                     d = Utf8.decode_rev(hay, pos)
                     cls = if d.ok { Trie.class_of(t, d.cp) } else { t.invalid }
@@ -1446,7 +1479,7 @@ Dfa := [].{
                 }
             } else {
                 b = List.get(hay, pos - 1) ?? 0
-                if (List.get(skip_ok, s.to_u64()) ?? 0) == 1 and !Bset.member(skip_lo, s.to_u64(), b) {
+                if (List.get(skip_ok, s.to_u64()) ?? 0) != 0 and !Bset.member(skip_lo, s.to_u64(), b) {
                     # RE#'s `skip_active_rev`: the state loops on every byte back to
                     # the nearest member, so each skipped position (all ASCII, one
                     # byte per symbol) is a match start when the state is nullable
@@ -1576,7 +1609,7 @@ Dfa := [].{
                 # nearest member; the last such position is the best end, so jump
                 # there (never past the last byte: the regular step then reaches
                 # the end-of-input handling)
-                if (List.get(skip_ok, s.to_u64()) ?? 0) == 1 and !Bset.member(skip_lo, s.to_u64(), b0) {
+                if (List.get(skip_ok, s.to_u64()) ?? 0) != 0 and !Bset.member(skip_lo, s.to_u64(), b0) {
                     pos =
                         match Bset.find(hay, skip_lo, s.to_u64(), pos + 1) {
                             Ok(p) => p

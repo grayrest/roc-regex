@@ -31,6 +31,10 @@ Trie := [].{
         mt_of_atom : List(U8),
     }
 
+    ## one past the last Unicode scalar value: the implicit upper cut
+    cp_max : U32
+    cp_max = 0x11_0000
+
     ## Build from a flat `sets` table (each set `[neg, count, lo, hi, ...]`).
     ## Fails when the pattern needs more than 63 non-Invalid minterms.
     build : List(U32) -> Try(Trie.T, [TooManyClasses(U64)])

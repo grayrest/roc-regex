@@ -177,7 +177,7 @@ Accel := [].{
                                         [(_, x)] if x == Arena.bot => {
                                             ds = Dfa.get_state(e3, der, False)
                                             nk = Dfa.nk(ds.e, ds.id)
-                                            skips = (List.get(ds.e.skip_ok, ds.id.to_u64()) ?? 0) == 1
+                                            skips = (List.get(ds.e.skip_ok, ds.id.to_u64()) ?? 0) != 0
                                             if nk != Dfa.nk_pending and !skips {
                                                 c = TSet.lowest(mt)
                                                 bytes = List.keep_if(Arena.upto(128), |b| (List.get(t.ascii, b) ?? 0).to_u32() == c) |> List.map(|b| b.to_u8_wrap())
