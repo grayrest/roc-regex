@@ -1,5 +1,4 @@
-## The Roc side of the HTTP parse benchmark (H10 of
-## `plans/2026-09-06-http-parse.md`), against `tools/http-bench/rust`
+## The Roc side of the HTTP parse benchmark, against `tools/http-bench/rust`
 ## (httparse + matchit).
 ##
 ## The task, identical on both sides: for each request, frame it, select the
@@ -39,11 +38,7 @@ methods : List(Str)
 methods = ["GET", "POST", "DELETE"]
 
 router : Router.T
-router =
-	match Router.build(List.join(List.map(methods, |m| List.map(route_paths, |p| { method: m, path: p })))) {
-		Ok(r) => r
-		Err(_) => crash "route table is invalid"
-	}
+router = Router.build(List.join(List.map(methods, |m| List.map(route_paths, |p| { method: m, path: p })))) ?? crash "route table is invalid"
 
 # Headers are parsed by `frame` now, so a lookup is a case-insensitive byte
 # compare against the index rather than its own search.

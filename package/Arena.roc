@@ -1,4 +1,4 @@
-## The regex-node arena (S9): RE#'s `RegexBuilder` storage as flat lists.
+## The regex-node arena: RE#'s `RegexBuilder` storage as flat lists.
 ##
 ## A node is a run of cells `[kind, ...fields]` in `cells`; its id is the index
 ## into `offs` (node id → cell offset). Per-node info lives in parallel lists:
@@ -8,7 +8,7 @@
 ## `index` is one open-addressing hash table serving both roles RE#'s
 ## `_nodeCache` plays: structural interning (a node's own cells → its id) and the
 ## rewrite memo (an unnormalized key → the id it rewrites to). Keys are copied
-## into `ikeys`; every list is `U32`/`U64`/`U8` so the whole record folds (D12).
+## into `ikeys`; every list is `U32`/`U64`/`U8` so the whole record folds.
 ##
 ## Node ids 0–6 are fixed as in RE# so the ported rules read the same.
 Arena := [].{
@@ -31,20 +31,24 @@ Arena := [].{
         rs_off : List(U32),
         rs_len : List(U32),
         # alphabet
-        nmt : U32,
+        minterm_count : U32,
         wordc : U64,
         nonwordc : U64,
         # RE#'s well-known anchor nodes, filled by `Build.init_anchors`
-        anc : Arena.Anchors,
+        anchors : Arena.Anchors,
         or_count : U32,
         # RE# raises `UnsupportedPatternException`; constructors here record the
         # first message and keep going, and `compile` turns it into an `Err`.
         err : [NoErr, Unsup(Str)],
     }
 
-    Anchors : { caret : U32, dollar : U32, nwl : U32, wl : U32, nwr : U32, wr : U32, a_anchor : U32, end_z : U32 }
+    Anchors : { caret : U32, dollar : U32, nonword_left : U32, word_left : U32, nonword_right : U32, word_right : U32, a_anchor : U32, end_z : U32 }
 
     R : { a : Arena.A, id : U32 }
+
+    ## An arena and a list of node ids, the result of mapping a constructor
+    ## over children.
+    Ids : { a : Arena.A, ids : List(U32) }
 
     # --- fixed ids and encodings -------------------------------------------------
 
@@ -90,6 +94,32 @@ Arena := [].{
     k_end : U32
     k_end = 9
 
+    ## A node's kind as a tag, for dispatch.
+    ##
+    ## The cells stay `U32` — the `k_*` constants above are still
+    ## how a node is BUILT. This is the read side: a walker matches on it and
+    ## gets exhaustiveness, where an `if k == Arena.k_or else if …` ladder
+    ## silently folds every unhandled kind into its trailing `else`.
+    Kind : [Concat, Singleton, Loop, Or, And, Not, LookAhead, LookBehind, Begin, End]
+
+    ## The literals here are the `k_*` values immediately above, which is the
+    ## one place the two numberings have to agree: a pattern needs a literal,
+    ## so the constants cannot be named in it. Keep them adjacent.
+    kind_of : Arena.A, U32 -> Arena.Kind
+    kind_of = |a, id|
+        match Arena.kind(a, id) {
+            0 => Concat
+            1 => Singleton
+            2 => Loop
+            3 => Or
+            4 => And
+            5 => Not
+            6 => LookAhead
+            7 => LookBehind
+            8 => Begin
+            _ => End
+        }
+
     f_can_null : U8
     f_can_null = 1
     f_always_null : U8
@@ -112,34 +142,34 @@ Arena := [].{
 
     Info : { flags : U8, sub : U64, minl : U32, maxl : U32, pend : U32 }
 
-    ## An arena over `nmt` minterms with the seven fixed nodes registered.
+    ## An arena over `minterm_count` minterms with the seven fixed nodes registered.
     init : U32 -> Arena.A
-    init = |nmt| {
-        full = if nmt >= 64 { 0xFFFF_FFFF_FFFF_FFFF } else { 1.U64.shl_wrap(nmt.to_u8_wrap()) - 1 }
-        a0 = {
+    init = |minterm_count| {
+        full = if minterm_count >= 64 { 0xFFFF_FFFF_FFFF_FFFF } else { 1.U64.shl_wrap(minterm_count.to_u8_wrap()) - 1 }
+        a_empty = {
             cells: [], offs: [], flags: [], sub: [], minl: [], maxl: [], pend: [],
             islots: List.repeat(0.U32, 64), ient_key: [], ient_len: [], ient_id: [], ikeys: [],
             rs_data: [], rs_off: [], rs_len: [],
-            nmt, wordc: 0, nonwordc: 0,
-            anc: { caret: Arena.none, dollar: Arena.none, nwl: Arena.none, wl: Arena.none, nwr: Arena.none, wr: Arena.none, a_anchor: Arena.none, end_z: Arena.none },
+            minterm_count, wordc: 0, nonwordc: 0,
+            anchors: { caret: Arena.none, dollar: Arena.none, nonword_left: Arena.none, word_left: Arena.none, nonword_right: Arena.none, word_right: Arena.none, a_anchor: Arena.none, end_z: Arena.none },
             or_count: 0, err: NoErr,
         }
         nullable = Arena.f_can_null.bitwise_or(Arena.f_always_null)
         anchor_flags = Arena.f_anchor.bitwise_or(Arena.f_can_null)
-        r0 = Arena.register(a0, Arena.key_singleton(0), { flags: 0, sub: 0, minl: 1, maxl: 1, pend: 0 })
-        r1 = Arena.register(r0.a, Arena.key_loop(Arena.bot, 0, Arena.inf), { flags: nullable, sub: full, minl: 0, maxl: 0, pend: 0 })
-        r2 = Arena.register(r1.a, Arena.key_singleton(full), { flags: 0, sub: full, minl: 1, maxl: 1, pend: 0 })
-        r3 = Arena.register(r2.a, Arena.key_loop(Arena.top, 0, Arena.inf), { flags: nullable, sub: full, minl: 0, maxl: Arena.none, pend: 0 })
-        r4 = Arena.register(r3.a, Arena.key_loop(Arena.top, 1, Arena.inf), { flags: 0, sub: full, minl: 1, maxl: Arena.none, pend: 0 })
-        r5 = Arena.register(r4.a, [Arena.k_end], { flags: anchor_flags, sub: full, minl: 0, maxl: 0, pend: 0 })
-        r6 = Arena.register(r5.a, [Arena.k_begin], { flags: anchor_flags, sub: full, minl: 0, maxl: 0, pend: 0 })
+        r_bot = Arena.register(a_empty, Arena.key_singleton(0), { flags: 0, sub: 0, minl: 1, maxl: 1, pend: 0 })
+        r_eps = Arena.register(r_bot.a, Arena.key_loop(Arena.bot, 0, Arena.inf), { flags: nullable, sub: full, minl: 0, maxl: 0, pend: 0 })
+        r_top = Arena.register(r_eps.a, Arena.key_singleton(full), { flags: 0, sub: full, minl: 1, maxl: 1, pend: 0 })
+        r_top_star = Arena.register(r_top.a, Arena.key_loop(Arena.top, 0, Arena.inf), { flags: nullable, sub: full, minl: 0, maxl: Arena.none, pend: 0 })
+        r_top_plus = Arena.register(r_top_star.a, Arena.key_loop(Arena.top, 1, Arena.inf), { flags: 0, sub: full, minl: 1, maxl: Arena.none, pend: 0 })
+        r_end_anchor = Arena.register(r_top_plus.a, [Arena.k_end], { flags: anchor_flags, sub: full, minl: 0, maxl: 0, pend: 0 })
+        r_begin_anchor = Arena.register(r_end_anchor.a, [Arena.k_begin], { flags: anchor_flags, sub: full, minl: 0, maxl: 0, pend: 0 })
         # refset 0 = empty, 1 = {(0,0)}
-        a7 = { ..r6.a, rs_off: [0, 0], rs_len: [0, 1], rs_data: [0] }
-        a7
+        a_ready = { ..r_begin_anchor.a, rs_off: [0, 0], rs_len: [0, 1], rs_data: [0] }
+        a_ready
     }
 
     full : Arena.A -> U64
-    full = |a| if a.nmt >= 64 { 0xFFFF_FFFF_FFFF_FFFF } else { 1.U64.shl_wrap(a.nmt.to_u8_wrap()) - 1 }
+    full = |a| if a.minterm_count >= 64 { 0xFFFF_FFFF_FFFF_FFFF } else { 1.U64.shl_wrap(a.minterm_count.to_u8_wrap()) - 1 }
 
     ## Append a node with `key` as its cells and index it. The caller has
     ## already checked `lookup(key)`.
@@ -199,8 +229,8 @@ Arena := [].{
     kind = |a, id| List.get(a.cells, Arena.off(a, id)) ?? 0
 
     ## field `i` of node `id` (0-based, after the kind cell)
-    fld : Arena.A, U32, U64 -> U32
-    fld = |a, id, i| List.get(a.cells, Arena.off(a, id) + 1 + i) ?? 0
+    cell_field : Arena.A, U32, U64 -> U32
+    cell_field = |a, id, i| List.get(a.cells, Arena.off(a, id) + 1 + i) ?? 0
 
     ## the children of an Or/And node
     children : Arena.A, U32 -> List(U32)
@@ -210,20 +240,8 @@ Arena := [].{
         List.sublist(a.cells, { start: o + 2, len: n })
     }
 
-    ## the cells of node `id` (its interning key)
-    cells_of : Arena.A, U32 -> List(U32)
-    cells_of = |a, id| {
-        o = Arena.off(a, id)
-        k = List.get(a.cells, o) ?? 0
-        n =
-            if k == Arena.k_singleton { 3 } else if k == Arena.k_concat { 3 } else if k == Arena.k_loop { 4 }
-            else if k == Arena.k_or or k == Arena.k_and { 2 + (List.get(a.cells, o + 1) ?? 0).to_u64() }
-            else if k == Arena.k_not { 2 } else if k == Arena.k_lookahead or k == Arena.k_lookbehind { 4 } else { 1 }
-        List.sublist(a.cells, { start: o, len: n })
-    }
-
     tset : Arena.A, U32 -> U64
-    tset = |a, id| (Arena.fld(a, id, 0)).to_u64().bitwise_or((Arena.fld(a, id, 1)).to_u64().shl_wrap(32))
+    tset = |a, id| (Arena.cell_field(a, id, 0)).to_u64().bitwise_or((Arena.cell_field(a, id, 1)).to_u64().shl_wrap(32))
 
     is_singleton : Arena.A, U32 -> Bool
     is_singleton = |a, id| Arena.kind(a, id) == Arena.k_singleton
@@ -246,17 +264,17 @@ Arena := [].{
 
     ## Concat head/tail, Loop body, Not inner, Look body
     head : Arena.A, U32 -> U32
-    head = |a, id| Arena.fld(a, id, 0)
+    head = |a, id| Arena.cell_field(a, id, 0)
     tail : Arena.A, U32 -> U32
-    tail = |a, id| Arena.fld(a, id, 1)
+    tail = |a, id| Arena.cell_field(a, id, 1)
     loop_lo : Arena.A, U32 -> U32
-    loop_lo = |a, id| Arena.fld(a, id, 1)
+    loop_lo = |a, id| Arena.cell_field(a, id, 1)
     loop_hi : Arena.A, U32 -> U32
-    loop_hi = |a, id| Arena.fld(a, id, 2)
+    loop_hi = |a, id| Arena.cell_field(a, id, 2)
     look_rel : Arena.A, U32 -> U32
-    look_rel = |a, id| Arena.fld(a, id, 1)
+    look_rel = |a, id| Arena.cell_field(a, id, 1)
     look_pend : Arena.A, U32 -> U32
-    look_pend = |a, id| Arena.fld(a, id, 2)
+    look_pend = |a, id| Arena.cell_field(a, id, 2)
 
     flags : Arena.A, U32 -> U8
     flags = |a, id| List.get(a.flags, id.to_u64()) ?? 0
@@ -288,9 +306,9 @@ Arena := [].{
     ## RE#'s `GetFixedLength`
     fixed_len : Arena.A, U32 -> Try(U32, [NotFixed])
     fixed_len = |a, id| {
-        mn = Arena.minl(a, id)
-        mx = Arena.maxl(a, id)
-        if mn != Arena.none and mn == mx { Ok(mn) } else { Err(NotFixed) }
+        min_len = Arena.minl(a, id)
+        max_len = Arena.maxl(a, id)
+        if min_len != Arena.none and min_len == max_len { Ok(min_len) } else { Err(NotFixed) }
     }
 
     pend : Arena.A, U32 -> U32
@@ -318,15 +336,15 @@ Arena := [].{
         if tries >= cap {
             Err(NotFound)
         } else {
-            e = List.get(a.islots, slot) ?? 0
-            if e == 0 {
+            handle = List.get(a.islots, slot) ?? 0
+            if handle == 0 {
                 Err(NotFound)
             } else {
-                ei = (e - 1).to_u64()
-                koff = (List.get(a.ient_key, ei) ?? 0).to_u64()
-                klen = (List.get(a.ient_len, ei) ?? 0).to_u64()
-                if klen == List.len(key) and List.sublist(a.ikeys, { start: koff, len: klen }) == key {
-                    Ok(List.get(a.ient_id, ei) ?? 0)
+                entry_idx = (handle - 1).to_u64()
+                key_off = (List.get(a.ient_key, entry_idx) ?? 0).to_u64()
+                key_len = (List.get(a.ient_len, entry_idx) ?? 0).to_u64()
+                if key_len == List.len(key) and List.sublist(a.ikeys, { start: key_off, len: key_len }) == key {
+                    Ok(List.get(a.ient_id, entry_idx) ?? 0)
                 } else {
                     Arena.probe(a, key, (slot + 1).bitwise_and((cap - 1).to_u64()), cap, tries + 1)
                 }
@@ -340,23 +358,23 @@ Arena := [].{
             Ok(_) => a
             Err(_) => {
                 a1 = if (List.len(a.ient_id) + 1) * 2 > List.len(a.islots) { Arena.grow(a) } else { a }
-                ei = (List.len(a1.ient_id)).to_u32_wrap()
+                entry_idx = (List.len(a1.ient_id)).to_u32_wrap()
                 a2 = { ..a1,
                     ient_key: List.append(a1.ient_key, (List.len(a1.ikeys)).to_u32_wrap()),
                     ient_len: List.append(a1.ient_len, (List.len(key)).to_u32_wrap()),
                     ient_id: List.append(a1.ient_id, id),
                     ikeys: List.concat(a1.ikeys, key),
                 }
-                Arena.place(a2, key, ei)
+                Arena.place(a2, key, entry_idx)
             }
         }
 
-    # put entry `ei` into the first free slot on its probe sequence
+    # put entry `entry_idx` into the first free slot on its probe sequence
     place : Arena.A, List(U32), U32 -> Arena.A
-    place = |a, key, ei| {
+    place = |a, key, entry_idx| {
         cap = List.len(a.islots)
         slot = Arena.free_slot(a, (Arena.hash(key)).bitwise_and((cap - 1).to_u64()), cap)
-        { ..a, islots: List.set(a.islots, slot, ei + 1) ?? a.islots }
+        { ..a, islots: List.set(a.islots, slot, entry_idx + 1) ?? a.islots }
     }
 
     free_slot : Arena.A, U64, U64 -> U64
@@ -366,18 +384,19 @@ Arena := [].{
     # double the slot table and re-place every entry
     grow : Arena.A -> Arena.A
     grow = |a| {
-        cap2 = List.len(a.islots) * 2
-        a1 = { ..a, islots: List.repeat(0.U32, cap2) }
+        new_cap = List.len(a.islots) * 2
+        a1 = { ..a, islots: List.repeat(0.U32, new_cap) }
         n = List.len(a1.ient_id)
-        List.fold(Arena.upto(n), a1, |acc, ei| {
-            koff = (List.get(acc.ient_key, ei) ?? 0).to_u64()
-            klen = (List.get(acc.ient_len, ei) ?? 0).to_u64()
-            key = List.sublist(acc.ikeys, { start: koff, len: klen })
-            Arena.place(acc, key, ei.to_u32_wrap())
+        List.fold(Arena.upto(n), a1, |acc, entry_idx| {
+            key_off = (List.get(acc.ient_key, entry_idx) ?? 0).to_u64()
+            key_len = (List.get(acc.ient_len, entry_idx) ?? 0).to_u64()
+            key = List.sublist(acc.ikeys, { start: key_off, len: key_len })
+            Arena.place(acc, key, entry_idx.to_u32_wrap())
         })
     }
 
-    ## Sizes that define the arena's folded prefix (for eviction, S4).
+    ## Sizes that define the arena's folded prefix, which eviction truncates
+    ## back to.
     Marks : { nodes : U64, cells : U64, ents : U64, ikeys : U64, rs : U64, rs_data : U64 }
 
     marks : Arena.A -> Arena.Marks
@@ -403,10 +422,10 @@ Arena := [].{
             rs_data: List.take_first(a.rs_data, m.rs_data),
             islots: List.repeat(0.U32, List.len(a.islots)),
         }
-        List.fold(Arena.upto(m.ents), a1, |acc, ei| {
-            koff = (List.get(acc.ient_key, ei) ?? 0).to_u64()
-            klen = (List.get(acc.ient_len, ei) ?? 0).to_u64()
-            Arena.place(acc, List.sublist(acc.ikeys, { start: koff, len: klen }), ei.to_u32_wrap())
+        List.fold(Arena.upto(m.ents), a1, |acc, entry_idx| {
+            key_off = (List.get(acc.ient_key, entry_idx) ?? 0).to_u64()
+            key_len = (List.get(acc.ient_len, entry_idx) ?? 0).to_u64()
+            Arena.place(acc, List.sublist(acc.ikeys, { start: key_off, len: key_len }), entry_idx.to_u32_wrap())
         })
     }
 
@@ -447,10 +466,10 @@ Arena := [].{
 
     pack : U32, U32 -> U32
     pack = |s, e| s.shl_wrap(16).bitwise_or(e.bitwise_and(0xFFFF))
-    ps : U32 -> U32
-    ps = |p| p.shr_zf_wrap(16)
-    pe : U32 -> U32
-    pe = |p| p.bitwise_and(0xFFFF)
+    pair_start : U32 -> U32
+    pair_start = |p| p.shr_zf_wrap(16)
+    pair_end : U32 -> U32
+    pair_end = |p| p.bitwise_and(0xFFFF)
 
     # sort by start then merge adjacent/overlapping ranges (RE#'s refSetRelUnionMany core)
     rs_normalize : List(U32) -> List(U32)
@@ -458,9 +477,9 @@ Arena := [].{
         sorted = List.sort_with(pairs, |x, y| U32.order_relative_to(x, y))
         List.fold(sorted, [], |acc, p|
             match List.last(acc) {
-                Ok(q) if Arena.pe(q) + 1 >= Arena.ps(p) => {
-                    e = if Arena.pe(p) > Arena.pe(q) { Arena.pe(p) } else { Arena.pe(q) }
-                    List.append(List.drop_last(acc, 1), Arena.pack(Arena.ps(q), e))
+                Ok(q) if Arena.pair_end(q) + 1 >= Arena.pair_start(p) => {
+                    e = if Arena.pair_end(p) > Arena.pair_end(q) { Arena.pair_end(p) } else { Arena.pair_end(q) }
+                    List.append(List.drop_last(acc, 1), Arena.pack(Arena.pair_start(q), e))
                 }
                 _ => List.append(acc, p)
             })
@@ -487,7 +506,7 @@ Arena := [].{
         if by == 0 or Arena.rs_is_empty(a, id) {
             { a, id }
         } else {
-            Arena.rs_intern(a, List.map(Arena.rs_get(a, id), |p| Arena.pack(Arena.ps(p) + by, Arena.pe(p) + by)))
+            Arena.rs_intern(a, List.map(Arena.rs_get(a, id), |p| Arena.pack(Arena.pair_start(p) + by, Arena.pair_end(p) + by)))
         }
 
     ## union of refsets each shifted by (its rel - min_rel) (RE#'s `refSetRelUnionManyMin`)
@@ -495,12 +514,26 @@ Arena := [].{
     rs_rel_union_min = |a, min_rel, sets| {
         pairs = List.fold(sets, [], |acc, (rel, id)| {
             by = rel - min_rel
-            List.concat(acc, List.map(Arena.rs_get(a, id), |p| Arena.pack(Arena.ps(p) + by, Arena.pe(p) + by)))
+            List.concat(acc, List.map(Arena.rs_get(a, id), |p| Arena.pack(Arena.pair_start(p) + by, Arena.pair_end(p) + by)))
         })
         Arena.rs_intern(a, Arena.rs_normalize(pairs))
     }
 
     # --- small helpers -----------------------------------------------------------
+
+    ## Map a node constructor over `ids`, threading the arena through each call
+    ## and collecting the ids it returns.
+    ##
+    ## This is the fold every walker writes out by hand otherwise, the same six
+    ## lines with a different callee. Compile-time only: a closure per call is
+    ## free here, and the scan-time hot loops do not use it (see
+    ## `Deriv.derive_children`, which filters as it folds and stays inline).
+    map_ids : Arena.A, List(U32), (Arena.A, U32 -> Arena.R) -> Arena.Ids
+    map_ids = |a, ids, f|
+        List.fold(ids, { a, ids: [] }, |acc, c| {
+            r = f(acc.a, c)
+            { a: r.a, ids: List.append(acc.ids, r.id) }
+        })
 
     upto : U64 -> List(U64)
     upto = |n| Arena.upto_loop(n, 0, [])
@@ -516,16 +549,8 @@ Arena := [].{
     sort_dedup = |ids|
         List.fold(Arena.sort_ids(ids), [], |acc, x| if List.last(acc) == Ok(x) { acc } else { List.append(acc, x) })
 
-    ## remove the first occurrence of `x`
-    remove_one : List(U32), U32 -> List(U32)
-    remove_one = |xs, x|
-        match List.find_first_index(xs, |y| y == x) {
-            Ok(i) => List.drop_at(xs, i)
-            Err(_) => xs
-        }
-
-    max32 : U32, U32 -> U32
-    max32 = |x, y| if x > y { x } else { y }
-    min32 : U32, U32 -> U32
-    min32 = |x, y| if x < y { x } else { y }
+    max_u32 : U32, U32 -> U32
+    max_u32 = |x, y| if x > y { x } else { y }
+    min_u32 : U32, U32 -> U32
+    min_u32 = |x, y| if x < y { x } else { y }
 }

@@ -1,4 +1,4 @@
-## The brute-force reference (S2.2): a structural interpreter over the rewritten
+## The brute-force reference: a structural interpreter over the rewritten
 ## node DAG, no automaton. `ends(node, s)` is the set of symbol positions `e`
 ## such that the symbols `s..e` are in the node's language, with `\A`, `\z` and
 ## lookarounds resolved against the whole haystack. Leftmost-longest matching
@@ -55,6 +55,11 @@ Ref := [].{
     is_empty : List(U8) -> Bool
     is_empty = |s| !List.any(s, |f| f == 1)
 
+    # the one-position set `{p}` when the rule holds, otherwise no ends at all --
+    # the shape of every zero-width and single-symbol case in `compute`
+    set_if : U64, Bool, U64 -> List(U8)
+    set_if = |n, holds, p| if holds { Ref.single(n, p) } else { Ref.empty_set(n) }
+
     ## the match ends from symbol position `s`
     ends : Arena.A, Ref.Hay, Ref.Memo, U32, U64 -> Ref.St
     ends = |a, h, m, id, s|
@@ -69,51 +74,56 @@ Ref := [].{
     compute : Arena.A, Ref.Hay, Ref.Memo, U32, U64 -> Ref.St
     compute = |a, h, m, id, s| {
         n = h.n
-        k = Arena.kind(a, id)
-        if k == Arena.k_singleton {
-            if s < n and TSet.contains(Arena.tset(a, id), (List.get(h.cls, s) ?? 0).to_u32()) {
-                { m, set: Ref.single(n, s + 1) }
-            } else {
-                { m, set: Ref.empty_set(n) }
+        match Arena.kind_of(a, id) {
+            Singleton => {
+                matches = s < n and TSet.contains(Arena.tset(a, id), (List.get(h.cls, s) ?? 0).to_u32())
+                { m, set: Ref.set_if(n, matches, s + 1) }
             }
-        } else if k == Arena.k_concat {
-            hd = Ref.ends(a, h, m, Arena.head(a, id), s)
-            List.fold(Ref.members(hd.set), { m: hd.m, set: Ref.empty_set(n) }, |acc, mid| {
-                t = Ref.ends(a, h, acc.m, Arena.tail(a, id), mid)
-                { m: t.m, set: Ref.union(acc.set, t.set) }
-            })
-        } else if k == Arena.k_or {
-            List.fold(Arena.children(a, id), { m, set: Ref.empty_set(n) }, |acc, c| {
-                r = Ref.ends(a, h, acc.m, c, s)
-                { m: r.m, set: Ref.union(acc.set, r.set) }
-            })
-        } else if k == Arena.k_and {
-            List.fold(Arena.children(a, id), { m, set: List.repeat(1.U8, n + 1) }, |acc, c| {
-                r = Ref.ends(a, h, acc.m, c, s)
-                { m: r.m, set: Ref.inter(acc.set, r.set) }
-            })
-        } else if k == Arena.k_not {
-            r = Ref.ends(a, h, m, Arena.head(a, id), s)
-            { m: r.m, set: List.map_with_index(r.set, |f, i| if i >= s and f == 0 { 1 } else { 0 }) }
-        } else if k == Arena.k_loop {
-            Ref.loop_ends(a, h, m, Arena.head(a, id), Arena.loop_lo(a, id), Arena.loop_hi(a, id), s)
-        } else if k == Arena.k_lookahead {
-            r = Ref.ends(a, h, m, Arena.head(a, id), s)
-            { m: r.m, set: if Ref.is_empty(r.set) { Ref.empty_set(n) } else { Ref.single(n, s) } }
-        } else if k == Arena.k_lookbehind {
-            # some suffix ending at `s` is in the body's language
-            body = Arena.head(a, id)
-            r = List.fold_until(Arena.upto(s + 1), { m, found: False }, |acc, q| {
-                e = Ref.ends(a, h, acc.m, body, q)
-                if (List.get(e.set, s) ?? 0) == 1 { Break({ m: e.m, found: True }) } else { Continue({ m: e.m, found: False }) }
-            })
-            { m: r.m, set: if r.found { Ref.single(n, s) } else { Ref.empty_set(n) } }
-        } else if k == Arena.k_begin {
-            { m, set: if s == 0 { Ref.single(n, s) } else { Ref.empty_set(n) } }
-        } else {
-            { m, set: if s == n { Ref.single(n, s) } else { Ref.empty_set(n) } }
+            Concat => {
+                head_ends = Ref.ends(a, h, m, Arena.head(a, id), s)
+                Ref.union_ends(a, h, head_ends.m, Arena.tail(a, id), Ref.members(head_ends.set))
+            }
+            Or =>
+                List.fold(Arena.children(a, id), { m, set: Ref.empty_set(n) }, |acc, c| {
+                    r = Ref.ends(a, h, acc.m, c, s)
+                    { m: r.m, set: Ref.union(acc.set, r.set) }
+                })
+            And =>
+                List.fold(Arena.children(a, id), { m, set: List.repeat(1.U8, n + 1) }, |acc, c| {
+                    r = Ref.ends(a, h, acc.m, c, s)
+                    { m: r.m, set: Ref.inter(acc.set, r.set) }
+                })
+            Not => {
+                r = Ref.ends(a, h, m, Arena.head(a, id), s)
+                { m: r.m, set: List.map_with_index(r.set, |f, i| if i >= s and f == 0 { 1 } else { 0 }) }
+            }
+            Loop => Ref.loop_ends(a, h, m, Arena.head(a, id), Arena.loop_lo(a, id), Arena.loop_hi(a, id), s)
+            LookAhead => {
+                r = Ref.ends(a, h, m, Arena.head(a, id), s)
+                { m: r.m, set: Ref.set_if(n, !Ref.is_empty(r.set), s) }
+            }
+            LookBehind => {
+                # some suffix ending at `s` is in the body's language
+                body = Arena.head(a, id)
+                r = List.fold_until(Arena.upto(s + 1), { m, found: False }, |acc, q| {
+                    e = Ref.ends(a, h, acc.m, body, q)
+                    if (List.get(e.set, s) ?? 0) == 1 { Break({ m: e.m, found: True }) } else { Continue({ m: e.m, found: False }) }
+                })
+                { m: r.m, set: Ref.set_if(n, r.found, s) }
+            }
+            Begin => { m, set: Ref.set_if(n, s == 0, s) }
+            End => { m, set: Ref.set_if(n, s == n, s) }
         }
     }
+
+    # the union of `node`'s ends taken from every position in `ps` -- what a
+    # concatenation does over its head's ends, and a loop over its frontier
+    union_ends : Arena.A, Ref.Hay, Ref.Memo, U32, List(U64) -> Ref.St
+    union_ends = |a, h, m, node, ps|
+        List.fold(ps, { m, set: Ref.empty_set(h.n) }, |acc, p| {
+            r = Ref.ends(a, h, acc.m, node, p)
+            { m: r.m, set: Ref.union(acc.set, r.set) }
+        })
 
     # body{lo,hi}: iterate the body's ends from the current frontier until it stops
     # growing (a nullable body stabilizes; a non-nullable one moves right)
@@ -121,8 +131,8 @@ Ref := [].{
     loop_ends = |a, h, m, body, lo, hi, s| {
         n = h.n
         start = Ref.single(n, s)
-        res0 = if lo == 0 { start } else { Ref.empty_set(n) }
-        Ref.loop_iter(a, h, m, body, lo, hi, 1, start, res0)
+        res_init = if lo == 0 { start } else { Ref.empty_set(n) }
+        Ref.loop_iter(a, h, m, body, lo, hi, 1, start, res_init)
     }
 
     loop_iter : Arena.A, Ref.Hay, Ref.Memo, U32, U32, U32, U32, List(U8), List(U8) -> Ref.St
@@ -130,15 +140,12 @@ Ref := [].{
         if Ref.is_empty(cur) or (hi != Arena.inf and i > hi) or i > (h.n + 2).to_u32_wrap() {
             { m, set: res }
         } else {
-            nxt = List.fold(Ref.members(cur), { m, set: Ref.empty_set(h.n) }, |acc, mid| {
-                r = Ref.ends(a, h, acc.m, body, mid)
-                { m: r.m, set: Ref.union(acc.set, r.set) }
-            })
-            res2 = if i >= lo { Ref.union(res, nxt.set) } else { res }
+            nxt = Ref.union_ends(a, h, m, body, Ref.members(cur))
+            res_next = if i >= lo { Ref.union(res, nxt.set) } else { res }
             if nxt.set == cur and i >= lo {
-                { m: nxt.m, set: res2 }
+                { m: nxt.m, set: res_next }
             } else {
-                Ref.loop_iter(a, h, nxt.m, body, lo, hi, i + 1, nxt.set, res2)
+                Ref.loop_iter(a, h, nxt.m, body, lo, hi, i + 1, nxt.set, res_next)
             }
         }
 

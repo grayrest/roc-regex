@@ -1,4 +1,4 @@
-## The public surface (S11): RE# semantics — leftmost-longest, `&`/`~`/`_`,
+## The public surface: RE# semantics — leftmost-longest, `&`/`~`/`_`,
 ## normal-form lookarounds, line anchors — over `List(U8)` haystacks with byte
 ## offsets, plus `_str` conveniences.
 ##
@@ -31,20 +31,18 @@ Regex := [].{
     Pattern : { a : Arena.A, trie : Trie.T, root : U32, rev : U32, rev_ts : U32, ts : U32, noprefix : U32, e : Dfa.E, accel : Accel.T, lits : Regex.Lits }
 
     ## The literal-alternation accelerator, with its Teddy tables ALREADY BUILT.
-    ## They used to be built inside `lit_set_spans`, which is to say once per
-    ## search, at 900-1500 ns: nothing against a 256 KB haystack and more than
-    ## the whole search over a few hundred bytes. Built here they fold into the
-    ## artifact like every other table.
+    ## Building them at compile time keeps them out of the per-search path and
+    ## folds them into the artifact like every other table.
     Lits : [NoLits, Lits(List(List(U8)), Teddy.T)]
 
-    ## D13 budget 4: states the fold may explore — the artifact budget (256 KB
-    ## provisional) over the table stride, capped at `fold_state_cap`. The cap is
-    ## for patterns whose state space is input-dependent (an unbounded
-    ## lookahead): exploring 13k such states cost 10 s and 4 GB of compiler RSS
-    ## for nothing (log, "M2 findings"); the scan extends the table at runtime.
+    ## States the fold may explore — the artifact budget (256 KB provisional)
+    ## over the table stride, capped at `fold_state_cap`. The cap is for a
+    ## pattern whose state space is input-dependent (an unbounded lookahead),
+    ## which would otherwise explore without bound; the scan extends the table
+    ## at runtime.
     max_states : U32 -> U64
-    max_states = |nmt| {
-        by_bytes = 262144 // (nmt.to_u64() * 4)
+    max_states = |minterm_count| {
+        by_bytes = 262144 // (minterm_count.to_u64() * 4)
         if by_bytes < Regex.fold_state_cap { by_bytes } else { Regex.fold_state_cap }
     }
 
@@ -55,11 +53,10 @@ Regex := [].{
     Span : { start : U64, end : U64 }
 
     compile : Str -> Try(Regex.Pattern, Err.Error)
-    compile = |src|
-        match Ast.parse(src) {
-            Err(e) => Err(e)
-            Ok(ast) => Regex.compile_ast(src, ast)
-        }
+    compile = |src| {
+        ast = Ast.parse(src)?
+        Regex.compile_ast(src, ast)
+    }
 
     nl_set : Ast.Set
     nl_set = { neg: False, ranges: [{ lo: 10, hi: 10 }] }
@@ -68,57 +65,58 @@ Regex := [].{
     s_set : Ast.Set
     s_set = { neg: False, ranges: Ast.ranges_s }
 
+    ## The converter records an unsupported construct in an arena FIELD rather
+    ## than returning it, so the failure has to be picked up between steps.
+    ## Lifting it into the `Try` the caller is already threading is what keeps
+    ## `compile_ast` a straight line.
+    checked : Str, Arena.A -> Try(Arena.A, Err.Error)
+    checked = |src, a|
+        match a.err {
+            Unsup(msg) => Err(Err.whole(src, Unsupported(msg)))
+            NoErr => Ok(a)
+        }
+
+    ## the literal-alternation accelerator for a pattern, or `NoLits`: a pattern
+    ## that already has a literal override does not need one, and both the
+    ## literal set and Teddy may decline.
+    lits_of : Accel.T, Arena.A, Trie.T, U32 -> Regex.Lits
+    lits_of = |accel, a, trie, root|
+        match accel.override {
+            NoOverride =>
+                match Accel.literal_set(a, trie, root) {
+                    Ok(literals) => match Teddy.build(literals) { Ok(teddy) => Lits(literals, teddy), Err(_) => NoLits }
+                    Err(_) => NoLits
+                }
+            _ => NoLits
+        }
+
     compile_ast : Str, Ast -> Try(Regex.Pattern, Err.Error)
     compile_ast = |src, ast| {
         has_wb = Ast.has_wordb(ast)
         has_line = Ast.has_line_anchor(ast)
-        sets0 = Ast.collect_sets(ast, [])
-        sets1 = if has_wb { Ast.add_set(Ast.add_set(sets0, Regex.w_set), Regex.s_set) } else { sets0 }
-        sets = if has_line { Ast.add_set(sets1, Regex.nl_set) } else { sets1 }
-        match Trie.build(Ast.flat_sets(sets)) {
-            Err(TooManyClasses(n)) => Err(Err.whole(src, TooManyClasses({ limit: 63, given: n })))
-            Ok(trie) => {
-                ctx = { sets, tsets: trie.set_tsets, wordc: 0, spacec: 0 }
-                wordc = if has_wb { Conv.tset_of(ctx, Regex.w_set) } else { 0 }
-                spacec = if has_wb { Conv.tset_of(ctx, Regex.s_set) } else { 0 }
-                nl = if has_line { Conv.tset_of(ctx, Regex.nl_set) } else { 0 }
-                a0 = Arena.init(trie.n_classes)
-                a1 = Build.init_anchors(a0, wordc, TSet.compl(wordc, a0.nmt), nl)
-                root = Conv.convert(a1, { ..ctx, wordc, spacec }, ast)
-                match root.a.err {
-                    Unsup(msg) => Err(Err.whole(src, Unsupported(msg)))
-                    NoErr => {
-                        rv = Deriv.rev(root.a, root.id)
-                        rts = Build.mk_concat2(rv.a, Arena.top_star, rv.id)
-                        ts = Build.mk_concat2(rts.a, Arena.top_star, root.id)
-                        np = Deriv.without_lookback_prefix(ts.a, root.id)
-                        match np.a.err {
-                            Unsup(msg) => Err(Err.whole(src, Unsupported(msg)))
-                            NoErr => {
-                                ais = Deriv.at_input_start(np.a, root.id)
-                                e0 = Dfa.init(ais.a, rts.id, np.id, ais.id, Regex.max_states(trie.n_classes))
-                                ac = Accel.analyze(e0, trie, root.id, rv.id, rts.id, np.id)
-                                e = Dfa.freeze(Dfa.explore(ac.e), trie)
-                                lits =
-                                    match ac.accel.override {
-                                        NoOverride =>
-                                            match Accel.literal_set(e.a, trie, root.id) {
-                                                Ok(ls) =>
-                                                    match Teddy.build(ls) {
-                                                        Ok(td) => Lits(ls, td)
-                                                        Err(_) => NoLits
-                                                    }
-                                                Err(_) => NoLits
-                                            }
-                                        _ => NoLits
-                                    }
-                                Ok({ a: e.a, trie, root: root.id, rev: rv.id, rev_ts: rts.id, ts: ts.id, noprefix: np.id, e, accel: ac.accel, lits })
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        base_sets = Ast.collect_sets(ast, [])
+        sets_with_wb = if has_wb { Ast.add_set(Ast.add_set(base_sets, Regex.w_set), Regex.s_set) } else { base_sets }
+        sets = if has_line { Ast.add_set(sets_with_wb, Regex.nl_set) } else { sets_with_wb }
+        trie = Try.map_err(Trie.build(Ast.flat_sets(sets)), |e| match e { TooManyClasses(n) => Err.whole(src, TooManyClasses({ limit: 63, given: n })) })?
+        ctx = { sets, tsets: trie.set_tsets, wordc: 0, spacec: 0 }
+        wordc = if has_wb { Conv.tset_of(ctx, Regex.w_set) } else { 0 }
+        spacec = if has_wb { Conv.tset_of(ctx, Regex.s_set) } else { 0 }
+        nl_tset = if has_line { Conv.tset_of(ctx, Regex.nl_set) } else { 0 }
+        arena_init = Arena.init(trie.n_classes)
+        arena_anchored = Build.init_anchors(arena_init, wordc, TSet.compl(wordc, arena_init.minterm_count), nl_tset)
+        root = Conv.convert(arena_anchored, { ..ctx, wordc, spacec }, ast)
+        root_a = Regex.checked(src, root.a)?
+        reversed = Deriv.rev(root_a, root.id)
+        rev_search_start = Build.mk_concat2(reversed.a, Arena.top_star, reversed.id)
+        search_start = Build.mk_concat2(rev_search_start.a, Arena.top_star, root.id)
+        noprefix_node = Deriv.without_lookback_prefix(search_start.a, root.id)
+        noprefix_node_a = Regex.checked(src, noprefix_node.a)?
+        at_start = Deriv.at_input_start(noprefix_node_a, root.id)
+        dfa_init = Dfa.init(at_start.a, rev_search_start.id, noprefix_node.id, at_start.id, Regex.max_states(trie.n_classes))
+        accel_out = Accel.analyze(dfa_init, trie, root.id, reversed.id, rev_search_start.id, noprefix_node.id)
+        e = Dfa.freeze(Dfa.explore(accel_out.e), trie)
+        lits = Regex.lits_of(accel_out.accel, e.a, trie, root.id)
+        Ok({ a: e.a, trie, root: root.id, rev: reversed.id, rev_ts: rev_search_start.id, ts: search_start.id, noprefix: noprefix_node.id, e, accel: accel_out.accel, lits })
     }
 
     ## The literal-pattern idiom: `Regex.build("…")` folds the pattern at build
@@ -149,29 +147,28 @@ Regex := [].{
     ## when the pattern is not such a union, or when Teddy declines the set, in
     ## which case the ordinary scan runs.
     ##
-    ## Dispatched here rather than inside `Dfa.find_all_fast_opts`: putting
-    ## another arm in that function cost 3-25% on every pattern, the target row
-    ## included, so the hot scan does not learn about this at all.
+    ## Dispatched here rather than inside `Dfa.find_all_fast_opts`: another arm
+    ## in that function slows every pattern that does not take it, so the hot
+    ## scan does not learn about this at all.
     lit_set_spans : Regex.Lits, List(U8) -> Try(List(Regex.Span), [NoSet])
     lit_set_spans = |lits, hay|
         match lits {
             NoLits => Err(NoSet)
-            # Uncapped. A candidate cap was tried, to protect the case where
-            # matches are so dense that Teddy stops paying, but once its scan
-            # was rewritten as one loop the dense case became 1.84x FASTER than
-            # the ordinary scan, and the cap only made it pay for a partial scan
-            # before giving up.
-            Lits(_, td) =>
-                match Teddy.match_lits(td, hay, List.len(hay) + 1) {
-                    Ok(sp) => Ok(sp)
-                    Err(_) => Err(NoSet)
-                }
+            # Uncapped: Teddy's single-loop scan beats the ordinary scan even
+            # when matches are dense, so there is no case to bail out of.
+            Lits(_, teddy) => Try.map_err(Teddy.match_lits(teddy, hay, List.len(hay) + 1), |_| NoSet)
         }
+
+    ## The threaded scan reports SYMBOL indices; `h.pos` maps a symbol index back
+    ## to the byte offset the public API promises.
+    byte_spans : List(U32), List(Regex.Span) -> List(Regex.Span)
+    byte_spans = |pos, spans|
+        List.map(spans, |span| { start: (List.get(pos, span.start) ?? 0).to_u64(), end: (List.get(pos, span.end) ?? 0).to_u64() })
 
     find_all : Regex.Pattern, List(U8) -> List(Regex.Span)
     find_all = |re, hay|
         match Regex.lit_set_spans(re.lits, hay) {
-            Ok(sp) => sp
+            Ok(lit_spans) => lit_spans
             Err(_) =>
                 if re.e.complete {
                     # a complete fold is a read-only table: the byte-loop scans
@@ -179,7 +176,7 @@ Regex := [].{
                 } else {
                     h = Ref.prepare(re.trie, hay)
                     r = Dfa.find_all(re.e, h)
-                    List.map(r.spans, |sp| { start: (List.get(h.pos, sp.start) ?? 0).to_u64(), end: (List.get(h.pos, sp.end) ?? 0).to_u64() })
+                    Regex.byte_spans(h.pos, r.spans)
                 }
         }
 
@@ -199,26 +196,26 @@ Regex := [].{
     find_all_threaded = |re, hay| {
         h = Ref.prepare(re.trie, hay)
         r = Dfa.find_all(re.e, h)
-        List.map(r.spans, |sp| { start: (List.get(h.pos, sp.start) ?? 0).to_u64(), end: (List.get(h.pos, sp.end) ?? 0).to_u64() })
+        Regex.byte_spans(h.pos, r.spans)
     }
 
-    ## `find_all`, also returning the regex with every state the scan minted
-    ## (S5): a caller looping over haystacks threads it so an incomplete fold
-    ## is not re-derived per call.
+    ## `find_all`, also returning the regex with every state the scan minted:
+    ## a caller looping over haystacks threads it so an incomplete fold is not
+    ## re-derived per call.
     find_all_grow : Regex.Pattern, List(U8) -> (Regex.Pattern, List(Regex.Span))
     find_all_grow = |re, hay| {
         h = Ref.prepare(re.trie, hay)
         r = Dfa.find_all(re.e, h)
-        ({ ..re, e: r.e, a: r.e.a }, List.map(r.spans, |sp| { start: (List.get(h.pos, sp.start) ?? 0).to_u64(), end: (List.get(h.pos, sp.end) ?? 0).to_u64() }))
+        ({ ..re, e: r.e, a: r.e.a }, Regex.byte_spans(h.pos, r.spans))
     }
 
     ## The runtime state cap (RE#'s `MaxDfaCapacity`, default 100k): past it a
-    ## scan evicts back to the folded prefix and continues (S4). Exposed so the
+    ## scan evicts back to the folded prefix and continues. Exposed so the
     ## corpus can force eviction.
     with_runtime_cap : Regex.Pattern, U64 -> Regex.Pattern
     with_runtime_cap = |re, cap| { ..re, e: { ..re.e, runtime_cap: cap } }
 
-    ## The same, on the brute-force reference (S2.2) — the differential's oracle.
+    ## The same, on the brute-force reference — the differential's oracle.
     find_all_ref : Regex.Pattern, List(U8) -> List(Regex.Span)
     find_all_ref = |re, hay| Ref.find_all(re.a, re.trie, re.root, hay)
 
@@ -246,20 +243,20 @@ Regex := [].{
             match re.accel.len {
                 FixedLength(n) => "len=${n.to_str()}"
                 PrefixEnd(k, st) => "len=prefix${k.to_str()}+end@${st.to_str()}"
-                SetLookup(k, c, nk, _) => "len=prefix${k.to_str()}+set${c.to_str()}(nk${nk.to_str()})"
+                SetLookup(k, c, null_kind, _) => "len=prefix${k.to_str()}+set${c.to_str()}(nk${null_kind.to_str()})"
                 RemainingSets(k, c, m) => "len=prefix${k.to_str()}+upto${m.to_str()}x${c.to_str()}"
                 MatchEnd => "len=any"
             }
-        ov =
+        override_str =
             match re.accel.override {
                 Literal(l, _, _) => "override=${Str.from_utf8_lossy(l)}"
                 NoOverride =>
                     match re.lits {
                         NoLits => "override=none"
-                        Lits(ls, _) => "override=set[${ls |> List.map(|l| Str.from_utf8_lossy(l)) |> Str.join_with("|")}]"
+                        Lits(literals, _) => "override=set[${literals |> List.map(|l| Str.from_utf8_lossy(l)) |> Str.join_with("|")}]"
                     }
             }
-        "${init} ${len} ${ov}"
+        "${init} ${len} ${override_str}"
     }
 
     ## the fast reverse sweep alone (profiling): match starts, accelerated or not
@@ -271,7 +268,7 @@ Regex := [].{
     match_starts_noskip : Regex.Pattern, List(U8) -> List(U64)
     match_starts_noskip = |re, hay| Dfa.starts_fast_opts(re.e, re.trie, re.accel.init, hay, False)
 
-    ## how many states of a complete fold carry a skip set (S13 diagnostics)
+    ## how many states of a complete fold carry a skip set (diagnostics)
     n_skip_states : Regex.Pattern -> U64
     n_skip_states = |re| List.count_if(re.e.skip_ok, |x| x != 0)
 
@@ -282,11 +279,10 @@ Regex := [].{
     n_states : Regex.Pattern -> U64
     n_states = |re| Dfa.n_states(re.e)
 
-    ## The first match. Documented as a full sweep: the reverse pass has to reach
-    ## the haystack start before the leftmost start is known (S11).
-    ## The leftmost match, as a list of zero or one. `find` and `is_match` share
-    ## it so that neither computes every match to answer about one: on a dense
-    ## class that was 40056 spans for a question about the first.
+    ## The leftmost match, as a list of zero or one. Documented as a full
+    ## sweep: the reverse pass has to reach the haystack start before the
+    ## leftmost start is known. `find` and `is_match` share it so that neither
+    ## computes every match to answer about one.
     find_first : Regex.Pattern, List(U8) -> List(Regex.Span)
     find_first = |re, hay|
         match Regex.find(re, hay) {
@@ -296,33 +292,24 @@ Regex := [].{
 
     ## The leftmost match. Documented as a full sweep for a general pattern: the
     ## reverse pass has to reach the haystack start before the leftmost start is
-    ## known (S11).
+    ## known.
     ##
     ## The literal case is dispatched HERE rather than inside
-    ## `Dfa.find_all_fast_opts`, and that is a measurement, not tidiness.
-    ## Reaching the kernel through `find_first_fast` -> `find_all_fast_opts`
-    ## passes `Dfa.E` — eighteen fields, fourteen of them heap lists — down two
-    ## call levels, and every pass refcounts all of them. On a few hundred bytes
-    ## the SIMD kernel itself is 22 ns and getting to it cost about 750. Same
-    ## rule as `Regex.verify_candidates`: dispatch once, outside, and hand the
-    ## loop only what it reads.
+    ## `Dfa.find_all_fast_opts`. Reaching the kernel through `find_first_fast`
+    ## -> `find_all_fast_opts` passes `Dfa.E` — eighteen fields, fourteen of
+    ## them heap lists — down two call levels, and every pass refcounts all of
+    ## them, which on a short haystack costs many times the SIMD kernel itself.
+    ## Dispatch once, outside, and hand the loop only what it reads.
     find : Regex.Pattern, List(U8) -> Try(Regex.Span, [NoMatch])
     find = |re, hay|
         match re.accel.override {
             Literal(lit, padded, mask) => Dfa.first_literal(hay, lit, padded, mask)
             NoOverride =>
                 match Regex.lit_set_spans(re.lits, hay) {
-                    Ok(sp) =>
-                        match List.first(sp) {
-                            Ok(s) => Ok(s)
-                            Err(_) => Err(NoMatch)
-                        }
+                    Ok(lit_spans) => Try.map_err(List.first(lit_spans), |_| NoMatch)
                     Err(_) => {
                         r = if re.e.complete { Dfa.find_first_fast(re.e, re.trie, re.accel, hay) } else { Regex.find_all_threaded(re, hay) }
-                        match List.first(r) {
-                            Ok(s) => Ok(s)
-                            Err(_) => Err(NoMatch)
-                        }
+                        Try.map_err(List.first(r), |_| NoMatch)
                     }
                 }
         }
@@ -345,8 +332,8 @@ Regex := [].{
                     if List.is_empty(cands) {
                         False
                     } else {
-                        asc = List.sort_with(cands, |x, y| U64.order_relative_to(x, y))
-                        if List.len(Dfa.ends_fast(re.e, re.trie, re.accel.len, hay, asc, True, False, True)) > 0 {
+                        sorted_cands = List.sort_with(cands, |x, y| U64.order_relative_to(x, y))
+                        if List.len(Dfa.ends_fast(re.e, re.trie, re.accel.len, hay, sorted_cands, True, False, True)) > 0 {
                             True
                         } else {
                             List.len(Regex.find_first(re, hay)) > 0
@@ -380,15 +367,9 @@ Regex := [].{
     first_end : Regex.Pattern, List(U8) -> Try(U64, [NoMatch])
     first_end = |re, hay|
         if re.e.complete {
-            match (Dfa.ends_at_start_fast(re.e, re.trie, hay)).first {
-                Ok(e) => Ok(e)
-                Err(_) => Err(NoMatch)
-            }
+            Try.map_err((Dfa.ends_at_start_fast(re.e, re.trie, hay)).first, |_| NoMatch)
         } else {
-            match List.first(Ref.ends_at_start(re.a, re.trie, re.root, hay)) {
-                Ok(e) => Ok(e)
-                Err(_) => Err(NoMatch)
-            }
+            Try.map_err(List.first(Ref.ends_at_start(re.a, re.trie, re.root, hay)), |_| NoMatch)
         }
 
     ## The end of the LONGEST match anchored at offset 0, if any. See
@@ -396,15 +377,9 @@ Regex := [].{
     longest_end : Regex.Pattern, List(U8) -> Try(U64, [NoMatch])
     longest_end = |re, hay|
         if re.e.complete {
-            match (Dfa.ends_at_start_fast(re.e, re.trie, hay)).last {
-                Ok(e) => Ok(e)
-                Err(_) => Err(NoMatch)
-            }
+            Try.map_err((Dfa.ends_at_start_fast(re.e, re.trie, hay)).last, |_| NoMatch)
         } else {
-            match List.last(Ref.ends_at_start(re.a, re.trie, re.root, hay)) {
-                Ok(e) => Ok(e)
-                Err(_) => Err(NoMatch)
-            }
+            Try.map_err(List.last(Ref.ends_at_start(re.a, re.trie, re.root, hay)), |_| NoMatch)
         }
 
     ## Replace every match. `rep` may contain `$0` (the match) and `$$` (`$`);
@@ -412,10 +387,10 @@ Regex := [].{
     replace_all : Regex.Pattern, List(U8), List(U8) -> List(U8)
     replace_all = |re, hay, rep| {
         spans = Regex.find_all(re, hay)
-        r = List.fold(spans, { out: [], last: 0 }, |st, sp| {
-            before = List.sublist(hay, { start: st.last, len: sp.start - st.last })
-            matched = List.sublist(hay, { start: sp.start, len: sp.end - sp.start })
-            { out: List.concat(List.concat(st.out, before), Regex.expand(rep, matched, 0, [])), last: sp.end }
+        r = List.fold(spans, { out: [], last: 0 }, |st, span| {
+            before = List.sublist(hay, { start: st.last, len: span.start - st.last })
+            matched = List.sublist(hay, { start: span.start, len: span.end - span.start })
+            { out: List.concat(List.concat(st.out, before), Regex.expand(rep, matched, 0, [])), last: span.end }
         })
         List.concat(r.out, List.sublist(hay, { start: r.last, len: List.len(hay) - r.last }))
     }
@@ -438,8 +413,8 @@ Regex := [].{
     split : Regex.Pattern, List(U8) -> List(List(U8))
     split = |re, hay| {
         spans = Regex.find_all(re, hay)
-        r = List.fold(spans, { fields: [], last: 0 }, |st, sp|
-            { fields: List.append(st.fields, List.sublist(hay, { start: st.last, len: sp.start - st.last })), last: sp.end })
+        r = List.fold(spans, { fields: [], last: 0 }, |st, span|
+            { fields: List.append(st.fields, List.sublist(hay, { start: st.last, len: span.start - st.last })), last: span.end })
         List.append(r.fields, List.sublist(hay, { start: r.last, len: List.len(hay) - r.last }))
     }
 
@@ -500,8 +475,8 @@ Regex := [].{
     ## (0 begin, 1 center, 2 end), printed (tests: RE#'s `der1` helpers)
     derive_show : Regex.Pattern, U32, U32, U32 -> Str
     derive_show = |re, node, loc, cp| {
-        mt = TSet.bit(Trie.class_of(re.trie, cp))
-        d = Deriv.derivative(re.a, loc, mt, node)
+        class_tset = TSet.bit(Trie.class_of(re.trie, cp))
+        d = Deriv.derivative(re.a, loc, class_tset, node)
         Show.show(d.a, re.trie, d.id)
     }
 
@@ -529,8 +504,8 @@ Regex := [].{
     ## the derivative of the raw pattern at position `pos` (codepoint index) of `s`, Begin location as RE#'s `der1RPos`
     der1_at : Regex.Pattern, Str, U64 -> Str
     der1_at = |re, s, pos| {
-        cpl = Regex.cps(Str.to_utf8(s), 0, [])
-        Regex.derive_show(re, re.root, Deriv.loc_begin, List.get(cpl, pos) ?? 0)
+        cp_list = Regex.cps(Str.to_utf8(s), 0, [])
+        Regex.derive_show(re, re.root, Deriv.loc_begin, List.get(cp_list, pos) ?? 0)
     }
 
     cps : List(U8), U64, List(U32) -> List(U32)
@@ -544,10 +519,10 @@ Regex := [].{
     ## location), each node printed with its nullability and pending set
     derive_chain : Regex.Pattern, Str -> List(Str)
     derive_chain = |re, s| {
-        cpl = Regex.cps(Str.to_utf8(s), 0, [])
-        st = List.fold(cpl, { a: re.a, id: re.noprefix, out: [Regex.describe(re.a, re.trie, re.noprefix)] }, |acc, cp| {
-            mt = TSet.bit(Trie.class_of(re.trie, cp))
-            d = Deriv.derivative(acc.a, Deriv.loc_center, mt, acc.id)
+        cp_list = Regex.cps(Str.to_utf8(s), 0, [])
+        st = List.fold(cp_list, { a: re.a, id: re.noprefix, out: [Regex.describe(re.a, re.trie, re.noprefix)] }, |acc, cp| {
+            class_tset = TSet.bit(Trie.class_of(re.trie, cp))
+            d = Deriv.derivative(acc.a, Deriv.loc_center, class_tset, acc.id)
             { a: d.a, id: d.id, out: List.append(acc.out, Regex.describe(d.a, re.trie, d.id)) }
         })
         st.out
@@ -559,8 +534,8 @@ Regex := [].{
     derive_chain_rev = |re, node, hay, from, n_steps| {
         h = Ref.prepare(re.trie, hay)
         # symbol index of byte `from`
-        si = List.fold_with_index(h.pos, 0, |acc, p, i| if p.to_u64() == from { i } else { acc })
-        st = List.fold(Arena.upto(n_steps), { a: re.a, id: node, i: si, out: [Regex.describe(re.a, re.trie, node)] }, |acc, _|
+        sym_i = List.fold_with_index(h.pos, 0, |acc, p, i| if p.to_u64() == from { i } else { acc })
+        st = List.fold(Arena.upto(n_steps), { a: re.a, id: node, i: sym_i, out: [Regex.describe(re.a, re.trie, node)] }, |acc, _|
             if acc.i == 0 { acc } else {
                 cls = (List.get(h.cls, acc.i - 1) ?? 0).to_u32()
                 d = Deriv.derivative(acc.a, Deriv.loc_center, TSet.bit(cls), acc.id)
@@ -574,8 +549,8 @@ Regex := [].{
 
     describe : Arena.A, Trie.T, U32 -> Str
     describe = |a, t, id| {
-        pend = Arena.rs_get(a, Arena.pend(a, id)) |> List.map(|p| "(${Arena.ps(p).to_str()},${Arena.pe(p).to_str()})") |> Str.join_with(" ")
-        looks = if Arena.is_lookahead(a, id) { " rel=${Arena.look_rel(a, id).to_str()} lpend=${Arena.rs_get(a, Arena.look_pend(a, id)) |> List.map(|p| "(${Arena.ps(p).to_str()},${Arena.pe(p).to_str()})") |> Str.join_with(" ")}" } else { "" }
+        pend = Arena.rs_get(a, Arena.pend(a, id)) |> List.map(|p| "(${Arena.pair_start(p).to_str()},${Arena.pair_end(p).to_str()})") |> Str.join_with(" ")
+        looks = if Arena.is_lookahead(a, id) { " rel=${Arena.look_rel(a, id).to_str()} lpend=${Arena.rs_get(a, Arena.look_pend(a, id)) |> List.map(|p| "(${Arena.pair_start(p).to_str()},${Arena.pair_end(p).to_str()})") |> Str.join_with(" ")}" } else { "" }
         "${Show.show(a, t, id)}  [null=${if Arena.is_always_null(a, id) { "always" } else if Arena.can_be_null(a, id) { "can" } else { "no" }} pend={${pend}}${looks} id=${id.to_str()}]"
     }
 

@@ -9,50 +9,48 @@ import Utf8
 
 Show := [].{
     show : Arena.A, Trie.T, U32 -> Str
-    show = |a, t, id| {
-        k = Arena.kind(a, id)
+    show = |a, t, id|
+        # `eps` has a node kind of its own, but prints as ε whatever it is
         if id == Arena.eps {
             "ε"
-        } else if k == Arena.k_singleton {
-            Show.tset(a, t, Arena.tset(a, id))
-        } else if k == Arena.k_or {
-            "(" |> Str.concat(Str.join_with(List.map(Arena.children(a, id), |c| Show.show(a, t, c)), "|")) |> Str.concat(")")
-        } else if k == Arena.k_and {
-            "(" |> Str.concat(Str.join_with(List.map(Arena.children(a, id), |c| Show.show(a, t, c)), "&")) |> Str.concat(")")
-        } else if k == Arena.k_not {
-            "~(${Show.show(a, t, Arena.head(a, id))})"
-        } else if k == Arena.k_loop {
-            body = Arena.head(a, id)
-            lo = Arena.loop_lo(a, id)
-            hi = Arena.loop_hi(a, id)
-            inner0 = Show.show(a, t, body)
-            inner = if Arena.is_singleton(a, body) { inner0 } else { "(${inner0})" }
-            count =
-                if lo == 0 and hi == Arena.inf { "*" }
-                else if lo == 1 and hi == Arena.inf { "+" }
-                else if lo == 0 and hi == 1 { "?" }
-                else if lo == hi { "{${lo.to_str()}}" }
-                else if hi == Arena.inf { "{${lo.to_str()},}" }
-                else { "{${lo.to_str()},${hi.to_str()}}" }
-            if lo == 2 and hi == 2 and Str.count_utf8_bytes(inner) == 1 { Str.concat(inner, inner) } else { Str.concat(inner, count) }
-        } else if k == Arena.k_lookahead {
-            inner = Show.strip_star(Show.show(a, t, Arena.head(a, id)))
-            pend = if Arena.look_pend(a, id) == Arena.rs_empty { "" } else { "{...}" }
-            r = "(?=${inner})${pend}"
-            if r == "(?=(\\n|\\Z))" or r == "(?=(\\Z|\\n))" { "$" } else { r }
-        } else if k == Arena.k_lookbehind {
-            inner = Show.strip_star(Show.show(a, t, Arena.head(a, id)))
-            pend = if Arena.look_pend(a, id) == Arena.rs_empty { "" } else { "{...}" }
-            r = "(?<=${inner})${pend}"
-            if r == "(?<=(\\n|\\A))" or r == "(?<=(\\A|\\n))" { "^" } else { r }
-        } else if k == Arena.k_concat {
-            Str.concat(Show.show(a, t, Arena.head(a, id)), Show.show(a, t, Arena.tail(a, id)))
-        } else if k == Arena.k_end {
-            "\\Z"
         } else {
-            "\\A"
+            match Arena.kind_of(a, id) {
+                Singleton => Show.tset(a, t, Arena.tset(a, id))
+                Or => "(" |> Str.concat(Str.join_with(List.map(Arena.children(a, id), |c| Show.show(a, t, c)), "|")) |> Str.concat(")")
+                And => "(" |> Str.concat(Str.join_with(List.map(Arena.children(a, id), |c| Show.show(a, t, c)), "&")) |> Str.concat(")")
+                Not => "~(${Show.show(a, t, Arena.head(a, id))})"
+                Loop => {
+                    body = Arena.head(a, id)
+                    lo = Arena.loop_lo(a, id)
+                    hi = Arena.loop_hi(a, id)
+                    body_str = Show.show(a, t, body)
+                    inner = if Arena.is_singleton(a, body) { body_str } else { "(${body_str})" }
+                    count =
+                        if lo == 0 and hi == Arena.inf { "*" }
+                        else if lo == 1 and hi == Arena.inf { "+" }
+                        else if lo == 0 and hi == 1 { "?" }
+                        else if lo == hi { "{${lo.to_str()}}" }
+                        else if hi == Arena.inf { "{${lo.to_str()},}" }
+                        else { "{${lo.to_str()},${hi.to_str()}}" }
+                    if lo == 2 and hi == 2 and Str.count_utf8_bytes(inner) == 1 { Str.concat(inner, inner) } else { Str.concat(inner, count) }
+                }
+                LookAhead => {
+                    inner = Show.strip_star(Show.show(a, t, Arena.head(a, id)))
+                    pend = if Arena.look_pend(a, id) == Arena.rs_empty { "" } else { "{...}" }
+                    r = "(?=${inner})${pend}"
+                    if r == "(?=(\\n|\\Z))" or r == "(?=(\\Z|\\n))" { "$" } else { r }
+                }
+                LookBehind => {
+                    inner = Show.strip_star(Show.show(a, t, Arena.head(a, id)))
+                    pend = if Arena.look_pend(a, id) == Arena.rs_empty { "" } else { "{...}" }
+                    r = "(?<=${inner})${pend}"
+                    if r == "(?<=(\\n|\\A))" or r == "(?<=(\\A|\\n))" { "^" } else { r }
+                }
+                Concat => Str.concat(Show.show(a, t, Arena.head(a, id)), Show.show(a, t, Arena.tail(a, id)))
+                End => "\\Z"
+                Begin => "\\A"
+            }
         }
-    }
 
     # RE# drops a leading/trailing `_*` when printing a lookaround body
     strip_star : Str -> Str
@@ -64,15 +62,15 @@ Show := [].{
     ## a tset as a character class
     tset : Arena.A, Trie.T, U64 -> Str
     tset = |a, t, s|
-        if TSet.is_full(s, a.nmt) {
+        if TSet.is_full(s, a.minterm_count) {
             "_"
         } else if TSet.is_empty(s) {
             "⊥"
         } else {
             ranges = Show.ranges(t, s)
-            neg_ranges = Show.ranges(t, TSet.compl(s, a.nmt).bitwise_and(TSet.compl(TSet.bit(t.invalid), a.nmt)))
+            neg_ranges = Show.ranges(t, TSet.compl(s, a.minterm_count).bitwise_and(TSet.compl(TSet.bit(t.invalid), a.minterm_count)))
             if s == TSet.bit(t.invalid) {
-                # D8's Invalid symbol (no RE# notation exists; `\i` is ours)
+                # the Invalid symbol (no RE# notation exists; `\i` is ours)
                 "\\i"
             } else if List.is_empty(neg_ranges) and !TSet.contains(s, t.invalid) {
                 # every codepoint but not Invalid: RE# would say `_`
@@ -117,13 +115,13 @@ Show := [].{
         else if c == 9 { "\\t" }
         else if c == 13 { "\\r" }
         else if c == 32 { " " }
-        else if c < 32 or c == 127 { "\\x${Show.hex2(c)}" }
+        else if c < 32 or c == 127 { "\\x${Show.hex_byte(c)}" }
         else if List.contains(['(', ')', '&', '~', '.', '|', '^', '$', '[', ']', '\\', '*', '+', '?', '{', '}', '_'], c) { "\\${Utf8.cps_to_str([c])}" }
         else if c == 0x10_FFFF { "\\u{10FFFF}" }
         else { Utf8.cps_to_str([c]) }
 
-    hex2 : U32 -> Str
-    hex2 = |c| {
+    hex_byte : U32 -> Str
+    hex_byte = |c| {
         d = |x| Utf8.cps_to_str([if x < 10 { 48 + x } else { 55 + x }])
         Str.concat(d(c.shr_zf_wrap(4).bitwise_and(15)), d(c.bitwise_and(15)))
     }

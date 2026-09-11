@@ -130,17 +130,17 @@ Http := [].{
     # byte of every header name in the request.
     colon_at : List(U8), U64, U64 -> Try(U64, [NoColon])
     colon_at = |buf, at, stop| {
-        var i = at
-        var found = stop
-        while i < stop {
-            if (List.get(buf, i) ?? 0) == ':' {
-                found = i
-                i = stop
+        var $i = at
+        var $found = stop
+        while $i < stop {
+            if (List.get(buf, $i) ?? 0) == ':' {
+                $found = $i
+                $i = stop
             } else {
-                i = i + 1
+                $i = $i + 1
             }
         }
-        if found == stop { Err(NoColon) } else { Ok(found) }
+        if $found == stop { Err(NoColon) } else { Ok($found) }
     }
 
     ## The bytes of a piece.
@@ -168,18 +168,18 @@ Http := [].{
         n = List.len(want)
         fs = req.fields
         nf = List.len(fs)
-        var i = 0
-        var hit = Err(Missing)
-        while i < nf {
-            f = List.get(fs, i) ?? { name: { start: 0, end: 0 }, value: { start: 0, end: 0 } }
+        var $i = 0
+        var $hit = Err(Missing)
+        while $i < nf {
+            f = List.get(fs, $i) ?? { name: { start: 0, end: 0 }, value: { start: 0, end: 0 } }
             if f.name.end - f.name.start == n and Http.eq_ci_at(buf, f.name.start, want, 0, n) {
-                hit = Ok(f.value)
-                i = nf
+                $hit = Ok(f.value)
+                $i = nf
             } else {
-                i = i + 1
+                $i = $i + 1
             }
         }
-        hit
+        $hit
     }
 
     ## Are `n` bytes of the buffer at `at` equal to `want`, ASCII-case-
@@ -187,16 +187,16 @@ Http := [].{
     ## one range test.
     eq_ci_at : List(U8), U64, List(U8), U64, U64 -> Bool
     eq_ci_at = |buf, at, want, from, n| {
-        var i = from
-        var ok = True
-        while ok and i < n {
-            if Http.lower(List.get(buf, at + i) ?? 0) == Http.lower(List.get(want, i) ?? 1) {
-                i = i + 1
+        var $i = from
+        var $ok = True
+        while $ok and $i < n {
+            if Http.lower(List.get(buf, at + $i) ?? 0) == Http.lower(List.get(want, $i) ?? 1) {
+                $i = $i + 1
             } else {
-                ok = False
+                $ok = False
             }
         }
-        ok
+        $ok
     }
 
     lower : U8 -> U8
@@ -205,15 +205,15 @@ Http := [].{
     ## Drop spaces and horizontal tabs from both ends of a piece (RFC 7230 OWS).
     trim_ows : List(U8), Http.Piece -> Http.Piece
     trim_ows = |buf, p| {
-        var s = p.start
-        var e = p.end
-        while s < e and Http.is_ows(List.get(buf, s) ?? 0) {
-            s = s + 1
+        var $s = p.start
+        var $e = p.end
+        while $s < $e and Http.is_ows(List.get(buf, $s) ?? 0) {
+            $s = $s + 1
         }
-        while e > s and Http.is_ows(List.get(buf, e - 1) ?? 0) {
-            e = e - 1
+        while $e > $s and Http.is_ows(List.get(buf, $e - 1) ?? 0) {
+            $e = $e - 1
         }
-        { start: s, end: e }
+        { start: $s, end: $e }
     }
 
     is_ows : U8 -> Bool

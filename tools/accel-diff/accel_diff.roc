@@ -13,11 +13,11 @@ import re.Regex
 # claim that the stretch it jumps holds no match, and this decides all of them
 # at once by asking the unaccelerated automaton.
 #
-# Written for the third byte in `Rlit.rfind_pair2`'s scan window (design log,
-# 2026-09-07), which needs a haystack long enough for the SIMD path and runs of
-# non-ASCII next to the anchors. Complements `tools/skip-diff`, which turns the
-# per-state skips off and leaves the accelerators on: this one is the other
-# axis, and neither subsumes the other.
+# The haystack is long enough for the SIMD path and puts runs of non-ASCII
+# next to the anchors, which `Rlit.rfind_triple`'s third-byte window needs.
+# Complements `tools/skip-diff`, which turns the per-state skips off and leaves
+# the accelerators on: this one is the other axis, and neither subsumes the
+# other.
 
 # Patterns chosen for which accelerator they select, which the
 # `Accel.run_of` / `Accel.pick_anchor` rules decide from the pattern's sets:

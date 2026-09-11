@@ -11,12 +11,12 @@ import re.Regex
 # automaton with every per-state skip turned off — over a long haystack and
 # three mutations of it. Any disagreement is a skip that jumped over a match.
 #
-# Written for `skip_ok[s] == 2` (2026-09-07), the flag that lets a state whose
+# Exercises `skip_ok[s] == 2`, the flag that lets a state whose
 # leaving set is pure ASCII pass over multibyte symbols instead of decoding
 # them. That path is only reachable on a haystack that HAS non-ASCII, and only
 # in states the fuzz's short haystacks rarely build, so it needs its own
 # differential; the mutations put lone continuation bytes and invalid bytes
-# next to the digits so the D8 `Invalid` symbol is in the skipped stretch too.
+# next to the digits so the `Invalid` symbol is in the skipped stretch too.
 
 # Patterns whose skip sets span the cases the flag distinguishes: pure-ASCII
 # sets that qualify (`[0-9]`, `[A-Z]`, punctuation), sets that do not because

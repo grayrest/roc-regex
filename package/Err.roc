@@ -1,8 +1,10 @@
-## D7 — the error type and its renderer, extended with RE#'s rejections.
+## The error type and its renderer, extended with RE#'s rejections.
 ##
 ## `Error` is one record carrying the pattern, an optional span, and a `kind`.
 ## Every field is documented-unstable (no field privacy in Roc). `kind` is public
 ## and matchable; `render` is the only supported way to produce a message.
+import Utf8
+
 Err := [].{
     Pos : { offset : U64, col : U64 }
 
@@ -28,7 +30,7 @@ Err := [].{
         LazyQuantifierUnsupported,
         FlagUnsupported,
         Unsupported(Str),
-        # budgets (D13) and the U64 solver's width (S9)
+        # budgets and the U64 solver's width
         PatternTooLong({ limit : U64, given : U64 }),
         NestLimitExceeded({ limit : U64, given : U64 }),
         TooManyClasses({ limit : U64, given : U64 }),
@@ -95,16 +97,13 @@ Err := [].{
     col_of = |pattern, offset|
         Err.count_cps(Str.to_utf8(pattern), 0, offset, 0)
 
+    # the pattern came from a Roc `Str`, so it is valid UTF-8 and every step
+    # lands on a lead byte: `Utf8.decode`'s length is the codepoint's length
     count_cps : List(U8), U64, U64, U64 -> U64
     count_cps = |b, i, offset, n|
         if i >= offset or i >= List.len(b) {
             n
         } else {
-            step = Err.cp_len(List.get(b, i) ?? 0)
-            Err.count_cps(b, i + step, offset, n + 1)
+            Err.count_cps(b, i + (Utf8.decode(b, i)).len, offset, n + 1)
         }
-
-    cp_len : U8 -> U64
-    cp_len = |b0|
-        if b0 < 0x80 { 1 } else if b0.bitwise_and(0xE0) == 0xC0 { 2 } else if b0.bitwise_and(0xF0) == 0xE0 { 3 } else { 4 }
 }

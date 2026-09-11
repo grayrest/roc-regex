@@ -1,7 +1,7 @@
-## Symbolic character sets over the pattern's minterms (S9): a `U64` bitset with
+## Symbolic character sets over the pattern's minterms: a `U64` bitset with
 ## bit `i` set when minterm `i` is in the set. This is RE#'s `UInt64Solver`; a
-## pattern with more than 64 minterms is rejected at compile time (design log,
-## "What's deferred"). `n` is the minterm count and fixes the `full` mask.
+## pattern with more than 64 minterms is rejected at compile time. `n` is the
+## minterm count and fixes the `full` mask.
 TSet := [].{
     ## mask of the low `n` bits
     full : U32 -> U64

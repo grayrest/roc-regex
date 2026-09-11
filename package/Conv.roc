@@ -3,7 +3,7 @@
 ## anchor nodes; `\b` is rewritten from its neighbours into one of RE#'s four
 ## one-sided word-border lookarounds; negative lookarounds become positive
 ## lookarounds over complements. Every concatenation goes through
-## `mk_concat_checked` (tier 3).
+## `mk_concat_checked`.
 import Arena
 import Ast
 import Build
@@ -16,8 +16,6 @@ Conv := [].{
     ## the compiled alphabet: the pattern's sets (as collected) and their tsets,
     ## plus the `\w` and `\s` tsets for the word-border heuristic
     Ctx : { sets : List(Ast.Set), tsets : List(U64), wordc : U64, spacec : U64 }
-
-    Ids : { a : Arena.A, ids : List(U32) }
 
     tset_of : Conv.Ctx, Ast.Set -> U64
     tset_of = |ctx, cs|
@@ -34,7 +32,7 @@ Conv := [].{
     }
 
     # the node(s) an AST contributes to an enclosing concatenation (`loop acc node`)
-    conv_list : Arena.A, Conv.Ctx, Ast -> Conv.Ids
+    conv_list : Arena.A, Conv.Ctx, Ast -> Arena.Ids
     conv_list = |a, ctx, ast|
         match ast {
             Empty => { a, ids: [] }
@@ -69,9 +67,9 @@ Conv := [].{
                 }
             Look(k) =>
                 if k == Ast.look_caret {
-                    { a, ids: [a.anc.caret] }
+                    { a, ids: [a.anchors.caret] }
                 } else if k == Ast.look_dollar {
-                    { a, ids: [a.anc.dollar] }
+                    { a, ids: [a.anchors.dollar] }
                 } else if k == Ast.look_big_a {
                     { a, ids: [Arena.begin_anchor] }
                 } else if k == Ast.look_z {
@@ -102,31 +100,37 @@ Conv := [].{
             }
         }
 
-    # each arm of an Alt/And, converted as its own checked concatenation
-    conv_arms : Arena.A, Conv.Ctx, List(Ast) -> Conv.Ids
-    conv_arms = |a, ctx, xs|
+    ## `Arena.map_ids` over ASTs: fold `f` over `xs`, threading the arena and
+    ## collecting the id each item builds. The seam itself walks node ids
+    ## (`List(U32)`), and everything here walks `Ast`, so this is the same fold
+    ## one type up.
+    map_asts : Arena.A, List(Ast), (Arena.A, Ast -> Arena.R) -> Arena.Ids
+    map_asts = |a, xs, f|
         List.fold(xs, { a, ids: [] }, |acc, x| {
-            r = Conv.convert(acc.a, ctx, x)
+            r = f(acc.a, x)
             { a: r.a, ids: List.append(acc.ids, r.id) }
         })
 
+    # each arm of an Alt/And, converted as its own checked concatenation
+    conv_arms : Arena.A, Conv.Ctx, List(Ast) -> Arena.Ids
+    conv_arms = |a, ctx, xs| Conv.map_asts(a, xs, |a1, x| Conv.convert(a1, ctx, x))
+
     # a concatenation: `\b` items see their neighbours (`convertAdjacent`)
-    conv_concat : Arena.A, Conv.Ctx, List(Ast) -> Conv.Ids
+    conv_concat : Arena.A, Conv.Ctx, List(Ast) -> Arena.Ids
     conv_concat = |a, ctx, xs|
         List.fold_with_index(xs, { a, ids: [] }, |acc, x, i| {
             r = Conv.conv_adjacent(acc.a, ctx, xs, i, x)
             { a: r.a, ids: List.concat(acc.ids, r.ids) }
         })
 
-    conv_adjacent : Arena.A, Conv.Ctx, List(Ast), U64, Ast -> Conv.Ids
+    conv_adjacent : Arena.A, Conv.Ctx, List(Ast), U64, Ast -> Arena.Ids
     conv_adjacent = |a, ctx, xs, i, x|
         match x {
             Alt(arms) => {
                 # every arm sees the same neighbours
-                rs = List.fold(arms, { a, ids: [] }, |acc, arm| {
-                    inner = Conv.conv_adjacent(acc.a, ctx, xs, i, arm)
-                    c = Build.mk_concat_checked(inner.a, inner.ids)
-                    { a: c.a, ids: List.append(acc.ids, c.id) }
+                rs = Conv.map_asts(a, arms, |a1, arm| {
+                    inner = Conv.conv_adjacent(a1, ctx, xs, i, arm)
+                    Build.mk_concat_checked(inner.a, inner.ids)
                 })
                 o = Build.mk_or_seq(rs.a, rs.ids)
                 { a: o.a, ids: [o.id] }
@@ -210,31 +214,32 @@ Conv := [].{
             _ => Unknown
         }
 
-    to_left : Conv.Ctx, List(Ast), U64 -> Conv.Kind
-    to_left = |ctx, xs, idx|
-        if idx == 0 {
+    ## The neighbour on one side of the `\b` at `idx`: `left` True walks towards
+    ## index 0, False towards the end, and is also the edge of the neighbour
+    ## node that touches the border (`Conv.node_kind`). An OPTIONAL neighbour
+    ## (`x?`, `x*`) settles nothing by itself, so the walk steps past it and
+    ## only keeps its kind when the one beyond agrees: `\bx?\w` is a word
+    ## border either way, `\bx?.` is not decidable.
+    to_side : Conv.Ctx, List(Ast), U64, Bool -> Conv.Kind
+    to_side = |ctx, xs, idx, left| {
+        at_edge = if left { idx == 0 } else { idx + 1 >= List.len(xs) }
+        if at_edge {
             Edge
         } else {
-            k = Conv.node_kind(ctx, True, List.get(xs, idx - 1) ?? Empty)
-            match k {
-                WordOption => if Conv.to_left(ctx, xs, idx - 1) == WordChar { WordChar } else { Unknown }
-                NonWordOption => if Conv.to_left(ctx, xs, idx - 1) == NonWordChar { NonWordChar } else { Unknown }
+            next = if left { idx - 1 } else { idx + 1 }
+            match Conv.node_kind(ctx, left, List.get(xs, next) ?? Empty) {
+                WordOption => if Conv.to_side(ctx, xs, next, left) == WordChar { WordChar } else { Unknown }
+                NonWordOption => if Conv.to_side(ctx, xs, next, left) == NonWordChar { NonWordChar } else { Unknown }
                 other => other
             }
         }
+    }
+
+    to_left : Conv.Ctx, List(Ast), U64 -> Conv.Kind
+    to_left = |ctx, xs, idx| Conv.to_side(ctx, xs, idx, True)
 
     to_right : Conv.Ctx, List(Ast), U64 -> Conv.Kind
-    to_right = |ctx, xs, idx|
-        if idx + 1 >= List.len(xs) {
-            Edge
-        } else {
-            k = Conv.node_kind(ctx, False, List.get(xs, idx + 1) ?? Empty)
-            match k {
-                WordOption => if Conv.to_right(ctx, xs, idx + 1) == WordChar { WordChar } else { Unknown }
-                NonWordOption => if Conv.to_right(ctx, xs, idx + 1) == NonWordChar { NonWordChar } else { Unknown }
-                other => other
-            }
-        }
+    to_right = |ctx, xs, idx| Conv.to_side(ctx, xs, idx, False)
 
     rewrite_word_border : Arena.A, Conv.Ctx, List(Ast), U64 -> Arena.R
     rewrite_word_border = |a, ctx, xs, idx| {
@@ -243,10 +248,10 @@ Conv := [].{
         match (left, right) {
             (NonWordChar, WordChar) => { a, id: Arena.eps }
             (WordChar, NonWordChar) => { a, id: Arena.eps }
-            (WordChar, _) => { a, id: a.anc.nwr }
-            (NonWordChar, _) => { a, id: a.anc.wr }
-            (_, WordChar) => { a, id: a.anc.nwl }
-            (_, NonWordChar) => { a, id: a.anc.wl }
+            (WordChar, _) => { a, id: a.anchors.nonword_right }
+            (NonWordChar, _) => { a, id: a.anchors.word_right }
+            (_, WordChar) => { a, id: a.anchors.nonword_left }
+            (_, NonWordChar) => { a, id: a.anchors.word_left }
             (Edge, Edge) => { a: Arena.fail(a, "\\b is only supported when next to word or non-word characters"), id: Arena.bot }
             _ => { a: Arena.fail(a, "Resharp does not support unconstrained word borders, rewrite \\b.*\\b to \\b\\w+\\b or \\b\\s+\\b to show which side the word is on"), id: Arena.bot }
         }

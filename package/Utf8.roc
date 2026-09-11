@@ -1,40 +1,40 @@
-## UTF-8 decoding over `List(U8)` haystacks with D8's `Invalid` symbol: a
+## UTF-8 decoding over `List(U8)` haystacks with the `Invalid` symbol: a
 ## malformed sequence decodes as one `Invalid` symbol whose extent is the first
-## byte plus every continuation byte following it (D8 rule 1). Well-formedness
-## is structural (lead byte, continuation count, no overlongs, no surrogates).
+## byte plus every continuation byte following it. Well-formedness is
+## structural (lead byte, continuation count, no overlongs, no surrogates).
 Utf8 := [].{
     Sym : { cp : U32, len : U64, ok : Bool }
 
     ## decode the symbol starting at byte offset `i`
     decode : List(U8), U64 -> Utf8.Sym
     decode = |b, i| {
-        b0 = Utf8.at(b, i)
-        if b0 < 0x80 {
-            { cp: b0.to_u32(), len: 1, ok: True }
-        } else if b0 >= 0xC2 and b0 <= 0xDF {
-            b1 = Utf8.at(b, i + 1)
-            if Utf8.is_cont(b1) {
-                { cp: b0.bitwise_and(0x1F).to_u32().shl_wrap(6).bitwise_or(Utf8.low6(b1)), len: 2, ok: True }
+        lead = Utf8.at(b, i)
+        if lead < 0x80 {
+            { cp: lead.to_u32(), len: 1, ok: True }
+        } else if lead >= 0xC2 and lead <= 0xDF {
+            cont1 = Utf8.at(b, i + 1)
+            if Utf8.is_cont(cont1) {
+                { cp: lead.bitwise_and(0x1F).to_u32().shl_wrap(6).bitwise_or(Utf8.continuation_bits(cont1)), len: 2, ok: True }
             } else {
                 Utf8.invalid(b, i)
             }
-        } else if b0 >= 0xE0 and b0 <= 0xEF {
-            b1 = Utf8.at(b, i + 1)
-            b2 = Utf8.at(b, i + 2)
-            lo_ok = if b0 == 0xE0 { b1 >= 0xA0 and b1 <= 0xBF } else if b0 == 0xED { b1 >= 0x80 and b1 <= 0x9F } else { Utf8.is_cont(b1) }
-            if lo_ok and Utf8.is_cont(b2) {
-                cp = b0.bitwise_and(0x0F).to_u32().shl_wrap(12).bitwise_or(Utf8.low6(b1).shl_wrap(6)).bitwise_or(Utf8.low6(b2))
+        } else if lead >= 0xE0 and lead <= 0xEF {
+            cont1 = Utf8.at(b, i + 1)
+            cont2 = Utf8.at(b, i + 2)
+            lo_ok = if lead == 0xE0 { cont1 >= 0xA0 and cont1 <= 0xBF } else if lead == 0xED { cont1 >= 0x80 and cont1 <= 0x9F } else { Utf8.is_cont(cont1) }
+            if lo_ok and Utf8.is_cont(cont2) {
+                cp = lead.bitwise_and(0x0F).to_u32().shl_wrap(12).bitwise_or(Utf8.continuation_bits(cont1).shl_wrap(6)).bitwise_or(Utf8.continuation_bits(cont2))
                 { cp, len: 3, ok: True }
             } else {
                 Utf8.invalid(b, i)
             }
-        } else if b0 >= 0xF0 and b0 <= 0xF4 {
-            b1 = Utf8.at(b, i + 1)
-            b2 = Utf8.at(b, i + 2)
-            b3 = Utf8.at(b, i + 3)
-            lo_ok = if b0 == 0xF0 { b1 >= 0x90 and b1 <= 0xBF } else if b0 == 0xF4 { b1 >= 0x80 and b1 <= 0x8F } else { Utf8.is_cont(b1) }
-            if lo_ok and Utf8.is_cont(b2) and Utf8.is_cont(b3) {
-                cp = b0.bitwise_and(0x07).to_u32().shl_wrap(18).bitwise_or(Utf8.low6(b1).shl_wrap(12)).bitwise_or(Utf8.low6(b2).shl_wrap(6)).bitwise_or(Utf8.low6(b3))
+        } else if lead >= 0xF0 and lead <= 0xF4 {
+            cont1 = Utf8.at(b, i + 1)
+            cont2 = Utf8.at(b, i + 2)
+            cont3 = Utf8.at(b, i + 3)
+            lo_ok = if lead == 0xF0 { cont1 >= 0x90 and cont1 <= 0xBF } else if lead == 0xF4 { cont1 >= 0x80 and cont1 <= 0x8F } else { Utf8.is_cont(cont1) }
+            if lo_ok and Utf8.is_cont(cont2) and Utf8.is_cont(cont3) {
+                cp = lead.bitwise_and(0x07).to_u32().shl_wrap(18).bitwise_or(Utf8.continuation_bits(cont1).shl_wrap(12)).bitwise_or(Utf8.continuation_bits(cont2).shl_wrap(6)).bitwise_or(Utf8.continuation_bits(cont3))
                 { cp, len: 4, ok: True }
             } else {
                 Utf8.invalid(b, i)
@@ -55,8 +55,8 @@ Utf8 := [].{
     is_cont : U8 -> Bool
     is_cont = |x| x >= 0x80 and x <= 0xBF
 
-    low6 : U8 -> U32
-    low6 = |x| x.bitwise_and(0x3F).to_u32()
+    continuation_bits : U8 -> U32
+    continuation_bits = |x| x.bitwise_and(0x3F).to_u32()
 
     at : List(U8), U64 -> U8
     at = |b, i| List.get(b, i) ?? 0
@@ -73,20 +73,20 @@ Utf8 := [].{
     ## sequence is one Invalid symbol back to its lead byte, or, for a run of
     ## bare continuation bytes, back to the byte after the preceding non-
     ## continuation byte. Invalid input may segment differently forwards and
-    ## backwards (D8 rule 7).
+    ## backwards.
     decode_rev : List(U8), U64 -> { cs : U64, cp : U32, ok : Bool }
     decode_rev = |b, pos| {
         i = pos - 1
-        bi = Utf8.at(b, i)
-        if bi < 0x80 {
-            { cs: i, cp: bi.to_u32(), ok: True }
+        prev_byte = Utf8.at(b, i)
+        if prev_byte < 0x80 {
+            { cs: i, cp: prev_byte.to_u32(), ok: True }
         } else {
             l = Utf8.sym_start(b, i)
-            bl = Utf8.at(b, l)
-            if !Utf8.is_cont(bl) and bl < 0x80 {
+            start_byte = Utf8.at(b, l)
+            if !Utf8.is_cont(start_byte) and start_byte < 0x80 {
                 # bare continuation run after an ASCII byte
                 { cs: l + 1, cp: 0, ok: False }
-            } else if Utf8.is_cont(bl) {
+            } else if Utf8.is_cont(start_byte) {
                 # the run reaches offset 0 with no lead
                 { cs: l, cp: 0, ok: False }
             } else {
