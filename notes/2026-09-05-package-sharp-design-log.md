@@ -2964,3 +2964,67 @@ unrelated shape in the same change set (a helper returning
 `Try(List(Span), [NoPrescan])` across a call boundary). Both are clean under
 `release-fast-10e922df`: corpus 331/331 six runs each, and 1020/1020 on
 accel-diff. Neither was designed around; the compiler was updated.
+
+## Reconciling the sweep-free scan with `Rrun` (2026-09-11)
+
+`claude/resharp-regex-design-review-60cff0` had been working the same ground in
+parallel and never merged: eight commits, of which one is a sweep replacement
+more general than `Rrun`. Its merge base is `596bf2a`, BEFORE this session's
+perf work, so the two are independent implementations, not a fork of one.
+
+Ported onto main: `Runs.roc` plus `Accel.class_runs` and `Dfa.Scan`. Where
+`R = C+ · rest` with `C` a single class and the repeat UNBOUNDED, every match
+start is a position in `C`, and for `p < q` inside one run of `C` both
+`q` a start implies `p` a start and `end(p) >= end(q)` -- any split `C+` takes
+from `q` is also available from `p`. So a `Bset` scan finds every start in
+order, a failed candidate lets the rest of its run be skipped, and the sweep is
+not needed at all.
+
+### Both accelerators earn their place
+
+They do not overlap the way it first looks, and both directions were measured
+rather than argued:
+
+| | |
+|---|---|
+| remove `Rrun`, keep `Runs` | `bounded_num` **2.06x slower** |
+| route `[A-Za-z]+` through `Rrun` instead of `Runs` | **1.16x slower** |
+
+`class_runs` excludes bounded repeats on purpose -- `[0-9]{2,4}` on "12345" has
+`end(0) = 4` and `end(1) = 5`, so a later start outlives an earlier one and
+leftmost alone stops being enough -- which is exactly `Rrun`'s shape. And
+`Runs` reaches what `Rrun` cannot: a `rest` after the run, and a class holding
+non-ASCII codepoints. `\w+\s+\w+` and `\p{L}+` are both.
+
+So: `Runs` first where it applies, `Rrun` for bounded repeats and for patterns
+whose sweep already skips, sweep otherwise.
+
+### Against Rust's meta engine, `release-fast-10e922df`
+
+| pattern | before | after |
+|---|---|---|
+| `\w+\s+\w+` | 1.33x | **0.76x** |
+| `\p{L}+` | 1.00x | **0.69x** |
+| `[A-Za-z]+` | 0.75x | **0.60x** |
+| `[0-9]{2,4}` | 0.59x | 0.55x |
+| `.*Holmes` | 0.49x | 0.39x |
+
+Seven of ten rows at or below Rust; `\w+\s+\w+` goes from the widest row to
+below it, and the widest is now the literal alternation at 1.09x. The
+compiler changed under this measurement too, so the "before" column is not a
+clean A/B; the isolated A/B of the port alone reads `two_words` 0.592x,
+`uni_letters` 0.726x, `class_plus` 0.875x with everything else inside noise.
+
+### Notes on the port
+
+- The branch's inner loop built a `Try(U64, [NoEnd])` per byte. Main's end pass
+  stopped doing that in `aa8ec53` (~0.8 ns a byte); `Runs` uses the `Dfa.no_end`
+  sentinel instead.
+- `Dfa.Scan` is NOT a field of `Accels`: that record is an argument to every
+  fast scan, and widening it cost 15-19% on `caps_email` and `.*Holmes`.
+- `Runs` is its own module because putting it in `Dfa` cost 11-26% on rows that
+  never execute it, the same layout effect that moved the literal-set dispatch
+  out of `Dfa` in M4.
+- Style follows `9c8de04`: `var $name`, the same local names as
+  `Dfa.ends_fast`'s forward step (`at`, `d`, `cp_class`, `minterm_count`,
+  `byte_before_skip`), and no empty `else {}` branches.

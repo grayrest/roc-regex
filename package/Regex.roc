@@ -18,6 +18,7 @@ import Deriv
 import Dfa
 import Err
 import Ref
+import Runs
 import Teddy
 import Show
 import Trie
@@ -28,7 +29,7 @@ Regex := [].{
     ## The compiled pattern. `root` is the raw pattern node, `rev` its reversal,
     ## `rev_ts` `_*·rev` (the reverse search start), `noprefix` the pattern with
     ## its lookbehind prefix stripped (the forward end pass). Documented-unstable.
-    Pattern : { a : Arena.A, trie : Trie.T, root : U32, rev : U32, rev_ts : U32, ts : U32, noprefix : U32, e : Dfa.E, accel : Accel.T, lits : Regex.Lits }
+    Pattern : { a : Arena.A, trie : Trie.T, root : U32, rev : U32, rev_ts : U32, ts : U32, noprefix : U32, e : Dfa.E, accel : Accel.T, scan : Dfa.Scan, lits : Regex.Lits }
 
     ## The literal-alternation accelerator, with its Teddy tables ALREADY BUILT.
     ## Building them at compile time keeps them out of the per-search path and
@@ -116,7 +117,12 @@ Regex := [].{
         accel_out = Accel.analyze(dfa_init, trie, root.id, reversed.id, rev_search_start.id, noprefix_node.id)
         e = Dfa.freeze(Dfa.explore(accel_out.e), trie)
         lits = Regex.lits_of(accel_out.accel, e.a, trie, root.id)
-        Ok({ a: e.a, trie, root: root.id, rev: reversed.id, rev_ts: rev_search_start.id, ts: search_start.id, noprefix: noprefix_node.id, e, accel: accel_out.accel, lits })
+        # `Accel` decides the shape; the two runtime conditions can only be
+        # asked once the fold is frozen. A state with a skip set already jumps
+        # between rare bytes and would be an order of magnitude worse read
+        # forward byte by byte, and an incomplete fold has no byte-loop scan.
+        scan = if e.eflags.bitwise_and(Dfa.ef_any_skip) != 0 or !e.complete { NoScan } else { accel_out.scan }
+        Ok({ a: e.a, trie, root: root.id, rev: reversed.id, rev_ts: rev_search_start.id, ts: search_start.id, noprefix: noprefix_node.id, e, accel: accel_out.accel, scan, lits })
     }
 
     ## The literal-pattern idiom: `Regex.build("…")` folds the pattern at build
@@ -150,6 +156,22 @@ Regex := [].{
     ## Dispatched here rather than inside `Dfa.find_all_fast_opts`: another arm
     ## in that function slows every pattern that does not take it, so the hot
     ## scan does not learn about this at all.
+    ## Whatever can answer before the reverse sweep does: a literal set, or the
+    ## run scan. One `match`, not two: adding a second dispatch beside the
+    ## literal one cost 3-25% on every pattern, the target row included, which
+    ## is the same reason the literal set is tested here and not inside
+    ## `Dfa.find_all_fast_opts`.
+    prescan : Regex.Pattern, List(U8), Bool -> Try(List(Regex.Span), [NoPrescan])
+    prescan = |re, hay, first_only|
+        match Regex.lit_set_spans(re.lits, hay) {
+            Ok(lit_spans) => Ok(lit_spans)
+            Err(_) =>
+                match re.scan {
+                    ClassRuns(_) => Ok(Runs.find_all_runs(re.e, re.trie, re.scan, hay, True, first_only))
+                    NoScan => Err(NoPrescan)
+                }
+        }
+
     lit_set_spans : Regex.Lits, List(U8) -> Try(List(Regex.Span), [NoSet])
     lit_set_spans = |lits, hay|
         match lits {
@@ -167,8 +189,8 @@ Regex := [].{
 
     find_all : Regex.Pattern, List(U8) -> List(Regex.Span)
     find_all = |re, hay|
-        match Regex.lit_set_spans(re.lits, hay) {
-            Ok(lit_spans) => lit_spans
+        match Regex.prescan(re, hay, False) {
+            Ok(spans) => spans
             Err(_) =>
                 if re.e.complete {
                     # a complete fold is a read-only table: the byte-loop scans
@@ -247,6 +269,7 @@ Regex := [].{
                 RemainingSets(k, c, m) => "len=prefix${k.to_str()}+upto${m.to_str()}x${c.to_str()}"
                 MatchEnd => "len=any"
             }
+        scan_str = match re.scan { NoScan => "scan=none", ClassRuns(_) => "scan=runs" }
         override_str =
             match re.accel.override {
                 Literal(l, _, _) => "override=${Str.from_utf8_lossy(l)}"
@@ -256,7 +279,7 @@ Regex := [].{
                         Lits(literals, _) => "override=set[${literals |> List.map(|l| Str.from_utf8_lossy(l)) |> Str.join_with("|")}]"
                     }
             }
-        "${init} ${len} ${override_str}"
+        "${init} ${len} ${override_str} ${scan_str}"
     }
 
     ## the fast reverse sweep alone (profiling): match starts, accelerated or not
@@ -305,8 +328,8 @@ Regex := [].{
         match re.accel.override {
             Literal(lit, padded, mask) => Dfa.first_literal(hay, lit, padded, mask)
             NoOverride =>
-                match Regex.lit_set_spans(re.lits, hay) {
-                    Ok(lit_spans) => Try.map_err(List.first(lit_spans), |_| NoMatch)
+                match Regex.prescan(re, hay, True) {
+                    Ok(spans) => Try.map_err(List.first(spans), |_| NoMatch)
                     Err(_) => {
                         r = if re.e.complete { Dfa.find_first_fast(re.e, re.trie, re.accel, hay) } else { Regex.find_all_threaded(re, hay) }
                         Try.map_err(List.first(r), |_| NoMatch)

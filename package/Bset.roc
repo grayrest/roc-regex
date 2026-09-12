@@ -117,6 +117,36 @@ Bset := [].{
         r.eq_lanes(U8x16.splat(0)).bitwise_not().to_bitmask()
     }
 
+    ## `find`, with the "a non-ASCII byte is always a member" rule dropped.
+    ## Sound only where the caller established that no non-ASCII symbol is in
+    ## the set (`Accel.class_runs`'s `exact`), for the same reason
+    ## `member_ascii` is.
+    find_ascii : List(U8), List(U8), U64, U64 -> Try(U64, [NotFound])
+    find_ascii = |hay, tables, k, pos| Bset.find_ascii_loop(hay, tables, k, Bset.load(tables, k), Bset.hi_vec, List.len(hay), pos)
+
+    find_ascii_loop : List(U8), List(U8), U64, U8x16, U8x16, U64, U64 -> Try(U64, [NotFound])
+    find_ascii_loop = |hay, tables, k, lo, hi, n, w|
+        if w + 16 <= n {
+            m = Bset.mask_ascii(lo, hi, U8x16.load(hay, w) ?? U8x16.splat(0))
+            if m == 0 {
+                Bset.find_ascii_loop(hay, tables, k, lo, hi, n, w + 16)
+            } else {
+                Ok(w + m.count_trailing_zero_bits().to_u64())
+            }
+        } else {
+            Bset.find_ascii_tail(hay, tables, k, n, w)
+        }
+
+    find_ascii_tail : List(U8), List(U8), U64, U64, U64 -> Try(U64, [NotFound])
+    find_ascii_tail = |hay, tables, k, n, pos|
+        if pos >= n {
+            Err(NotFound)
+        } else if Bset.member_ascii(tables, k, List.get(hay, pos) ?? 0) {
+            Ok(pos)
+        } else {
+            Bset.find_ascii_tail(hay, tables, k, n, pos + 1)
+        }
+
     ## How often a byte occurs in English-ish text, per mille (rough: letters by
     ## frequency, space 170, newline and common punctuation 10-15, digits and
     ## capitals about 1 each, everything else 0.5 — stored ×2 so the rare

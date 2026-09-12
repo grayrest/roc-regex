@@ -662,6 +662,18 @@ Dfa := [].{
     Override : [NoOverride, Literal(List(U8), List(U8), U16)]
     Accels : { init : Dfa.Init, len : Dfa.Len, override : Dfa.Override }
 
+    ## Can the scan find its own match starts, making the reverse sweep
+    ## unnecessary? `Accel.class_runs` decides and carries the argument.
+    ## `tab` is `C`'s `Bset` table and `ctab` its complement's; `stops` says
+    ## `C` holds a non-ASCII codepoint, so the scan for it must stop at every
+    ## multibyte symbol, and `exact` is its negation — only an exact `C` may
+    ## skip the rest of a failed candidate's run.
+    ##
+    ## Deliberately NOT a field of `Accels`: that record is an argument to every
+    ## fast scan, and widening it cost 15-19% on `caps_email` and `.*Holmes`.
+    ## This is read once per search.
+    Scan : [NoScan, ClassRuns({ tab : List(U8), stops : Bool, ctab : List(U8), exact : Bool })]
+
     ## RE#'s llmatch on a complete fold, as byte spans
     find_all_fast : Dfa.E, Trie.T, Dfa.Accels, List(U8) -> List({ start : U64, end : U64 })
     find_all_fast = |e, t, accels, hay| Dfa.find_all_fast_opts(e, t, accels, hay, True, False)

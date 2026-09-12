@@ -35,7 +35,10 @@ Accel := [].{
     none : Accel.T
     none = { init: NoInit, len: MatchEnd, override: NoOverride }
 
-    R : { e : Dfa.E, accel : Accel.T }
+    ## `scan` rides here rather than in `Accel.T`: that record is `Dfa.Accels`,
+    ## which every fast scan takes as an argument, and widening it cost 15-19%
+    ## on `caps_email` and `.*Holmes`. It is read once per search.
+    R : { e : Dfa.E, accel : Accel.T, scan : Dfa.Scan }
 
     ## Analyze the pattern: `root` is the raw pattern, `rev` its reverse,
     ## `rev_ts` `_*·rev`, `noprefix` the forward pattern. May create the prefix's
@@ -71,7 +74,71 @@ Accel := [].{
                 Ok(spec) => ClassRun(spec)
                 Err(_) => resolved_prefix.init
             }
-        { e: len_result.e, accel: { init, len, override } }
+        scan =
+            match override {
+                NoOverride => Accel.class_runs(len_result.e, t, root, noprefix, resolved_prefix.init)
+                _ => NoScan
+            }
+        { e: len_result.e, accel: { init, len, override }, scan }
+    }
+
+    ## Can the scan find its own starts, and skip the reverse sweep entirely?
+    ##
+    ## RE#'s llmatch sweeps `_*·rev(R)` right to left to collect every match
+    ## START, then runs a forward end pass from each. On `\w+\s+\w+` that sweep
+    ## is 44% of the row and yields 210198 starts for 21091 matches. It cannot
+    ## be shortened -- the reverse state at `p` summarises every byte to the
+    ## RIGHT of `p`, so it has to read the whole haystack before the first start
+    ## is known -- but for one shape of pattern it can be replaced.
+    ##
+    ## When `R = C+ · rest` with `C` a single class and the repeat unbounded,
+    ## every match start is a position in `C`, and for `p < q` inside one run of
+    ## `C`:
+    ##
+    ##   * `q` a start implies `p` a start, and
+    ##   * `end(p) >= end(q)`
+    ##
+    ## both because any split `C+` takes from `q` is also available from `p`,
+    ## which just gives `C+` more to absorb. So a scan for `C` finds every start
+    ## in order, and a candidate that FAILS lets the rest of its run be skipped.
+    ##
+    ## The repeat must be unbounded. `[0-9]{2,4}` on "12345" has `end(0) = 4`
+    ## and `end(1) = 5`, so a later start outlives an earlier one and leftmost
+    ## alone stops being enough. That shape is `Rrun`'s, not this one's.
+    ##
+    ## `rest` is unconstrained -- the argument only needs the split point to be
+    ## reachable -- but a LEADING lookbehind is fatal: `without_lookback_prefix`
+    ## strips it into `noprefix`, so the forward pass never tests it and only
+    ## the sweep did. Hence `np == root`.
+    ##
+    ## Gated to `init == NoInit`: a pattern whose sweep already skips between
+    ## anchor bytes -- `(\w+)@(\w+)` finds its 779 starts in 70 us -- would be
+    ## an order of magnitude worse reading every byte forward. `Regex.compile`
+    ## adds `not any_skip` for the same reason, once the fold is frozen.
+    class_runs : Dfa.E, Trie.T, U32, U32, Dfa.Init -> Dfa.Scan
+    class_runs = |e, t, root, np, init| {
+        a = e.a
+        head = if Arena.is_concat(a, root) { Arena.head(a, root) } else { root }
+        if init != NoInit or np != root or Arena.depends_anchor(a, root) {
+            NoScan
+        } else if !Arena.is_loop(a, head) or Arena.loop_lo(a, head) < 1 or Arena.loop_hi(a, head) != Arena.inf {
+            NoScan
+        } else {
+            body = Arena.head(a, head)
+            if !Arena.is_singleton(a, body) {
+                NoScan
+            } else {
+                cls = Arena.tset(a, body)
+                bytes = Accel.ascii_bytes(t, cls)
+                comp = List.keep_if(Arena.upto(128), |b| !List.contains(bytes, b.to_u8_wrap())) |> List.map(|b| b.to_u8_wrap())
+                stops = TSet.intersects(cls, Dfa.nonascii_classes(t))
+                if List.is_empty(bytes) and stops {
+                    NoScan
+                } else {
+                    ClassRuns({ tab: Bset.table(bytes), stops, ctab: Bset.table(comp), exact: !stops })
+                }
+            }
+        }
     }
 
     ## `Rrun`'s gate: is the reversed pattern one set of minterms repeated at
