@@ -2918,3 +2918,49 @@ this log is a MINIMUM over repetitions, taken in process, and a suspend can
 only inflate a sample. That is why the benchmark rows are unaffected by the
 same hazard that made this observation meaningless -- the one measurement in
 the session that was a single elapsed reading is the one that was wrong.
+
+## The reverse sweep swallowed a symbol before a stray continuation byte (2026-09-11)
+
+`\w+` on `π` followed by a lone `0x80` found NOTHING. The reference
+interpreter, the threaded scan and a forward scan all found `π`.
+
+`Utf8.decode_rev` walks back over a continuation run to find its lead byte,
+then decodes forward from there. On `CF 80 | 80` it finds the lead at 0,
+decodes `π` (length 2), sees `0 + 2 != 3`, and returns `cs: 0` -- reporting the
+invalid run as STARTING AT THE SYMBOL and swallowing it. Every reverse loop
+then steps past `π` without ever seeing it, so the sweep records no start and
+the match is lost.
+
+The fix is one branch: a valid symbol at `l` that ends strictly before `pos`
+means the bytes between its end and `pos` are the bare continuation run, so
+`cs` is `l + d.len`, not `l`.
+
+**The bound has to be strict.** A `pos` INSIDE a symbol has `l + d.len > pos`,
+and returning that hands a reverse scan a position AHEAD of where it started.
+The first version of this fix omitted the `<` and the corpus segfaulted.
+
+| input | `find_all_ref` | sweep before | sweep after |
+|---|---|---|---|
+| `π` + `80` | `[0,2)` | -- | `[0,2)` |
+| `π` + `FF` | `[0,2)` | `[0,2)` | `[0,2)` |
+| `π` + `80` + `π` | `[0,2) [3,5)` | `[3,5)` | `[0,2) [3,5)` |
+| `a` + `80` | `[0,1)` | `[0,1)` | `[0,1)` |
+
+`0xFF` was already right because it is not a continuation byte and takes a
+different branch, which is why nothing caught this earlier: the fuzz's invalid
+byte is `0xFF`.
+
+Found by `tools/accel-diff` once a scan that finds its own starts existed to
+disagree with the sweep -- four of its 1020 cases, all on the haystack with a
+lone `0x80` every 997th byte. A differential between two implementations only
+speaks when both exist.
+
+### It needed a newer compiler
+
+Under `release-fast-5f9a6e18` this fix made the corpus crash
+nondeterministically -- 134, 134, 139 across runs of the same binary, a
+different case each time, deterministic only under Guard Malloc. So did an
+unrelated shape in the same change set (a helper returning
+`Try(List(Span), [NoPrescan])` across a call boundary). Both are clean under
+`release-fast-10e922df`: corpus 331/331 six runs each, and 1020/1020 on
+accel-diff. Neither was designed around; the compiler was updated.
