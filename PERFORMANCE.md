@@ -30,31 +30,35 @@ Noise handling, because these rows move 6-12% between runs on the same binary:
 
 ## Standing
 
-`tools/bench/run.sh`, 2026-09-07, at commit `5bc7e76`. Nanoseconds per
+`tools/bench/run.sh`, 2026-09-11, at commit `733cbfb`, Roc
+`release-fast-10e922df`. Nanoseconds per
 `find_all` over 256 KB; `sharp/meta` is this engine over Rust's meta engine.
 
 | pattern | sharp ns | rustMeta ns | rustPV ns | sharp/meta | Rust `Regex::new` ns |
 |---|---|---|---|---|---|
-| `Holmes` | 28350 | 27027 | 3493223 | 1.05x | 32208 |
-| `Moriarty` | 10250 | 9969 | 3385583 | 1.03x | 18416 |
-| `Sherlock\|Holmes\|…` | 479750 | 425248 | 5358816 | 1.13x | 95208 |
-| `[A-Za-z]+` | 1613400 | 2205824 | 8068036 | 0.73x | 66667 |
-| `[0-9]{2,4}` | 64250 | 108872 | 3529380 | 0.59x | 149833 |
-| `\bthe\b` | 209300 | 204994 | 5541256 | 1.02x | 87792 |
-| `\w+\s+\w+` | 2055750 | 1544425 | 8665930 | 1.33x | 511084 |
-| `(\w+)@(\w+)` | 67350 | 68611 | 8357000 | 0.98x | 678917 |
-| `\p{L}+` | 2007550 | 2061462 | 8212294 | 0.97x | 271250 |
-| `.*Holmes` | 313550 | 644285 | 6929659 | 0.49x | 175917 |
+| `Holmes` | 29450 | 27781 | 3514861 | 1.06x | 47334 |
+| `Moriarty` | 10850 | 9915 | 3406062 | 1.09x | 23333 |
+| `Sherlock\|Holmes\|…` | 489900 | 431237 | 5380772 | 1.14x | 102250 |
+| `[A-Za-z]+` | 1461000 | 2239514 | 8103305 | 0.65x | 62083 |
+| `[0-9]{2,4}` | 62800 | 110636 | 3581565 | 0.57x | 149416 |
+| `\bthe\b` | 214650 | 212122 | 5607839 | 1.01x | 87709 |
+| `\w+\s+\w+` | 1234750 | 1549543 | 8746147 | 0.80x | 497417 |
+| `(\w+)@(\w+)` | 69750 | 69114 | 8456071 | 1.01x | 779584 |
+| `\p{L}+` | 1524450 | 2090919 | 8424569 | 0.73x | 247542 |
+| `.*Holmes` | 271300 | 668178 | 7099883 | 0.41x | 190000 |
 
 All ten match counts agree with Rust. The last column is what Rust pays to
 compile each pattern at run time; a folded Roc pattern pays zero. The older
-engine in `package-dfa` is behind `Regex` on every row (0.84x to 2.13x Rust).
+engine in `package-dfa` is behind `Regex` on every row (0.86x to 2.21x Rust).
 
-Five of ten rows are at or below Rust's meta engine and three more are within
-5%; the widest is `\w+\s+\w+` at 1.33x. `\bthe\b` sits at parity and reads
-either side of 1.00 from run to run — it is 1.02x here and 0.98x in the run
-before this one, which is the size of the noise on these rows and worth
-remembering before reading anything into a 2% move. The engine is ahead of Rust's PikeVM on every row by a wide
+Seven of ten rows are at or below Rust's meta engine and two more are within
+10%; the widest is the literal alternation at 1.14x. The four rows that a scan
+finds its own starts for — `[A-Za-z]+`, `[0-9]{2,4}`, `\w+\s+\w+`, `\p{L}+` —
+— the rows where a scan replaces the reverse sweep — are now the four
+furthest ahead of it. `\bthe\b` and `(\w+)@(\w+)` sit at
+parity and read either side of 1.00 from run to run, which is the size of the
+noise on these rows and worth remembering before reading anything into a 2%
+move. The engine is ahead of Rust's PikeVM on every row by a wide
 margin, which says only that it is a DFA and the PikeVM is not.
 
 Against RE# itself, the engine this one ports, `tools/sharp-bench/run.sh`
@@ -92,12 +96,12 @@ the automaton's size after RE#'s rewrites.
 | `literal_dense` | `Holmes` | 15 | 8 | literal override |
 | `literal_sparse` | `Moriarty` | 19 | 9 | literal override |
 | `teddy_alt` | `Sherlock\|Holmes\|Watson\|Adler\|Irene\|Norton\|Baker\|John` | 69 | 23 | literal set (Teddy) |
-| `class_plus` | `[A-Za-z]+` | 5 | 3 | class-run sweep (`classrun=x1`) |
+| `class_plus` | `[A-Za-z]+` | 5 | 3 | run scan, no sweep (`scan=runs`; `Rrun` also applies and loses by 1.16x) |
 | `bounded_num` | `[0-9]{2,4}` | 9 | 3 | class-run sweep (`classrun=x2`); remaining-sets end pass |
 | `word_bound` | `\bthe\b` | 12 | 7 | prefix skip on `h` with `t`,`e` as filters; fixed length 3 |
-| `two_words` | `\w+\s+\w+` | 9 | 4 | bare automaton |
+| `two_words` | `\w+\s+\w+` | 9 | 4 | run scan for `\w`, no sweep (`scan=runs`) |
 | `caps_email` | `(\w+)@(\w+)` | 9 | 4 | prefix skip on `@` |
-| `uni_letters` | `\p{L}+` | 5 | 3 | bare automaton |
+| `uni_letters` | `\p{L}+` | 5 | 3 | run scan for `\p{L}`, no sweep (`scan=runs`) |
 | `dotstar_lit` | `.*Holmes` | 20 | 9 | prefix skip on `H`; three skipping states |
 
 **`Holmes` and `Moriarty`.** The pattern is exactly a literal, so `find_all`
@@ -125,15 +129,19 @@ shipped bought 4%.
 bounded length, so no *forward* accelerator applies, and both record a possible
 start at nearly every position (205101 starts for 40056 matches).
 
-They now differ in the reverse pass. `[A-Za-z]+` is one class repeated with no
-non-ASCII member, so it takes the class-run sweep: no automaton, one SIMD scan
-for letter runs, and the starts computed from their extents. `\p{L}+` cannot —
-its class holds non-ASCII codepoints, which `Bset`'s tables cannot represent as
-members — so it still runs the automaton, and its 9900 non-ASCII bytes go
-through UTF-8 decode and the class trie instead of the fused ASCII
-byte-to-state table. That gap is the whole difference between 0.75x and 1.00x.
-Rust makes one pass over both; this engine makes two over `\p{L}+` and is
-still level, which says the per-byte loop itself is in good shape.
+Neither runs the reverse sweep any more. Both are `C+` with nothing after it,
+so `Runs` scans for the class, runs the end pass from each candidate and
+resumes at the match end. 0.65x and 0.73x.
+
+The remaining gap between them is what the class costs the scan. `[A-Za-z]+`
+holds no non-ASCII codepoint, so its scan may pass over a multibyte symbol and
+a failed candidate skips the rest of its run. `\p{L}+` holds plenty, so its
+scan must stop at every multibyte symbol, a failed candidate may only advance
+one symbol, and its 9900 non-ASCII bytes go through UTF-8 decode and the class
+trie rather than the fused ASCII byte-to-state table.
+
+`[A-Za-z]+` is also the one row both replacements claim: `Rrun` applies too,
+and routing it there instead reads 1.16x, so `Runs` takes it.
 
 **`[0-9]{2,4}`.** The end pass is a length lookup (two fixed digits, then up to
 two more from the set) rather than a DFA walk, and the reverse pass is now the
@@ -160,11 +168,19 @@ the SIMD kernel was never the cost: one pass over the haystack counting hits
 takes 22 µs, and re-entering it per hit cost ~16 ns a call. Filtering with
 three bytes cut the re-entries from 13473 to 2394.
 
-**`\w+\s+\w+`.** No accelerator of any kind, and the widest row at 1.26x.
-The sweep records 210198 starts for 21091 matches. Decomposed: the ASCII step
-alone is 491 µs, the nullability read and its branch add 259 µs, the start
-appends 155 µs, and the forward pass is another ~1 ms. Against Rust's single
-pass of 1.55 ms this is the structural floor of the design.
+**`\w+\s+\w+`.** Was the widest row at 1.33x and is now 0.80x. It has no
+literal, no prefix accelerator and no skippable class, so for a long time it
+was the two-pass design undiluted: the sweep recorded 210198 starts for 21091
+matches, and decomposed into 491 µs of ASCII stepping, 259 µs of nullability
+reads, 155 µs of start appends and about a millisecond of forward pass, against
+Rust's single pass of 1.55 ms.
+
+What removed it was not making any of those cheaper. `\w+\s+\w+` is
+`C+ · rest`, so `Runs` scans for `\w` directly, runs the forward end pass from
+each candidate and resumes at the match end — the sweep, the start list and the
+210198 appends all stop existing. `\w` holds non-ASCII codepoints, so the scan
+must stop at every multibyte symbol and a failed candidate cannot skip the rest
+of its run; both cost it, and it still lands below Rust.
 
 **`(\w+)@(\w+)`.** The groups are plain groups here (no captures), and Rust's
 `find_iter` does not compute captures either, so both engines do the same
@@ -189,11 +205,16 @@ In order of how much of the remaining gap each accounts for.
 The reverse sweep followed by a forward pass is RE#'s algorithm and the source
 of leftmost-longest semantics, boolean operators and lookarounds in DFA states.
 On a pattern with a match every few bytes it records a start at most positions
-and then walks most of the text a second time. `\w+\s+\w+` is entirely this,
-and is now the only row that is. Nothing about per-byte codegen is wrong there:
-on an all-ASCII copy of the haystack `[0-9]{2,4}` already beat Rust before any
-of this. What moved these rows was structural, and one of the three below has
-since landed:
+and then walks most of the text a second time. That used to be the whole story
+on the dense rows, and **no bench row is made of it any more**: every one of
+them either has an accelerator that skips between rare bytes, or has the sweep
+replaced outright by a scan that finds its own starts (`Rrun` for one class
+repeated, `Runs` for `C+ · rest` — see the design log, 2026-09-07 and
+2026-09-11). Nothing about per-byte codegen was ever wrong on those rows: on an
+all-ASCII copy of the haystack `[0-9]{2,4}` beat Rust before any of this.
+
+The three structural candidates that were listed here, and what became of
+them:
 
 - ~~**Compressing runs of consecutive starts**~~ — **this does not work, and
   the earlier entry here saying it "needs an exactness gate" was wrong.** The
@@ -211,12 +232,13 @@ since landed:
   non-ASCII member, `_*·S{lo,hi}` is nullable at `p` exactly when `lo` symbols
   of `S` start at `p`, so the sweep is one pipelined SIMD scan for runs of `S`
   plus arithmetic on their extents. `[0-9]{2,4}` 1.18x -> 0.59x, `[A-Za-z]+`
-  0.85x -> 0.73x, ~2% on three other rows. `\w+\s+\w+` cannot use it: it is a
-  SEQUENCE of class runs, and `\w` holds non-ASCII codepoints, so the `Bset`
-  kernel that makes it fast does not apply.
-- **A forward accelerator for the end pass** on dense classes. The end pass has
-  length lookups and per-state skips; it has nothing that helps when the class
-  is common. This is what is left of `\w+\s+\w+`.
+  0.85x -> 0.73x, ~2% on three other rows.
+- ~~**A forward accelerator for the end pass**~~ — overtaken. What was left of
+  `\w+\s+\w+` after `Rrun` could not reach it turned out not to need a
+  forward accelerator at all: `Runs` (2026-09-11) replaces the SWEEP for
+  `C+ · rest`, which is its shape, and the end pass it already had was enough.
+  1.33x -> 0.80x. `Rrun` and `Runs` both stay — removing `Rrun` costs
+  `[0-9]{2,4}` 2.06x, because `Runs` excludes bounded repeats on purpose.
 
 ### Reference counting of the engine record
 
@@ -429,9 +451,11 @@ it again without new information.
 - Borrow inference, or any way to pass a record of tables without walking it,
   would take most of the fixed per-call cost, which is the whole story on
   short inputs.
-- Generalizing the reverse length lookup from ONE class run to a sequence of
-  them, which is the shape of `\w+\s+\w+`. It needs a run scan that handles
-  non-ASCII members, which the `Bset` kernel cannot represent.
+- The reverse sweep still runs for every pattern that is not a literal, does
+  not have a prefix accelerator and is not `C+ · rest`. Extending the run scan
+  past a LEADING unbounded class run — an interior one, or a bounded leading
+  one — needs a different closure argument than the one `Accel.class_runs`
+  rests on, and no bench row asks for it.
 - The ASCII-pass skip is wired only into the plain reverse sweep. The prefix
   sweep and both forward loops have the same shape and did not get it, because
   no bench pattern would use it and each is another perturbation of a hot loop.

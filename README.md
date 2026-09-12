@@ -109,7 +109,7 @@ a match. The last two rows are why intersection and complement are cheap here
 and absent from most engines: they distribute through the derivative, so a
 state can hold `A&B` as easily as `A`.
 
-### States are patterns
+### States
 
 Every distinct pattern reached by taking derivatives is a state of a
 deterministic automaton (DFA), and the transition on a character is the
@@ -121,7 +121,7 @@ subsumed by another is dropped, and so on through RE#'s rewrite rules, ported
 one for one. `\w+\s+\w+` has 9 states; the eight-name alternation in the
 benchmark has 69.
 
-### The alphabet
+### Codepoint Automata
 
 The automaton does not step on codepoints, let alone bytes. The pattern's
 character sets partition all codepoints into *minterms*, the classes the
@@ -132,10 +132,10 @@ fused with the transition table into one byte-to-next-state lookup per state,
 and a non-ASCII sequence is decoded and looked up in a two-level table.
 
 The alphabet is codepoints rather than bytes on purpose. A byte-level DFA has
-to encode UTF-8 structure in its states, and in an earlier engine in this
-repository 99% of a Unicode pattern's states were that bookkeeping.
+to encode UTF-8 structure in its states, and in an earlier iteration had 99%
+of a Unicode pattern's states consumed by that bookkeeping.
 
-### Finding matches: sweep backwards, then extend forwards
+### Base matching pattern: sweep backwards, extend forwards
 
 `find_all` is RE#'s `llmatch`:
 
@@ -149,18 +149,10 @@ repository 99% of a Unicode pattern's states were that bookkeeping.
    Skip every recorded start inside that match, since matches do not overlap,
    and continue from its end.
 
-Leftmost-longest falls out: the sweep knows every possible start, so the
+Leftmost-longest falls out. The sweep knows every possible start, so the
 forward pass only extends from real ones and never has to guess where a match
-begins. The price is two passes over the text on patterns that match densely.
-On `\w+\s+\w+` over prose the sweep records 210198 possible starts for 21091
-matches, and that two-pass structure is what the widest row in the benchmark
-below is made of.
+begins.
 
-It is not always two passes over an automaton, though. When the whole pattern
-is one class repeated, a match can begin exactly where that class's minimum
-number of symbols does, so step 1 collapses into a single SIMD scan for runs of
-the class and some arithmetic on their extents — `[0-9]{2,4}` and `[A-Za-z]+`
-are the two rows furthest AHEAD of Rust for that reason.
 
 ### Skipping
 
@@ -187,7 +179,12 @@ the main scan tables:
   automaton at all. A match can begin exactly where the class's minimum number
   of symbols does, so the pass is one SIMD scan for runs of the class plus
   arithmetic on their extents: no automaton steps, and nothing that makes the
-  scan stop and restart. `[0-9]{2,4}` and `[A-Za-z]+` take this.
+  scan stop and restart. `[0-9]{2,4}` takes this.
+- When the pattern begins with an unbounded class repeat, the sweep goes
+  away too: scanning for that class finds every start in order, so the engine
+  scans, runs the forward pass from each candidate, and resumes at the match
+  end. `\w+\s+\w+`, `[A-Za-z]+` and `\p{L}+` take this, and it is why the
+  first of those is no longer the slowest row.
 
 ### Anchors, boundaries and lookarounds
 
@@ -222,30 +219,31 @@ English prose with numbers, addresses and Greek words mixed in, for ten
 patterns, against the vendored Rust `regex` 1.13 crate. Each pattern is
 compiled once, outside the timing loop, on both sides. Match counts are
 checked against Rust. The figure kept is the per-pattern minimum over five
-runs. Apple M1, Roc `release-fast-5f9a6e18`, 2026-09-07.
+runs. Apple M1, Roc `release-fast-10e922df`, 2026-09-11.
 
 | pattern | Roc ns | Rust ns | Roc / Rust | what it exercises |
 |---|---|---|---|---|
-| `Holmes` | 28350 | 27027 | 1.05x | literal search, dense hits |
-| `Moriarty` | 10250 | 9969 | 1.03x | literal search, rare hits |
-| `Sherlock\|Holmes\|Watson\|…` (8 names) | 479750 | 425248 | 1.13x | Teddy multi-literal scan |
-| `[A-Za-z]+` | 1613400 | 2205824 | 0.73x | one class repeated: no reverse automaton |
-| `[0-9]{2,4}` | 64250 | 108872 | 0.59x | the same, over a sparse class |
-| `\bthe\b` | 209300 | 204994 | 1.02x | prefix search plus word boundaries |
-| `\w+\s+\w+` | 2055750 | 1544425 | 1.33x | bare automaton, no accelerator |
-| `(\w+)@(\w+)` | 67350 | 68611 | 0.98x | prefix search on a rare byte |
-| `\p{L}+` | 2007550 | 2061462 | 0.97x | Unicode class, non-ASCII decoding |
-| `.*Holmes` | 313550 | 644285 | 0.49x | prefix search plus newline skipping |
+| `Holmes` | 29450 | 27781 | 1.06x | literal search, dense hits |
+| `Moriarty` | 10850 | 9915 | 1.09x | literal search, rare hits |
+| `Sherlock\|Holmes\|Watson\|…` (8 names) | 489900 | 431237 | 1.14x | Teddy multi-literal scan |
+| `[A-Za-z]+` | 1461000 | 2239514 | 0.65x | leading class run: no reverse sweep |
+| `[0-9]{2,4}` | 62800 | 110636 | 0.57x | one class repeated: no reverse sweep |
+| `\bthe\b` | 214650 | 212122 | 1.01x | prefix search plus word boundaries |
+| `\w+\s+\w+` | 1234750 | 1549543 | 0.80x | leading class run, Unicode class |
+| `(\w+)@(\w+)` | 69750 | 69114 | 1.01x | prefix search on a rare byte |
+| `\p{L}+` | 1524450 | 2090919 | 0.73x | leading class run, non-ASCII decoding |
+| `.*Holmes` | 271300 | 668178 | 0.41x | prefix search plus newline skipping |
 
-This engine is generally in the same ballpark as Rust's. Five of ten rows are
-at or below Rust's engine, three more are within 5%, and the widest is 1.33x.
-`\bthe\b` sits at parity and reads either side of 1.00 between runs. Both
+This engine is generally in the same ballpark as Rust's. Seven of ten rows are
+at or below Rust's engine, two more are within 10%, and the widest is 1.14x.
+`\bthe\b` and `(\w+)@(\w+)` sit at parity and read either side of 1.00
+between runs. Both
 engines are DFA with SIMD prefilters, and where the same accelerator fires on
 both sides the rows land within a few percent. Where this engine is behind, it
-is running its two passes over text that Rust covers in one. Where it is ahead,
-either the reverse sweep is skipping between rare bytes that Rust's forward
-scan cannot use, or the pattern is one class repeated and there is no reverse
-automaton to run at all.
+is running its two passes over text that Rust covers in one. Where it is
+ahead, either the reverse sweep is skipping between rare bytes that Rust's
+forward scan cannot use, or the pattern's shape lets the scan find its own
+match starts and there is no reverse pass to run at all.
 
 Two costs the table does not show. Rust's `Regex::new` takes 17 to 690 µs per
 pattern here at every process start, and RE# 0.4 to 8.9 ms; a folded Roc
