@@ -208,33 +208,33 @@ Dfa := [].{
     all_caps : Dfa.T, List(U8) -> List(List(U64))
     all_caps = |re, hay| {
         len = List.len(hay)
-        var at = 0
-        var last_end = Dfa.sentinel
-        var acc = []
-        var running = True
-        while running {
-            if at > len {
-                running = False
+        var $at = 0
+        var $last_end = Dfa.sentinel
+        var $acc = []
+        var $running = True
+        while $running {
+            if $at > len {
+                $running = False
             } else {
-                match Pike.captures_from(re.comp, hay, at) {
+                match Pike.captures_from(re.comp, hay, $at) {
                     Err(_) => {
-                        running = False
+                        $running = False
                     }
                     Ok(slots) => {
                         s = List.get(slots, 0) ?? 0
                         e = List.get(slots, 1) ?? 0
-                        if s == e and e == last_end {
-                            at = Dfa.next_bound(hay, e)
+                        if s == e and e == $last_end {
+                            $at = Dfa.next_bound(hay, e)
                         } else {
-                            acc = List.append(acc, slots)
-                            last_end = e
-                            at = if s == e { Dfa.next_bound(hay, e) } else { e }
+                            $acc = List.append($acc, slots)
+                            $last_end = e
+                            $at = if s == e { Dfa.next_bound(hay, e) } else { e }
                         }
                     }
                 }
             }
         }
-        acc
+        $acc
     }
 
     sentinel : U64
@@ -444,30 +444,30 @@ Dfa := [].{
         ncand = List.len(cands)
         len = List.len(hay)
         plen = List.len(lit)
-        var i = 0
-        var last_end = 0
-        var acc = []
-        var running = True
-        while running {
-            if i >= ncand {
-                running = False
+        var $i = 0
+        var $last_end = 0
+        var $acc = []
+        var $running = True
+        while $running {
+            if $i >= ncand {
+                $running = False
             } else {
-                at = List.get(cands, i) ?? 0
+                at = List.get(cands, $i) ?? 0
                 # `at + plen <= len` is load-bearing, not defensive: `Lit.eq`
                 # reads a missing haystack byte as 0, so without it a literal
                 # containing a NUL byte "matches" past the end and the emitted
                 # span has `end > len` (which then underflows `split`).
-                if at < last_end or at + plen > len or !(Lit.matches(hay, at, lit, plen)) {
-                    i = i + 1
+                if at < $last_end or at + plen > len or !(Lit.matches(hay, at, lit, plen)) {
+                    $i = $i + 1
                 } else {
-                    acc = List.append(acc, { start: at, end: at + plen })
-                    last_end = at + plen
-                    i = i + 1
-                    running = !first_only
+                    $acc = List.append($acc, { start: at, end: at + plen })
+                    $last_end = at + plen
+                    $i = $i + 1
+                    $running = !first_only
                 }
             }
         }
-        acc
+        $acc
     }
 
     # pure literal alternation: which branch matches here, in pattern order
@@ -475,33 +475,33 @@ Dfa := [].{
     verify_memcmp_alt = |t, hay, cands, first_only| {
         ncand = List.len(cands)
         len = List.len(hay)
-        var i = 0
-        var last_end = 0
-        var acc = []
-        var running = True
-        while running {
-            if i >= ncand {
-                running = False
+        var $i = 0
+        var $last_end = 0
+        var $acc = []
+        var $running = True
+        while $running {
+            if $i >= ncand {
+                $running = False
             } else {
-                at = List.get(cands, i) ?? 0
-                if at < last_end {
-                    i = i + 1
+                at = List.get(cands, $i) ?? 0
+                if at < $last_end {
+                    $i = $i + 1
                 } else {
                     match Teddy.lit_end(t, hay, at, 0, len) {
                         Err(_) => {
-                            i = i + 1
+                            $i = $i + 1
                         }
                         Ok(e) => {
-                            acc = List.append(acc, { start: at, end: e })
-                            last_end = e
-                            i = i + 1
-                            running = !first_only
+                            $acc = List.append($acc, { start: at, end: e })
+                            $last_end = e
+                            $i = $i + 1
+                            $running = !first_only
                         }
                     }
                 }
             }
         }
-        acc
+        $acc
     }
 
     # anchored DFA from the candidate: it matches iff the pattern matches THERE,
@@ -509,66 +509,66 @@ Dfa := [].{
     verify_dfa : Rev.D, Trie.T, List(U8), List(U64), Bool -> List(Dfa.Span)
     verify_dfa = |av, classes, hay, cands, first_only| {
         ncand = List.len(cands)
-        var i = 0
-        var last_end = 0
-        var acc = []
-        var running = True
-        while running {
-            if i >= ncand {
-                running = False
+        var $i = 0
+        var $last_end = 0
+        var $acc = []
+        var $running = True
+        while $running {
+            if $i >= ncand {
+                $running = False
             } else {
-                at = List.get(cands, i) ?? 0
-                if at < last_end {
-                    i = i + 1
+                at = List.get(cands, $i) ?? 0
+                if at < $last_end {
+                    $i = $i + 1
                 } else {
                     match Rev.run_fwd_from(av, classes, hay, at) {
                         Err(_) => {
-                            i = i + 1
+                            $i = $i + 1
                         }
                         Ok(e) => {
-                            acc = List.append(acc, { start: at, end: e })
-                            last_end = e
-                            i = i + 1
-                            running = !first_only
+                            $acc = List.append($acc, { start: at, end: e })
+                            $last_end = e
+                            $i = $i + 1
+                            $running = !first_only
                         }
                     }
                 }
             }
         }
-        acc
+        $acc
     }
 
     # anchor patterns / PikeVM engine, where no anchored verify DFA was built
     verify_pike : Comp.Compiled, List(U8), List(U64), Bool -> List(Dfa.Span)
     verify_pike = |c, hay, cands, first_only| {
         ncand = List.len(cands)
-        var i = 0
-        var last_end = 0
-        var acc = []
-        var running = True
-        while running {
-            if i >= ncand {
-                running = False
+        var $i = 0
+        var $last_end = 0
+        var $acc = []
+        var $running = True
+        while $running {
+            if $i >= ncand {
+                $running = False
             } else {
-                at = List.get(cands, i) ?? 0
-                if at < last_end {
-                    i = i + 1
+                at = List.get(cands, $i) ?? 0
+                if at < $last_end {
+                    $i = $i + 1
                 } else {
                     match Pike.wmatch_at(c, hay, at) {
                         Err(_) => {
-                            i = i + 1
+                            $i = $i + 1
                         }
                         Ok(span) => {
-                            acc = List.append(acc, span)
-                            last_end = span.end
-                            i = i + 1
-                            running = !first_only
+                            $acc = List.append($acc, span)
+                            $last_end = span.end
+                            $i = $i + 1
+                            $running = !first_only
                         }
                     }
                 }
             }
         }
-        acc
+        $acc
     }
 
     # required interior literal: a local reverse scan for the start, then forward
@@ -576,33 +576,33 @@ Dfa := [].{
     verify_inner_all = |inr, classes, hay, cands, first_only| {
         ncand = List.len(cands)
         len = List.len(hay)
-        var i = 0
-        var last_end = 0
-        var acc = []
-        var running = True
-        while running {
-            if i >= ncand {
-                running = False
+        var $i = 0
+        var $last_end = 0
+        var $acc = []
+        var $running = True
+        while $running {
+            if $i >= ncand {
+                $running = False
             } else {
-                at = List.get(cands, i) ?? 0
-                if at < last_end {
-                    i = i + 1
+                at = List.get(cands, $i) ?? 0
+                if at < $last_end {
+                    $i = $i + 1
                 } else {
-                    match Dfa.verify_inner(inr, classes, hay, at, last_end, len) {
+                    match Dfa.verify_inner(inr, classes, hay, at, $last_end, len) {
                         Err(_) => {
-                            i = i + 1
+                            $i = $i + 1
                         }
                         Ok(span) => {
-                            acc = List.append(acc, span)
-                            last_end = span.end
-                            i = i + 1
-                            running = !first_only
+                            $acc = List.append($acc, span)
+                            $last_end = span.end
+                            $i = $i + 1
+                            $running = !first_only
                         }
                     }
                 }
             }
         }
-        acc
+        $acc
     }
 
     # Reverse-inner verify for an interior-literal candidate `p`: run the reverse
@@ -638,40 +638,40 @@ Dfa := [].{
     find_all_engine : Dfa.T, List(U8) -> List(Dfa.Span)
     find_all_engine = |re, hay| {
         len = List.len(hay)
-        var at = 0
-        var last_end = Dfa.sentinel
-        var acc = []
-        var running = True
-        while running {
-            if at > len {
-                running = False
+        var $at = 0
+        var $last_end = Dfa.sentinel
+        var $acc = []
+        var $running = True
+        while $running {
+            if $at > len {
+                $running = False
             } else {
                 # DFA iterator step for look-free in-budget patterns (Three);
                 # the PikeVM otherwise. Same empty-match advancement either way.
                 next =
                     match re.engine {
-                        Three(d) => Rev.find_from(d, re.comp.classes, hay, at)
-                        Pike => Pike.wfind_from(re.comp, hay, at)
+                        Three(d) => Rev.find_from(d, re.comp.classes, hay, $at)
+                        Pike => Pike.wfind_from(re.comp, hay, $at)
                     }
                 match next {
                     Err(_) => {
-                        running = False
+                        $running = False
                     }
                     Ok(span) => {
                         s = span.start
                         e = span.end
-                        if s == e and e == last_end {
-                            at = Dfa.next_bound(hay, e)
+                        if s == e and e == $last_end {
+                            $at = Dfa.next_bound(hay, e)
                         } else {
-                            acc = List.append(acc, span)
-                            last_end = e
-                            at = if s == e { Dfa.next_bound(hay, e) } else { e }
+                            $acc = List.append($acc, span)
+                            $last_end = e
+                            $at = if s == e { Dfa.next_bound(hay, e) } else { e }
                         }
                     }
                 }
             }
         }
-        acc
+        $acc
     }
 
     ## Replace every match. `rep` carries `$N` group refs (longest-digit-run) and
