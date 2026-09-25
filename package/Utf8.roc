@@ -94,16 +94,15 @@ Utf8 := [].{
                 if d.ok and l + d.len == pos {
                     { cs: l, cp: d.cp, ok: True }
                 } else if d.ok and l + d.len < pos {
-                    # A VALID symbol at `l` that ends STRICTLY before `pos`:
-                    # the bytes
-                    # between its end and `pos` are a bare continuation run, and
-                    # the symbol is not part of it. Returning `l` here reported
-                    # the run as starting at the symbol and swallowed it, so the
-                    # reverse sweep lost any match ending there -- `\w+` on
-                    # `π` followed by a stray `0x80` found nothing at all, while
-                    # the reference, the forward scans and `π` followed by
-                    # `0xFF` (not a continuation byte, so a different branch)
-                    # all found `π`.
+                    # A VALID symbol at `l` that ends STRICTLY before `pos`: the
+                    # bytes between its end and `pos` are a bare continuation
+                    # run, and the symbol is not part of it. Returning `l` here
+                    # reported the run as starting at the symbol and swallowed
+                    # it, so the reverse sweep lost any match ending there --
+                    # `\w+` on `π` followed by a stray `0x80` found nothing at
+                    # all, while the reference, the forward scans and `π`
+                    # followed by `0xFF` (not a continuation byte, so a
+                    # different branch) all found `π`.
                     #
                     # The bound has to be strict. A `pos` INSIDE a symbol has
                     # `l + d.len > pos`, and returning that would hand a reverse

@@ -67,13 +67,18 @@ Accel := [].{
                     }
                 _ => NoOverride
             }
-        # the strongest of the three: it replaces the sweep rather than
-        # accelerating it, so it wins where it applies
+        # `ClassRun` enumerates the starts outright rather than accelerating the
+        # sweep, so it beats either prefix init
         init =
             match Accel.class_run(resolved_prefix.e.a, t, rev) {
                 Ok(spec) => ClassRun(spec)
                 Err(_) => resolved_prefix.init
             }
+        # `class_runs` is asked about the PREFIX init, not the `init` above. A
+        # pattern can qualify for both, and then `Regex.prescan` dispatches on
+        # `scan` and the `ClassRun` spec is built but never read. That is the
+        # order we want: `Runs` drops the sweep where `Rrun` only replaces it,
+        # and routing `[A-Za-z]+` through `Rrun` instead costs 1.16x.
         scan =
             match override {
                 NoOverride => Accel.class_runs(len_result.e, t, root, noprefix, resolved_prefix.init)
@@ -111,10 +116,14 @@ Accel := [].{
     ## strips it into `noprefix`, so the forward pass never tests it and only
     ## the sweep did. Hence `np == root`.
     ##
-    ## Gated to `init == NoInit`: a pattern whose sweep already skips between
-    ## anchor bytes -- `(\w+)@(\w+)` finds its 779 starts in 70 us -- would be
-    ## an order of magnitude worse reading every byte forward. `Regex.compile`
-    ## adds `not any_skip` for the same reason, once the fold is frozen.
+    ## `init` here is the PREFIX init -- `Rlit`'s exact or potential start --
+    ## not the `ClassRun` one `analyze` may settle on. Gated to `NoInit`
+    ## because a pattern whose sweep already skips between anchor bytes --
+    ## `(\w+)@(\w+)` finds its 779 starts in 70 us -- would be an order of
+    ## magnitude worse reading every byte forward. `Rrun`'s shape is NOT
+    ## excluded: a pattern that is both arrives here, which is the faster of
+    ## the two. `Regex.compile` adds `not any_skip` for the same reason as the
+    ## prefix gate, once the fold is frozen.
     class_runs : Dfa.E, Trie.T, U32, U32, Dfa.Init -> Dfa.Scan
     class_runs = |e, t, root, np, init| {
         a = e.a

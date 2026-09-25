@@ -146,20 +146,14 @@ Regex := [].{
             Err(e) => crash "[${label}] ${Err.render(e)}"
         }
 
-    ## All non-overlapping leftmost-longest matches.
-    ## A union of literals is Teddy over all of them at once, with the literals
-    ## ordered longest-first at compile time so the first one matching at a
-    ## position is the longest, which is what leftmost-longest asks for. `Err`
-    ## when the pattern is not such a union, or when Teddy declines the set, in
-    ## which case the ordinary scan runs.
-    ##
-    ## Dispatched here rather than inside `Dfa.find_all_fast_opts`: another arm
-    ## in that function slows every pattern that does not take it, so the hot
-    ## scan does not learn about this at all.
     ## Whatever can answer before the reverse sweep does: a literal set, or the
-    ## run scan. One `match`, not two: adding a second dispatch beside the
-    ## literal one cost 3-25% on every pattern, the target row included, which
-    ## is the same reason the literal set is tested here and not inside
+    ## run scan. `Err(NoPrescan)` when neither applies and the caller has to run
+    ## the ordinary scan. `first_only` reaches the run scan alone -- a literal
+    ## set is answered in full either way, and the caller takes its first span.
+    ##
+    ## One `match`, not two: adding a second dispatch beside the literal one
+    ## cost 3-25% on every pattern, the target row included, which is the same
+    ## reason the literal set is tested here and not inside
     ## `Dfa.find_all_fast_opts`.
     prescan : Regex.Pattern, List(U8), Bool -> Try(List(Regex.Span), [NoPrescan])
     prescan = |re, hay, first_only|
@@ -172,6 +166,16 @@ Regex := [].{
                 }
         }
 
+    ## All non-overlapping leftmost-longest matches.
+    ## A union of literals is Teddy over all of them at once, with the literals
+    ## ordered longest-first at compile time so the first one matching at a
+    ## position is the longest, which is what leftmost-longest asks for. `Err`
+    ## when the pattern is not such a union, or when Teddy declines the set, in
+    ## which case the ordinary scan runs.
+    ##
+    ## Dispatched here rather than inside `Dfa.find_all_fast_opts`: another arm
+    ## in that function slows every pattern that does not take it, so the hot
+    ## scan does not learn about this at all.
     lit_set_spans : Regex.Lits, List(U8) -> Try(List(Regex.Span), [NoSet])
     lit_set_spans = |lits, hay|
         match lits {
