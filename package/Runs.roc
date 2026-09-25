@@ -29,15 +29,17 @@ Runs := [].{
     ## later position in the run would fail too. That step is the one that needs
     ## `exact` -- a `C` whose scan counts non-ASCII bytes as members would run
     ## the skip past a true start.
-    find_all_runs : Dfa.E, Trie.T, Dfa.Scan, List(U8), Bool, Bool -> List({ start : U64, end : U64 })
-    find_all_runs = |e, t, scan, hay, skip, first_only| {
+    ##
+    ## The end pass carries no PER-STATE skip, unlike `Dfa.ends_fast`. It cannot
+    ## reach one: `Regex.compile` hands out a `ClassRuns` scan only when the
+    ## frozen fold sets no `ef_any_skip`, because a state that already jumps
+    ## between rare bytes is an order of magnitude worse read forward. Relax
+    ## that gate and the skip tables have to come back here with it.
+    find_all_runs : Dfa.E, Trie.T, Dfa.Scan, List(U8), Bool -> List({ start : U64, end : U64 })
+    find_all_runs = |e, t, scan, hay, first_only| {
         n = List.len(hay)
         at = e.atable
         nk_table = e.st_nk
-        # an empty table when skipping is off, as the other scans do: `List.get
-        # ?? 0` then never says 1, and the loop carries no Bool
-        skip_ok = if skip { e.skip_ok } else { [] }
-        skip_lo = e.skip_lo
         table = e.table
         minterm_count = e.minterm_count.to_u64()
         s_start = e.s_noprefix
@@ -59,54 +61,40 @@ Runs := [].{
                 Err(_) => {
                     $running = False
                 }
+                # `Bset` reports a member only from inside the haystack, so
+                # `start < n` and the end pass always has a byte to read
                 Ok(start) => {
                     # `best` as a U64 with a sentinel, not `Try(U64, [NoEnd])`:
                     # a nullable tail is nullable at EVERY position, so a tag
                     # would be built once per byte (design log, the end pass).
                     var $best = Dfa.no_end
-                    if start >= n {
-                        $best = Dfa.to_pos(Dfa.at_eoi_fast(e, s_start, hay, n, Err(NoEnd)))
-                    } else {
-                        var $scan_pos = start
-                        var $s = s_start
-                        if start == 0 and Dfa.flags(e, s_start).bitwise_and(Dfa.fl_anchor_null) != 0 and Deriv.nullable(e.a, Deriv.loc_begin, Dfa.st_node_of(e, s_start)) {
-                            $best = 0
+                    var $scan_pos = start
+                    var $s = s_start
+                    if start == 0 and Dfa.flags(e, s_start).bitwise_and(Dfa.fl_anchor_null) != 0 and Deriv.nullable(e.a, Deriv.loc_begin, Dfa.st_node_of(e, s_start)) {
+                        $best = 0
+                    }
+                    while $s != Dfa.dead {
+                        k = List.get(nk_table, $s.to_u64()) ?? Dfa.nk_notnull
+                        if k == Dfa.nk_current {
+                            $best = $scan_pos
+                        } else if k == Dfa.nk_prev {
+                            $best = Utf8.retreat(hay, $scan_pos, 1)
+                        } else if k != Dfa.nk_notnull {
+                            $best = Dfa.to_pos(Dfa.null_fallback_fast(e, $s, hay, $scan_pos, Dfa.from_pos($best)))
                         }
-                        while $s != Dfa.dead {
-                            byte_before_skip = List.get(hay, $scan_pos) ?? 0
-                            skip_kind = List.get(skip_ok, $s.to_u64()) ?? 0
-                            # `skip_kind` of 2 says the state loops on every
-                            # non-ASCII symbol as well, so the scan may pass one
-                            # rather than stop at it (`Dfa.skip_sets`)
-                            if skip_kind != 0 and !(byte_before_skip >= 0x80 and skip_kind == 1) and !Bset.member_ascii(skip_lo, $s.to_u64(), byte_before_skip) {
-                                $scan_pos =
-                                    match (if skip_kind == 1 { Bset.find(hay, skip_lo, $s.to_u64(), $scan_pos + 1) } else { Bset.find_ascii(hay, skip_lo, $s.to_u64(), $scan_pos + 1) }) {
-                                        Ok(q) => q
-                                        Err(_) => n - 1
-                                    }
-                            }
-                            k = List.get(nk_table, $s.to_u64()) ?? Dfa.nk_notnull
-                            if k == Dfa.nk_current {
-                                $best = $scan_pos
-                            } else if k == Dfa.nk_prev {
-                                $best = Utf8.retreat(hay, $scan_pos, 1)
-                            } else if k != Dfa.nk_notnull {
-                                $best = Dfa.to_pos(Dfa.null_fallback_fast(e, $s, hay, $scan_pos, Dfa.from_pos($best)))
-                            }
-                            b = List.get(hay, $scan_pos) ?? 0
-                            if b < 0x80 {
-                                $s = (List.get(at, $s.to_u64() * 128 + b.to_u64()) ?? Dfa.dead_u16).to_u32()
-                                $scan_pos = $scan_pos + 1
-                            } else {
-                                d = Utf8.decode(hay, $scan_pos)
-                                cp_class = if d.ok { Trie.class_of(t, d.cp) } else { t.invalid }
-                                $s = List.get(table, $s.to_u64() * minterm_count + cp_class.to_u64()) ?? Dfa.dead
-                                $scan_pos = $scan_pos + d.len
-                            }
-                            if $scan_pos >= n {
-                                $best = Dfa.to_pos(Dfa.at_eoi_fast(e, $s, hay, n, Dfa.from_pos($best)))
-                                $s = Dfa.dead
-                            }
+                        b = List.get(hay, $scan_pos) ?? 0
+                        if b < 0x80 {
+                            $s = (List.get(at, $s.to_u64() * 128 + b.to_u64()) ?? Dfa.dead_u16).to_u32()
+                            $scan_pos = $scan_pos + 1
+                        } else {
+                            d = Utf8.decode(hay, $scan_pos)
+                            cp_class = if d.ok { Trie.class_of(t, d.cp) } else { t.invalid }
+                            $s = List.get(table, $s.to_u64() * minterm_count + cp_class.to_u64()) ?? Dfa.dead
+                            $scan_pos = $scan_pos + d.len
+                        }
+                        if $scan_pos >= n {
+                            $best = Dfa.to_pos(Dfa.at_eoi_fast(e, $s, hay, n, Dfa.from_pos($best)))
+                            $s = Dfa.dead
                         }
                     }
                     match Dfa.from_pos($best) {

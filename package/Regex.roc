@@ -167,7 +167,7 @@ Regex := [].{
             Ok(lit_spans) => Ok(lit_spans)
             Err(_) =>
                 match re.scan {
-                    ClassRuns(_) => Ok(Runs.find_all_runs(re.e, re.trie, re.scan, hay, True, first_only))
+                    ClassRuns(_) => Ok(Runs.find_all_runs(re.e, re.trie, re.scan, hay, first_only))
                     NoScan => Err(NoPrescan)
                 }
         }
