@@ -219,33 +219,32 @@ English prose with numbers, addresses and Greek words mixed in, for ten
 patterns, against the vendored Rust `regex` 1.13 crate. Each pattern is
 compiled once, outside the timing loop, on both sides. Match counts are
 checked against Rust. The figure kept is the per-pattern minimum over five
-runs. Apple M1, Roc `release-fast-10e922df`, 2026-09-11.
+runs. Apple M1, Roc `release-fast-ec598185`, basic-cli 0.26.0, 2026-10-23.
 
 | pattern | Roc ns | Rust ns | Roc / Rust | what it exercises |
 |---|---|---|---|---|
-| `Holmes` | 29450 | 27781 | 1.06x | literal search, dense hits |
-| `Moriarty` | 10850 | 9915 | 1.09x | literal search, rare hits |
-| `Sherlock\|Holmes\|Watson\|…` (8 names) | 489900 | 431237 | 1.14x | Teddy multi-literal scan |
-| `[A-Za-z]+` | 1461000 | 2239514 | 0.65x | leading class run: no reverse sweep |
-| `[0-9]{2,4}` | 62800 | 110636 | 0.57x | one class repeated: no reverse sweep |
-| `\bthe\b` | 214650 | 212122 | 1.01x | prefix search plus word boundaries |
-| `\w+\s+\w+` | 1234750 | 1549543 | 0.80x | leading class run, Unicode class |
-| `(\w+)@(\w+)` | 69750 | 69114 | 1.01x | prefix search on a rare byte |
-| `\p{L}+` | 1524450 | 2090919 | 0.73x | leading class run, non-ASCII decoding |
-| `.*Holmes` | 271300 | 668178 | 0.41x | prefix search plus newline skipping |
+| `Holmes` | 26539 | 27694 | 0.96x | literal search, dense hits |
+| `Moriarty` | 9685 | 9928 | 0.98x | literal search, rare hits |
+| `Sherlock\|Holmes\|Watson\|…` (8 names) | 411985 | 425063 | 0.97x | Teddy multi-literal scan |
+| `[A-Za-z]+` | 1041302 | 2200447 | 0.47x | leading class run: no reverse sweep |
+| `[0-9]{2,4}` | 58831 | 107178 | 0.55x | one class repeated: no reverse sweep |
+| `\bthe\b` | 175633 | 188051 | 0.93x | prefix search plus word boundaries |
+| `\w+\s+\w+` | 1093568 | 1536698 | 0.71x | leading class run, Unicode class |
+| `(\w+)@(\w+)` | 62635 | 68617 | 0.91x | prefix search on a rare byte |
+| `\p{L}+` | 1260139 | 2055972 | 0.61x | leading class run, non-ASCII decoding |
+| `.*Holmes` | 238116 | 642980 | 0.37x | prefix search plus newline skipping |
 
-This engine is generally in the same ballpark as Rust's. Seven of ten rows are
-at or below Rust's engine, two more are within 10%, and the widest is 1.14x.
-`\bthe\b` and `(\w+)@(\w+)` sit at parity and read either side of 1.00
-between runs. Both
-engines are DFA with SIMD prefilters, and where the same accelerator fires on
-both sides the rows land within a few percent. Where this engine is behind, it
-is running its two passes over text that Rust covers in one. Where it is
-ahead, either the reverse sweep is skipping between rare bytes that Rust's
-forward scan cannot use, or the pattern's shape lets the scan find its own
-match starts and there is no reverse pass to run at all.
+This engine is generally in the same ballpark as Rust's. All ten rows are at
+or below Rust's engine, and the three literal rows read 0.96x to 1.00x between
+runs, so call them parity. Both engines are DFA with SIMD prefilters, and where
+the same accelerator fires on both sides the rows land within a few percent.
+None of these rows runs the plain two-pass design; a pattern that does reads
+its text twice where Rust reads it once. Where this engine is ahead, either the
+reverse sweep is skipping between rare bytes that Rust's forward scan cannot
+use, or the pattern's shape lets the scan find its own match starts and there
+is no reverse pass to run at all.
 
-Two costs the table does not show. Rust's `Regex::new` takes 17 to 690 µs per
+Two costs the table does not show. Rust's `Regex::new` takes 37 to 694 µs per
 pattern here at every process start, and RE# 0.4 to 8.9 ms; a folded Roc
 pattern takes none. And on short inputs this engine's per-call fixed cost is
 the dominant term; [PERFORMANCE.md](PERFORMANCE.md) has that measurement, the

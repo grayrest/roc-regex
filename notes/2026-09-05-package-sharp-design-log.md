@@ -3028,3 +3028,116 @@ clean A/B; the isolated A/B of the port alone reads `two_words` 0.592x,
 - Style follows `9c8de04`: `var $name`, the same local names as
   `Dfa.ends_fast`'s forward step (`at`, `d`, `cp_class`, `minterm_count`,
   `byte_before_skip`), and no empty `else {}` branches.
+
+## Compiler `ec598185` and basic-cli 0.26: what moved, and why the docs changed (2026-10-23)
+
+Two toolchain changes landed under an unchanged engine: basic-cli 0.21.0 to
+0.26.0 (`6b2711f`), and the compiler from `release-fast-10e922df` through
+`33e93c24` to `ec598185`. `package/` and `package-dfa/` are byte-identical
+from `781998f` to `b56c4d1`, so every movement below is the toolchain.
+
+### The platform is performance-neutral
+
+Same compiler (`33e93c24`), 0.26 builds against 0.21 builds, five interleaved
+reps: the Regex engine reads 0.98-1.01x on all ten rows with identical match
+counts and span checksums. 0.26 requires `33e93c24` or newer (`10e922df`
+rejects it with 49 errors), and 0.21 no longer type-checks on `33e93c24`, so
+each platform builds on exactly one of the two compilers.
+
+### The compiler: faster on every row
+
+`ec598185` against `10e922df` on one tree, two passes of five interleaved reps
+each, on AC power:
+
+| pattern | ec/10e | vs Rust, `10e922df` | vs Rust, `ec598185` |
+|---|---|---|---|
+| `Holmes` | 0.92-0.95x | 1.00-1.05x | 0.96-0.97x |
+| `Moriarty` | 0.97x | 1.02-1.03x | 0.98-1.00x |
+| `Sherlock\|Holmes\|…` | 0.89-0.90x | 1.09x | 0.97-0.98x |
+| `[A-Za-z]+` | 0.94x | 0.51x | 0.48x |
+| `[0-9]{2,4}` | 0.90-0.92x | 0.58-0.60x | 0.54x |
+| `\bthe\b` | 0.86x | 1.09-1.10x | 0.94-0.95x |
+| `\w+\s+\w+` | 0.92x | 0.75x | 0.69x |
+| `(\w+)@(\w+)` | 0.90-0.92x | 0.97-1.00x | 0.90x |
+| `\p{L}+` | 0.90-0.91x | 0.67x | 0.61x |
+| `.*Holmes` | 0.88-0.91x | 0.40-0.41x | 0.36-0.37x |
+
+All ten rows at or below Rust for the first time. The Teddy and `\bthe\b` rows
+crossed with no change to their scans; neither has been profiled to say where
+the time went. `33e93c24` in between was not uniformly better: `Holmes` read
+1.12-1.23x slower than `10e922df` there, on battery, and `[0-9]{2,4}` is
+1.08-1.09x slower on `ec598185` than on `33e93c24`. Both are short rows of the
+kind that move with code layout (see the loop-alignment entries); neither was
+investigated.
+
+`33e93c24` also segfaulted in its `post-check arc` pass, deterministically,
+on accel-diff, skip-diff, the fuzz runner, both `sharp-size` probes and a
+12-line app searching a top-level `Regex` over an argv string. The benches,
+which also search a run-time haystack, built, and the trigger was not
+isolated. The debug compiler named it:
+"release of local … without an ownership unit". It was not the platform (the
+crash survived the move to 0.26) and was not designed around; `ec598185`
+fixes it.
+
+### Folding now makes a build FASTER
+
+The PERFORMANCE.md claim was that a folded build and a run-time-compiled one
+cost the same, because both compile the whole package. On `ec598185`,
+`--no-cache --opt=size`, two reps each:
+
+| app | build | compiler RSS |
+|---|---|---|
+| `Regex.build("a+")` at top level, runtime haystack | 3.5 s | 454 MB |
+| `Regex.compile(argv)` at run time | 28.7 s | 817 MB |
+
+A run-time pattern makes the compiler lower the pattern compiler itself to
+native code; a folded one lets all of it be dropped. Complete folds build in
+2.5-5.1 s and the 1024-state incomplete `a(?=.*b)` in 11.9 s / 553 MB.
+
+`probe.sh` reports 10-13 s for those same builds because it builds each app
+fresh WITHOUT `--no-cache`, and a first cached build pays for filling the
+cache: one app read 9.4 s / 966 MB cached-first, 2.5 s / 459 MB uncached,
+2.1 s cached-second. Its `build_s` column is not a fold cost.
+
+### The 2.2x folded-constant storage was already gone
+
+Not a movement of this change, but found by it: PERFORMANCE.md still claimed
+the ~2.2x double storage measured on `84812227` (2026-09-07).
+`upstream/2026-09-05-sharp-folded-constant-sections/`, rebuilt against the
+current package (after the same `l1` -> `leaf_idx` rename that broke
+`breakdown.sh`), gives the same answer on `10e922df` + 0.21 and on
+`ec598185` + 0.26: `\w+` against `[A-Za-z]+` adds 41216 bytes to
+`__TEXT,__const` and 0 to `__DATA_CONST,__const`, against 41220 bytes of trie
+growth. Across `breakdown.sh`, `\p{L}+`'s constant delta equals its trie delta
+to the byte (37736). Stored once, at its data size. Whether the compiler
+(`84812227` to `10e922df`) or a package change since 2026-09-07 removed the
+second copy was not isolated.
+
+### Binary size is now mostly the platform
+
+An empty basic-cli 0.26 app is 2300272 bytes at `--opt=size`, 1.85 MB of it
+`__text`, on both `33e93c24` and `ec598185`; on `33e93c24` an empty 0.21 app
+is 390400 bytes, so the platform added 1.9 MB to every binary. Over that, the
+regex costs 18 KB (`Holmes`), 104 KB (`[A-Za-z]+`), 221 KB (`\bthe\b`) and
+752 KB (incomplete `a(?=.*b)`).
+
+Code no longer sits at one fixed size. Against `breakdown.sh`'s `a+`
+baseline, which `accel_str` shows is a class-run sweep (`classrun=x1
+scan=none`, one skip state — not the run scan, which a skip state rules
+out), `d_code` ranges from -54 KB (`Holmes`) and -50 KB (`[0-9]{2,4}`) to
++78 KB (`\bthe\b`); the run-scan rows are within 1 KB and the other complete
+folds +6-11 KB. `[0-9]{2,4}` takes the same sweep as `a+` and is still 50 KB
+smaller, so the per-path story is not worked out.
+
+`tools/size/probe.sh` (package-dfa) now reports every pattern SMALLER than its
+Pike baseline, so its premise — the baseline links the same code minus the DFA
+tables — no longer holds. It needs a new baseline before its deltas mean
+anything.
+
+### Unchanged
+
+package-http: 1658 ns per request, 4.3x off `httparse` (was 2074 ns, 5.0x),
+checksums agreeing, two runs within 0.3%. Fuzz: `plain` 1500 patterns gives
+18000 cases with 0 rejected and 0 divergences, as in September; the default
+mode's 717 rejections are identical on `10e922df` + 0.21, so they are RE#
+parity, not a regression.

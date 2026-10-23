@@ -30,36 +30,41 @@ Noise handling, because these rows move 6-12% between runs on the same binary:
 
 ## Standing
 
-`tools/bench/run.sh`, 2026-09-11, at commit `733cbfb`, Roc
-`release-fast-10e922df`. Nanoseconds per
+`tools/bench/run.sh`, 2026-10-23, at commit `b56c4d1`, Roc
+`release-fast-ec598185`, basic-cli 0.26.0. Nanoseconds per
 `find_all` over 256 KB; `sharp/meta` is this engine over Rust's meta engine.
 
 | pattern | sharp ns | rustMeta ns | rustPV ns | sharp/meta | Rust `Regex::new` ns |
 |---|---|---|---|---|---|
-| `Holmes` | 29450 | 27781 | 3514861 | 1.06x | 47334 |
-| `Moriarty` | 10850 | 9915 | 3406062 | 1.09x | 23333 |
-| `Sherlock\|Holmes\|…` | 489900 | 431237 | 5380772 | 1.14x | 102250 |
-| `[A-Za-z]+` | 1461000 | 2239514 | 8103305 | 0.65x | 62083 |
-| `[0-9]{2,4}` | 62800 | 110636 | 3581565 | 0.57x | 149416 |
-| `\bthe\b` | 214650 | 212122 | 5607839 | 1.01x | 87709 |
-| `\w+\s+\w+` | 1234750 | 1549543 | 8746147 | 0.80x | 497417 |
-| `(\w+)@(\w+)` | 69750 | 69114 | 8456071 | 1.01x | 779584 |
-| `\p{L}+` | 1524450 | 2090919 | 8424569 | 0.73x | 247542 |
-| `.*Holmes` | 271300 | 668178 | 7099883 | 0.41x | 190000 |
+| `Holmes` | 26539 | 27694 | 3461197 | 0.96x | 42666 |
+| `Moriarty` | 9685 | 9928 | 3357240 | 0.98x | 37209 |
+| `Sherlock\|Holmes\|…` | 411985 | 425063 | 5323968 | 0.97x | 102208 |
+| `[A-Za-z]+` | 1041302 | 2200447 | 7959574 | 0.47x | 74583 |
+| `[0-9]{2,4}` | 58831 | 107178 | 3495754 | 0.55x | 154709 |
+| `\bthe\b` | 175633 | 188051 | 5479967 | 0.93x | 91583 |
+| `\w+\s+\w+` | 1093568 | 1536698 | 8670654 | 0.71x | 540667 |
+| `(\w+)@(\w+)` | 62635 | 68617 | 8416293 | 0.91x | 694375 |
+| `\p{L}+` | 1260139 | 2055972 | 8124430 | 0.61x | 267500 |
+| `.*Holmes` | 238116 | 642980 | 6988553 | 0.37x | 262250 |
 
 All ten match counts agree with Rust. The last column is what Rust pays to
 compile each pattern at run time; a folded Roc pattern pays zero. The older
-engine in `package-dfa` is behind `Regex` on every row (0.86x to 2.21x Rust).
+engine in `package-dfa` reads 0.67x to 1.91x Rust and is behind `Regex` on
+every row but `Moriarty`, where its literal scan is a few percent faster.
 
-Seven of ten rows are at or below Rust's meta engine and two more are within
-10%; the widest is the literal alternation at 1.14x. The four rows that a scan
-finds its own starts for — `[A-Za-z]+`, `[0-9]{2,4}`, `\w+\s+\w+`, `\p{L}+` —
-— the rows where a scan replaces the reverse sweep — are now the four
-furthest ahead of it. `\bthe\b` and `(\w+)@(\w+)` sit at
-parity and read either side of 1.00 from run to run, which is the size of the
-noise on these rows and worth remembering before reading anything into a 2%
-move. The engine is ahead of Rust's PikeVM on every row by a wide
-margin, which says only that it is a DFA and the PikeVM is not.
+All ten rows are at or below Rust's meta engine, the first time that has held
+across the set. The four rows that a scan finds its own starts for —
+`[A-Za-z]+`, `[0-9]{2,4}`, `\w+\s+\w+`, `\p{L}+`, the rows where a scan
+replaces the reverse sweep — are the four furthest ahead after `.*Holmes`. The
+three literal rows read 0.96x to 1.00x from run to run, which is the size of
+the noise on these rows and worth remembering before reading anything into a
+2% move. The engine is ahead of Rust's PikeVM on every row by a wide margin,
+which says only that it is a DFA and the PikeVM is not.
+
+On one tree, two passes of paired runs put `ec598185` at 0.86x to 0.97x of
+`10e922df` on every row, which is what took the Teddy row from 1.09x Rust to
+0.97x and `\bthe\b` from 1.09x to 0.94x with no change to either scan (log,
+2026-10-23).
 
 Against RE# itself, the engine this one ports, `tools/sharp-bench/run.sh`
 measured on 2026-09-06 (RE# under .NET in Release with server GC, warmed up so
@@ -79,10 +84,12 @@ its JIT and lazy DFA are filled before timing):
 | `\w+\s+\w+` | 2680700 | 2035792 | 1.32x |
 
 That measurement predates both the ordering fix and the class-run sweep, and
-the three losses were the dense-class rows. Two of them have since dropped far
-below the RE# column — `[0-9]{2,4}` to 64250 and `[A-Za-z]+` to 1613400 — so
-the port is ahead on nine of ten and the remaining loss is `\w+\s+\w+`. The
-RE# side has not been re-measured; it needs `dotnet` and the RE# checkout. RE# also pays 0.4 to 8.9 ms per pattern to
+the three losses were the dense-class rows. All three have since dropped far
+below the RE# column on the bench above — `[A-Za-z]+` to 1041302, `\p{L}+` to
+1260139, `\w+\s+\w+` to 1093568 — so the port is ahead of those RE# figures on
+all ten. That sets `run.sh` numbers against a `sharp-bench` measurement, so
+read it as a direction rather than a ratio. The RE# side has not been
+re-measured; it needs `dotnet` and the RE# checkout. RE# also pays 0.4 to 8.9 ms per pattern to
 construct at every process start; a folded Roc pattern pays nothing.
 
 ## The patterns
@@ -120,10 +127,10 @@ candidate. The literals are ordered longest-first at compile time so the first
 to verify at a position is the longest, which is what leftmost-longest needs.
 RE#'s own design has no literal-set accelerator (it skips to the eight
 capitals); this row is the one place the port added something the original
-lacks. 1.10x. What limits it is Teddy's per-window cost in Roc: fusing the
-verify into the scan through a closure was 70% slower, unrolling four windows
-was 130% slower from register spills, and the monomorphic fused scan that
-shipped bought 4%.
+lacks. 0.97x; it read 1.09-1.14x on `10e922df` with the same scan. Getting
+there by hand had not worked: fusing the verify into the scan through a closure
+was 70% slower, unrolling four windows was 130% slower from register spills,
+and the monomorphic fused scan that shipped bought 4%.
 
 **`[A-Za-z]+` and `\p{L}+`.** Neither has a literal, a skippable class or a
 bounded length, so no *forward* accelerator applies, and both record a possible
@@ -131,7 +138,7 @@ start at nearly every position (205101 starts for 40056 matches).
 
 Neither runs the reverse sweep any more. Both are `C+` with nothing after it,
 so `Runs` scans for the class, runs the end pass from each candidate and
-resumes at the match end. 0.65x and 0.73x.
+resumes at the match end. 0.47x and 0.61x.
 
 The remaining gap between them is what the class costs the scan. `[A-Za-z]+`
 holds no non-ASCII codepoint, so its scan may pass over a multibyte symbol and
@@ -146,7 +153,7 @@ and routing it there instead reads 1.16x, so `Runs` takes it.
 **`[0-9]{2,4}`.** The end pass is a length lookup (two fixed digits, then up to
 two more from the set) rather than a DFA walk, and the reverse pass is now the
 class-run sweep: a match can start exactly where two digits do, so the whole
-sweep is one scan for digit runs plus arithmetic. 0.60x.
+sweep is one scan for digit runs plus arithmetic. 0.55x.
 
 Getting there took three rounds and the middle one was the instructive part.
 The row was 1.75x, and the whole difference was the 9900 non-ASCII bytes —
@@ -163,12 +170,12 @@ what a sweep with no automaton in it does.
 leaving the kernel. Word-boundary checking is in the automaton: the prefix
 search lands in the state after `the` and the `\b` on each side is a
 lookaround resolved by the neighbouring symbol. The end pass is
-`FixedLength(3)`, 6 µs of a 200 µs row. 1.00x. The lesson of this row is that
-the SIMD kernel was never the cost: one pass over the haystack counting hits
-takes 22 µs, and re-entering it per hit cost ~16 ns a call. Filtering with
-three bytes cut the re-entries from 13473 to 2394.
+`FixedLength(3)`, which profiled at 6 µs of the row. 0.93x. The lesson of this
+row is that the SIMD kernel was never the cost: one pass over the haystack
+counting hits takes 22 µs, and re-entering it per hit cost ~16 ns a call.
+Filtering with three bytes cut the re-entries from 13473 to 2394.
 
-**`\w+\s+\w+`.** Was the widest row at 1.33x and is now 0.80x. It has no
+**`\w+\s+\w+`.** Was the widest row at 1.33x and is now 0.71x. It has no
 literal, no prefix accelerator and no skippable class, so for a long time it
 was the two-pass design undiluted: the sweep recorded 210198 starts for 21091
 matches, and decomposed into 491 µs of ASCII stepping, 259 µs of nullability
@@ -185,20 +192,22 @@ of its run; both cost it, and it still lands below Rust.
 **`(\w+)@(\w+)`.** The groups are plain groups here (no captures), and Rust's
 `find_iter` does not compute captures either, so both engines do the same
 work. Every match contains `@`, which is rare (1157 occurrences), so the sweep
-jumps from `@` to `@` and runs the automaton only around each. 0.97x. Short
+jumps from `@` to `@` and runs the automaton only around each. 0.91x. Short
 matches at low density make this the row most sensitive to per-candidate fixed
 cost, and it moved 1.29x to 0.97x mostly from removing work done once per
-candidate rather than per byte.
+candidate rather than per byte; the current compiler took it to 0.91x.
 
 **`.*Holmes`.** The sweep skips to `H`, verifies `Holmes`, then extends
 leftward through `.*`, where the state's skip set contains only `\n` and `H`,
-so that is another SIMD skip. 0.48x, the fastest row relative to Rust by a
+so that is another SIMD skip. 0.37x, the fastest row relative to Rust by a
 distance. I have not profiled why Rust is slow here; a leading `.*` defeats
 its prefix literal extraction, and it may be scanning forward from every line.
 
 ## What limits further gains
 
-In order of how much of the remaining gap each accounts for.
+In order of how much of the remaining gap each accounts for. The diagnoses
+below were made on `release-fast-10e922df` and have not been re-profiled since
+the compiler moved to `ec598185`.
 
 ### The two-pass design on dense matches
 
@@ -272,8 +281,9 @@ are unused. A no-op is not a null hypothesis for refcounting.
 
 Where it shows: the non-literal `find` path has ~560 ns of fixed cost on a
 300-byte haystack, and `package-http`, which parses HTTP/1.1 requests with this
-engine's `longest_end` and `find_all`, is 5.0x off Rust's `httparse` at 2074
-ns per request after everything else was fixed. Everything else was four
+engine's `longest_end` and `find_all`, is 4.3x off Rust's `httparse` at 1658
+ns per request on `ec598185` (5.0x and 2074 ns on `10e922df`) after
+everything else was fixed. Everything else was four
 per-call setups the 256 KB bench had hidden: a doubled literal (`\r\n\r\n`
 rewrites to `(\r\n){2}`) that lost its fixed length and so its literal
 override (787 to 63 ns), a recursive nullability walk run once per scan when a
@@ -366,37 +376,56 @@ and whether the fold completed. `tools/sharp-size/breakdown.sh` splits a binary
 into code and constant data against a baseline and sums the engine's own
 tables from their element counts.
 
-**A complete fold costs no measurable build time.** A build of a folded
-pattern is ~8.5 s and ~1.0 GB of compiler RSS, and a build whose pattern is
-compiled at run time is no faster; that is the compiler compiling the package.
-The one exception is a pattern whose state space depends on the input, such as
-`a(?=.*b)`: exploring it
-uncapped reached 13108 states at +10 s, +4.3 GB and +3.7 MB of binary, which
-is why the fold stops at 1024 states and the scan extends the table at run
-time past that.
+**Folding makes a build faster, not slower.** With `--no-cache` and
+`--opt=size`, an app holding one folded complete pattern builds in 2.5-5.1 s at
+about 460 MB of compiler RSS. The same app compiling its pattern at run time
+takes 28.7 s and 817 MB: the compiler then has to lower the whole pattern
+compiler — parser, derivatives, DFA construction — to native code, where a
+folded pattern lets all of it be dropped. The exception is a pattern whose
+state space depends on the input, such as `a(?=.*b)`: capped at 1024 states it
+builds in 11.9 s and 553 MB. Exploring it uncapped reached 13108 states at
++10 s, +4.3 GB and +3.7 MB of binary when measured on 2026-09-05, which is why
+the fold stops at 1024 states and the scan extends the table at run time past
+that.
 
-**Engine code is paid once, about 225 KB.** Every complete fold's code section
-is within about 5 KB of every other's. A pure literal is 332 KB below the
-baseline because the literal override never touches the automaton and the
-whole scanning path is eliminated. An incomplete fold keeps the derivative
-machinery, the arena constructors and the threaded scan: +611 KB of code.
+`probe.sh` prints 10-13 s and 600-700 MB for the same builds. Each probe app is
+new to roc's cache, and a first cached build pays for filling it: one app
+measured 9.4 s on its first cached build, 2.5 s with `--no-cache` and 2.1 s on
+its second cached build.
+
+**Engine code now varies by pattern.** Against `breakdown.sh`'s `a+` baseline,
+a class-run sweep, the code deltas run from -54 KB for `Holmes`, whose literal
+override never touches the automaton, and -50 KB for `[0-9]{2,4}`, to +78 KB
+for `\bthe\b`. The three run-scan rows are within 1 KB of the baseline and
+the other complete folds add 6-11 KB. An incomplete fold keeps the derivative
+machinery, the arena constructors and the threaded scan: +498 KB of code. When
+this was first measured, on 2026-09-05, every complete fold was within about
+5 KB of every other and the scanning engine was a fixed ~225 KB. Which paths
+the current compiler drops for which pattern has not been worked out:
+`[0-9]{2,4}` takes the same sweep as `a+` and is still 50 KB smaller.
 
 **Per-pattern data is the class trie, and Unicode dominates it.** After the
 trie's ids were narrowed to bytes and uniform blocks made to share one
 constant leaf, an ASCII pattern's trie is ~10 KB and a `\w` pattern's ~50 KB
 (down from 220 KB). Transition tables are 16-bit for complete folds and small:
-the largest here is the alternation at 30.8 KB across 69 states. Whole
-binaries: 409 KB for `Holmes`, 725 KB for `[A-Za-z]+`, 824 KB for `\bthe\b`,
-1.68 MB for the incomplete `a(?=.*b)`.
+the largest here is the alternation at 30.8 KB across 69 states.
 
-**A folded structure is stored at ~2.2x its data size.** The trie's `U32`
-elements appear once in `__TEXT,__const`, to the byte, and then a second time
-in `__DATA_CONST,__const`. A bare folded list of 50000 `U32` costs exactly 4
-bytes an element in one section, and wrapping it in records does not change
-that, so something about the larger structure triggers a second copy. It is a
-compiler question; reproducer in
-`upstream/2026-09-05-sharp-folded-constant-sections/`. About 200 KB per
-Unicode pattern is recoverable there, by upstream.
+**Whole binaries are mostly the platform.** basic-cli 0.26 added 1.9 MB to
+every binary: on one compiler at `--opt=size`, an empty 0.21 app is 390 KB and
+an empty 0.26 app 2.30 MB. Over that, the
+regex costs 18 KB for `Holmes`, 104 KB for `[A-Za-z]+`, 221 KB for `\bthe\b`
+and 752 KB for the incomplete `a(?=.*b)`.
+
+**A folded structure is stored once, at its data size.** On `84812227`
+(2026-09-07) it was stored at ~2.2x: the trie's elements appeared once in
+`__TEXT,__const` and a second time in `__DATA_CONST,__const`, while a bare
+folded list was stored once (reproducer in
+`upstream/2026-09-05-sharp-folded-constant-sections/`). With the current
+package the reproducer's `\w+` adds 41216 bytes to `__TEXT,__const` and none to
+`__DATA_CONST,__const`, against 41220 bytes of trie growth, on both `10e922df`
+and `ec598185`; across `breakdown.sh` the `\p{L}+` row's constant delta equals
+its trie delta to the byte. Whether the compiler or a package change removed
+the second copy was not isolated.
 
 **Dropping the trie's leaves entirely was tried and is 1.6x slower on
 non-ASCII text.** The cut points and per-atom minterms already are the
@@ -412,6 +441,7 @@ Each has a reproducer under `upstream/`. None was designed around.
   inside a helper in one loop corrupts the heap. Layout-dependent, deterministic
   under Guard Malloc. Every append in the scan loops is now inline.
 - `2026-09-05-sharp-folded-constant-sections`: the 2.2x artifact storage above.
+  Does not reproduce with the current package, on `10e922df` or `ec598185`.
 - `2026-09-05-sharp-debug-crashes`: two debug helpers (`show_rev`,
   `derive_chain_rev`) crash on a large lookaround pattern; `find_all` on the
   same pattern is fine.
