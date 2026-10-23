@@ -78,12 +78,12 @@ main! = |args| {
 	states = u32(List.len(e.st_node)) + List.len(e.st_flags) + List.len(e.st_nk) + u32(List.len(e.st_pend)) + 2 * List.len(e.st_minpend) + u32(List.len(e.node_state))
 	skips = List.len(e.skip_ok) + List.len(e.skip_lo)
 	# the codepoint-class trie, dominated by Unicode class data
-	trie = List.len(t.ascii) + 2 * List.len(t.l1) + List.len(t.leaves) + u64(List.len(t.set_tsets)) + u32(List.len(t.cuts)) + List.len(t.mt_of_atom)
+	trie = List.len(t.ascii) + 2 * List.len(t.leaf_idx) + List.len(t.leaves) + u64(List.len(t.set_tsets)) + u32(List.len(t.cuts)) + List.len(t.mt_of_atom)
 	# the interned node graph, including its hash index and refsets
 	nodes = u32(List.len(a.cells)) + u32(List.len(a.offs)) + List.len(a.flags) + u64(List.len(a.sub)) + u32(List.len(a.minl)) + u32(List.len(a.maxl)) + u32(List.len(a.pend))
 	index = u32(List.len(a.islots)) + u32(List.len(a.ient_key)) + u32(List.len(a.ient_len)) + u32(List.len(a.ient_id)) + u32(List.len(a.ikeys))
 	refs = u32(List.len(a.rs_data)) + u32(List.len(a.rs_off)) + u32(List.len(a.rs_len))
-	Stdout.line!("tables=\${tables.to_str()} states=\${states.to_str()} skips=\${skips.to_str()} trie=\${trie.to_str()} nodes=\${nodes.to_str()} index=\${index.to_str()} refs=\${refs.to_str()} n_states=\${Regex.n_states(rx).to_str()} n_nodes=\${Regex.n_nodes(rx).to_str()} nmt=\${e.nmt.to_str()} complete=\${if Regex.is_complete(rx) { "1" } else { "0" }} cs=\${cs.to_str()}")
+	Stdout.line!("tables=\${tables.to_str()} states=\${states.to_str()} skips=\${skips.to_str()} trie=\${trie.to_str()} nodes=\${nodes.to_str()} index=\${index.to_str()} refs=\${refs.to_str()} n_states=\${Regex.n_states(rx).to_str()} n_nodes=\${Regex.n_nodes(rx).to_str()} minterm_count=\${e.minterm_count.to_str()} complete=\${if Regex.is_complete(rx) { "1" } else { "0" }} cs=\${cs.to_str()}")
 }
 APP
 }
