@@ -1,11 +1,11 @@
 app [main!] {
-	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.21.0/4rAQg8kUYZ3Vksr4qMQHpaFYNiHSn9GgS7gVxghd1XYV.tar.zst",
+	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.26.0/GddgvsGjiNXrHFW6au5i5dUDbTs8FinQdrgE2Gqmw53t.tar.zst",
 	re: "../package/main.roc",
 }
 import pf.Stdout
 import pf.Path
 import pf.OsStr
-import pf.Utc
+import pf.Monotonic
 import re.Regex
 
 # KEEP PATTERNS IN SYNC with tools/bench/src/bench.rs and examples/bench.roc: same regexes,
@@ -59,11 +59,10 @@ run_all! = |pats, hay, i|
 	} else {
 		p = List.get(pats, i) ?? { id: "?", src: "" }
 		rx = Regex.build(p.src)
-		t0 = Utc.now!()
+		t0 = Monotonic.now!()
 		cs = time_loop(rx, hay, iters, 0)
-		t1 = Utc.now!()
-		delta = if t1 > t0 { t1 - t0 } else { 0 }
-		per = delta / iters.to_u128()
+		t1 = Monotonic.now!()
+		per = t1.since(t0).to_nanos() / iters
 		count = List.len(Regex.find_all(rx, hay))
 		# id,compile_ns(0=folded),match_ns_per_iter,match_count,checksum
 		Stdout.line!("${p.id},0,${per.to_str()},${count.to_str()},${cs.to_str()}")?

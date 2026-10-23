@@ -18,7 +18,7 @@ import os, random, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PKG = os.path.abspath(os.path.join(HERE, "..", "..", "package", "main.roc"))
-PLATFORM = "https://github.com/roc-lang/basic-cli/releases/download/0.21.0/4rAQg8kUYZ3Vksr4qMQHpaFYNiHSn9GgS7gVxghd1XYV.tar.zst"
+PLATFORM = "https://github.com/roc-lang/basic-cli/releases/download/0.26.0/GddgvsGjiNXrHFW6au5i5dUDbTs8FinQdrgE2Gqmw53t.tar.zst"
 
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 1500
 SEED = int(sys.argv[2]) if len(sys.argv) > 2 else 20260905

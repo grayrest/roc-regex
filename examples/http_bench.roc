@@ -6,13 +6,13 @@
 ## sums every piece's length plus the matched route's index, so a divergence in
 ## any piece changes it and the comparison is invalid.
 app [main!] {
-	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.21.0/4rAQg8kUYZ3Vksr4qMQHpaFYNiHSn9GgS7gVxghd1XYV.tar.zst",
+	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.26.0/GddgvsGjiNXrHFW6au5i5dUDbTs8FinQdrgE2Gqmw53t.tar.zst",
 	http: "../package-http/main.roc",
 }
 import pf.Stdout
 import pf.Path
 import pf.OsStr
-import pf.Utc
+import pf.Monotonic
 import http.Http
 import http.Route
 import http.Router
@@ -113,10 +113,10 @@ stage_name = |s| match s { 0 => "split", 1 => "frame", 2 => "route", _ => "heade
 
 run_stage! : U64, List(U8), List({ start : U64, end : U64 }) => Try({}, _)
 run_stage! = |stage, buf, reqs| {
-	t0 = Utc.now!()
+	t0 = Monotonic.now!()
 	cs = time_loop(stage, buf, reqs, iters, 0)
-	t1 = Utc.now!()
-	per = (if t1 > t0 { t1 - t0 } else { 0 }) / iters.to_u128()
+	t1 = Monotonic.now!()
+	per = t1.since(t0).to_nanos() / iters
 	Stdout.line!("roc_${stage_name(stage)},${per.to_str()},${List.len(reqs).to_str()},${cs.to_str()}")
 }
 

@@ -13,7 +13,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 ROOT="$(pwd)"
 PKG="${ROOT}/package/main.roc"
-PLATFORM='https://github.com/roc-lang/basic-cli/releases/download/0.21.0/4rAQg8kUYZ3Vksr4qMQHpaFYNiHSn9GgS7gVxghd1XYV.tar.zst'
+PLATFORM='https://github.com/roc-lang/basic-cli/releases/download/0.26.0/GddgvsGjiNXrHFW6au5i5dUDbTs8FinQdrgE2Gqmw53t.tar.zst'
 HAY="${1:?haystack file}"
 OPT="${2:-size}"
 TMP="$(mktemp -d)"
@@ -44,7 +44,7 @@ app [main!] {
 import pf.Stdout
 import pf.Path
 import pf.OsStr
-import pf.Utc
+import pf.Monotonic
 import re.Regex
 
 rx : Regex.Pattern
@@ -57,13 +57,13 @@ checksum : List(Regex.Span) -> U64
 checksum = |spans| List.fold(spans, 0, |acc, sp| acc + sp.start + sp.end)
 
 # min over iterations of one find_all, in ns (noise only inflates a run)
-time_min! : List(U8), U64, U128, U64 => (U128, U64)
+time_min! : List(U8), U64, U64, U64 => (U64, U64)
 time_min! = |hay, n, best, cs|
 	if n == 0 { (best, cs) } else {
-		t0 = Utc.now!()
+		t0 = Monotonic.now!()
 		c = checksum(Regex.find_all(rx, hay))
-		t1 = Utc.now!()
-		d = if t1 > t0 { t1 - t0 } else { 0 }
+		t1 = Monotonic.now!()
+		d = t1.since(t0).to_nanos()
 		time_min!(hay, n - 1, if d < best { d } else { best }, cs + c)
 	}
 

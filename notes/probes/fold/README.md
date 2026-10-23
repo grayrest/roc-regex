@@ -1,7 +1,8 @@
 # Fold probes
 
 Rigs for [`../../2026-09-01-fold-probe-log.md`](../../2026-09-01-fold-probe-log.md).
-Each is a standalone app on basic-cli 0.21.0. Run a cold fold with
+Each is a standalone app on basic-cli 0.26.0 (the log's figures were taken
+when they targeted 0.21.0). Run a cold fold with
 
 ```bash
 roc build --no-cache <rig>.roc
