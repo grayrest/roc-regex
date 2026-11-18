@@ -129,7 +129,7 @@ Rev := [].{
                     # the outermost-anchor constraints ride on the forward D only
                     match det(c.rprog, c.rsplits, True) {
                         Err(_) => Err(TooBig)
-                        Ok(rev) => Ok({ fwd: { ..fwd0, eoi_only: c.accept_eoi_only, anchored: c.anchored_start, inline_start: c.inline_start }, rev, averify, inner })
+                        Ok(rev_d) => Ok({ fwd: { ..fwd0, eoi_only: c.accept_eoi_only, anchored: c.anchored_start, inline_start: c.inline_start }, rev: rev_d, averify, inner })
                     }
             }
         }
@@ -186,8 +186,8 @@ Rev := [].{
 
     ## is_match via the forward DFA (any match-state reachable).
     is_match : Rev.D, Trie.T, List(U8) -> Bool
-    is_match = |fwd, classes, hay|
-        match Rev.run_fwd(fwd, classes, hay) {
+    is_match = |fwd_d, classes, hay|
+        match Rev.run_fwd(fwd_d, classes, hay) {
             Ok(_) => True
             Err(_) => False
         }

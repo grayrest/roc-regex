@@ -14,7 +14,7 @@ import json, os, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PKG = os.path.abspath(os.path.join(HERE, "..", "..", "package", "main.roc"))
-PLATFORM = "https://github.com/roc-lang/basic-cli/releases/download/0.26.0/GddgvsGjiNXrHFW6au5i5dUDbTs8FinQdrgE2Gqmw53t.tar.zst"
+PLATFORM = "https://github.com/roc-lang/basic-cli/releases/download/0.28.1/7brgwR8YUqfeGrkdfF1V4GPPN7DnP7ftqub9KcrTEZtr.tar.zst"
 HARNESS = os.path.join(HERE, "ResharpDiff", "bin", "Release", "net10.0", "ResharpDiff.dll")
 
 PATS = [

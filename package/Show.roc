@@ -67,7 +67,7 @@ Show := [].{
         } else if TSet.is_empty(s) {
             "⊥"
         } else {
-            ranges = Show.ranges(t, s)
+            pos_ranges = Show.ranges(t, s)
             neg_ranges = Show.ranges(t, TSet.compl(s, a.minterm_count).bitwise_and(TSet.compl(TSet.bit(t.invalid), a.minterm_count)))
             if s == TSet.bit(t.invalid) {
                 # the Invalid symbol (no RE# notation exists; `\i` is ours)
@@ -78,13 +78,13 @@ Show := [].{
             } else if neg_ranges == [{ lo: 10, hi: 10 }] and !TSet.contains(s, t.invalid) {
                 "."
             } else {
-                match ranges {
+                match pos_ranges {
                     [r] if r.lo == r.hi => Show.cp(r.lo)
                     _ =>
-                        if List.len(neg_ranges) < List.len(ranges) and !TSet.contains(s, t.invalid) {
+                        if List.len(neg_ranges) < List.len(pos_ranges) and !TSet.contains(s, t.invalid) {
                             "[^${Show.class_body(neg_ranges)}]"
                         } else {
-                            "[${Show.class_body(ranges)}]"
+                            "[${Show.class_body(pos_ranges)}]"
                         }
                 }
             }

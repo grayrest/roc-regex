@@ -15,9 +15,9 @@ Conv := [].{
 
     ## the compiled alphabet: the pattern's sets (as collected) and their tsets,
     ## plus the `\w` and `\s` tsets for the word-border heuristic
-    Ctx : { sets : List(Ast.Set), tsets : List(U64), wordc : U64, spacec : U64 }
+    Ctx : { sets : List(Ast.ClassSet), tsets : List(U64), wordc : U64, spacec : U64 }
 
-    tset_of : Conv.Ctx, Ast.Set -> U64
+    tset_of : Conv.Ctx, Ast.ClassSet -> U64
     tset_of = |ctx, cs|
         match List.find_first_index(ctx.sets, |s| s == cs) {
             Ok(i) => List.get(ctx.tsets, i) ?? 0
@@ -155,7 +155,7 @@ Conv := [].{
 
     # RE#'s `inferSet` heuristic for a class: no whitespace -> word; no word
     # characters -> non-word; otherwise unknown. Single codepoints are exact.
-    set_kind : Conv.Ctx, Ast.Set -> Conv.Kind
+    set_kind : Conv.Ctx, Ast.ClassSet -> Conv.Kind
     set_kind = |ctx, cs| {
         single =
             match cs.ranges {

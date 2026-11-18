@@ -59,11 +59,11 @@ Regex := [].{
         Regex.compile_ast(src, ast)
     }
 
-    nl_set : Ast.Set
+    nl_set : Ast.ClassSet
     nl_set = { neg: False, ranges: [{ lo: 10, hi: 10 }] }
-    w_set : Ast.Set
+    w_set : Ast.ClassSet
     w_set = { neg: False, ranges: Ast.ranges_w }
-    s_set : Ast.Set
+    s_set : Ast.ClassSet
     s_set = { neg: False, ranges: Ast.ranges_s }
 
     ## The converter records an unsupported construct in an arena FIELD rather

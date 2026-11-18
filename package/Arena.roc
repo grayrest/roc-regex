@@ -145,7 +145,7 @@ Arena := [].{
     ## An arena over `minterm_count` minterms with the seven fixed nodes registered.
     init : U32 -> Arena.A
     init = |minterm_count| {
-        full = if minterm_count >= 64 { 0xFFFF_FFFF_FFFF_FFFF } else { 1.U64.shl_wrap(minterm_count.to_u8_wrap()) - 1 }
+        full_mask = if minterm_count >= 64 { 0xFFFF_FFFF_FFFF_FFFF } else { 1.U64.shl_wrap(minterm_count.to_u8_wrap()) - 1 }
         a_empty = {
             cells: [], offs: [], flags: [], sub: [], minl: [], maxl: [], pend: [],
             islots: List.repeat(0.U32, 64), ient_key: [], ient_len: [], ient_id: [], ikeys: [],
@@ -157,12 +157,12 @@ Arena := [].{
         nullable = Arena.f_can_null.bitwise_or(Arena.f_always_null)
         anchor_flags = Arena.f_anchor.bitwise_or(Arena.f_can_null)
         r_bot = Arena.register(a_empty, Arena.key_singleton(0), { flags: 0, sub: 0, minl: 1, maxl: 1, pend: 0 })
-        r_eps = Arena.register(r_bot.a, Arena.key_loop(Arena.bot, 0, Arena.inf), { flags: nullable, sub: full, minl: 0, maxl: 0, pend: 0 })
-        r_top = Arena.register(r_eps.a, Arena.key_singleton(full), { flags: 0, sub: full, minl: 1, maxl: 1, pend: 0 })
-        r_top_star = Arena.register(r_top.a, Arena.key_loop(Arena.top, 0, Arena.inf), { flags: nullable, sub: full, minl: 0, maxl: Arena.none, pend: 0 })
-        r_top_plus = Arena.register(r_top_star.a, Arena.key_loop(Arena.top, 1, Arena.inf), { flags: 0, sub: full, minl: 1, maxl: Arena.none, pend: 0 })
-        r_end_anchor = Arena.register(r_top_plus.a, [Arena.k_end], { flags: anchor_flags, sub: full, minl: 0, maxl: 0, pend: 0 })
-        r_begin_anchor = Arena.register(r_end_anchor.a, [Arena.k_begin], { flags: anchor_flags, sub: full, minl: 0, maxl: 0, pend: 0 })
+        r_eps = Arena.register(r_bot.a, Arena.key_loop(Arena.bot, 0, Arena.inf), { flags: nullable, sub: full_mask, minl: 0, maxl: 0, pend: 0 })
+        r_top = Arena.register(r_eps.a, Arena.key_singleton(full_mask), { flags: 0, sub: full_mask, minl: 1, maxl: 1, pend: 0 })
+        r_top_star = Arena.register(r_top.a, Arena.key_loop(Arena.top, 0, Arena.inf), { flags: nullable, sub: full_mask, minl: 0, maxl: Arena.none, pend: 0 })
+        r_top_plus = Arena.register(r_top_star.a, Arena.key_loop(Arena.top, 1, Arena.inf), { flags: 0, sub: full_mask, minl: 1, maxl: Arena.none, pend: 0 })
+        r_end_anchor = Arena.register(r_top_plus.a, [Arena.k_end], { flags: anchor_flags, sub: full_mask, minl: 0, maxl: 0, pend: 0 })
+        r_begin_anchor = Arena.register(r_end_anchor.a, [Arena.k_begin], { flags: anchor_flags, sub: full_mask, minl: 0, maxl: 0, pend: 0 })
         # refset 0 = empty, 1 = {(0,0)}
         a_ready = { ..r_begin_anchor.a, rs_off: [0, 0], rs_len: [0, 1], rs_data: [0] }
         a_ready
@@ -176,10 +176,10 @@ Arena := [].{
     register : Arena.A, List(U32), Arena.Info -> Arena.R
     register = |a, key, info| {
         id = (List.len(a.offs)).to_u32_wrap()
-        off = (List.len(a.cells)).to_u32_wrap()
+        cell_off = (List.len(a.cells)).to_u32_wrap()
         a1 = { ..a,
             cells: List.concat(a.cells, key),
-            offs: List.append(a.offs, off),
+            offs: List.append(a.offs, cell_off),
             flags: List.append(a.flags, info.flags),
             sub: List.append(a.sub, info.sub),
             minl: List.append(a.minl, info.minl),
@@ -218,7 +218,7 @@ Arena := [].{
     key_not = |x| [Arena.k_not, x]
 
     key_look : Bool, U32, U32, U32 -> List(U32)
-    key_look = |back, body, rel, pend| [if back { Arena.k_lookbehind } else { Arena.k_lookahead }, body, rel, pend]
+    key_look = |back, body, rel, pending| [if back { Arena.k_lookbehind } else { Arena.k_lookahead }, body, rel, pending]
 
     # --- accessors -------------------------------------------------------------
 

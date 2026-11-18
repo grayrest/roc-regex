@@ -18,7 +18,7 @@ import os, random, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PKG = os.path.abspath(os.path.join(HERE, "..", "..", "package", "main.roc"))
-PLATFORM = "https://github.com/roc-lang/basic-cli/releases/download/0.26.0/GddgvsGjiNXrHFW6au5i5dUDbTs8FinQdrgE2Gqmw53t.tar.zst"
+PLATFORM = "https://github.com/roc-lang/basic-cli/releases/download/0.28.1/7brgwR8YUqfeGrkdfF1V4GPPN7DnP7ftqub9KcrTEZtr.tar.zst"
 
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 1500
 SEED = int(sys.argv[2]) if len(sys.argv) > 2 else 20260905
@@ -146,9 +146,13 @@ if RESHARP:
             row.append('"-"' if w is None else '"' + w + '"')
         print("\t[" + ", ".join(row) + "],")
     print("]\n")
-if not RESHARP:
-    print("wants : List(List(Str))")
-    print("wants = []\n")
+# the mode is known here, so the runner gets one fold rather than a branch the
+# compiler would flag as constant
+FOLD = (
+    "List.fold_with_index(pats, { rejected: 0, incomplete: 0, cases: 0, fails: [], known: [] }, |acc, p, i| run_resharp(Str.concat(p, filler), List.get(wants, i) ?? [], acc))"
+    if RESHARP else
+    "List.fold(pats, { rejected: 0, incomplete: 0, cases: 0, fails: [], known: [] }, |acc, p| run(Str.concat(p, filler), acc))"
+)
 print(r'''spans : List(Regex.Span) -> Str
 spans = |sp| sp |> List.map(|s| "${s.start.to_str()}-${s.end.to_str()}") |> Str.join_with(",")
 
@@ -235,9 +239,9 @@ run_resharp = |pat, ws, o|
 
 main! = |args| {
 	filler = if List.len(args) > 99 { "x" } else { "" }
-	o = List.fold_with_index(pats, { rejected: 0, incomplete: 0, cases: 0, fails: [], known: [] }, |acc, p, i| if List.is_empty(wants) { run(Str.concat(p, filler), acc) } else { run_resharp(Str.concat(p, filler), List.get(wants, i) ?? [], acc) })
+	o = @FOLD@
 	Stdout.line!(Str.join_with(List.take_first(o.fails, 40), "\n"))?
 	if List.is_empty(o.known) { {} } else { Stdout.line!("RE# bugs (reference agrees with sharp):\n${Str.join_with(o.known, "\n")}")? }
 	Stdout.line!("patterns=${List.len(pats).to_str()} rejected=${o.rejected.to_str()} incomplete=${o.incomplete.to_str()} cases=${o.cases.to_str()} divergences=${List.len(o.fails).to_str()} resharp_bugs=${List.len(o.known).to_str()}")
 }
-''')
+'''.replace("@FOLD@", FOLD))

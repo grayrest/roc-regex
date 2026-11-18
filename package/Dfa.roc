@@ -262,7 +262,7 @@ Dfa := [].{
             rs = if has_pend { Arena.rs_intern(a, pairs) } else { { a, id: Arena.rs_empty } }
             pend = rs.id
             minpend = match List.first(pairs) { Ok(p) => Arena.pair_start(p), Err(_) => 0 }
-            null_kind =
+            state_nk =
                 if !always { Dfa.nk_notnull }
                 else if !has_pend { Dfa.nk_current }
                 else if pairs == [Arena.pack(1, 1)] { Dfa.nk_prev }
@@ -272,7 +272,7 @@ Dfa := [].{
                 a: rs.a,
                 st_node: List.append(e.st_node, node),
                 st_flags: List.append(e.st_flags, flags_pending),
-                st_nk: List.append(e.st_nk, null_kind),
+                st_nk: List.append(e.st_nk, state_nk),
                 st_pend: List.append(e.st_pend, pend),
                 st_minpend: List.append(e.st_minpend, minpend.to_u16_wrap()),
                 node_state: List.set(padded_node_state, node.to_u64(), id) ?? padded_node_state,

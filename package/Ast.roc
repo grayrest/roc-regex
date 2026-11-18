@@ -707,9 +707,9 @@ Ast := [
 
     ## Every distinct character set in the pattern, in first-appearance order.
     ## The converter finds a `Chars` node's tset by looking its set up here.
-    Set : { neg : Bool, ranges : List(Ast.Rng) }
+    ClassSet : { neg : Bool, ranges : List(Ast.Rng) }
 
-    collect_sets : Ast, List(Ast.Set) -> List(Ast.Set)
+    collect_sets : Ast, List(Ast.ClassSet) -> List(Ast.ClassSet)
     collect_sets = |ast, acc|
         match ast {
             Chars(cs) => Ast.add_set(acc, cs)
@@ -723,11 +723,11 @@ Ast := [
             _ => acc
         }
 
-    add_set : List(Ast.Set), Ast.Set -> List(Ast.Set)
+    add_set : List(Ast.ClassSet), Ast.ClassSet -> List(Ast.ClassSet)
     add_set = |acc, cs| if List.contains(acc, cs) { acc } else { List.append(acc, cs) }
 
     ## flatten sets to the Trie's `[neg, count, lo, hi, ...]` table
-    flat_sets : List(Ast.Set) -> List(U32)
+    flat_sets : List(Ast.ClassSet) -> List(U32)
     flat_sets = |sets|
         List.fold(sets, [], |acc, cs| {
             negw = if cs.neg { 1 } else { 0 }

@@ -19,7 +19,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 ROOT="$(pwd)"
 PKG="${ROOT}/package-dfa/main.roc"
-PLATFORM='https://github.com/roc-lang/basic-cli/releases/download/0.26.0/GddgvsGjiNXrHFW6au5i5dUDbTs8FinQdrgE2Gqmw53t.tar.zst'
+PLATFORM='https://github.com/roc-lang/basic-cli/releases/download/0.28.1/7brgwR8YUqfeGrkdfF1V4GPPN7DnP7ftqub9KcrTEZtr.tar.zst'
 OPT="${1:-size}"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT

@@ -21,7 +21,7 @@ Bset := [].{
                 acc
             } else {
                 i = b.bitwise_and(15).to_u64()
-                bit = 1.shl_wrap(b.shr_zf_wrap(4))
+                bit = 1.U8.shl_wrap(b.shr_zf_wrap(4))
                 List.set(acc, i, (List.get(acc, i) ?? 0).bitwise_or(bit)) ?? acc
             })
 
